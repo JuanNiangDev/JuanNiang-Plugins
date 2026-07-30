@@ -1,4 +1,6 @@
 {
-  "total": 0,
-  "chunks": null
+  "total": 7,
+  "chunks": [
+    "chunk_1.json"
+  ]
 }
