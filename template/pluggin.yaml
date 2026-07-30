@@ -1,0 +1,9 @@
+name: "{{.Name}}"
+version: "1.0.0"
+author: "{{.Author}}"
+description: "{{.Description}}"
+entry: "main.lua"
+permissions:
+  - onebot11
+system: false
+enabled: true
