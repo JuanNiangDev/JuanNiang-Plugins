@@ -1,0 +1,51 @@
+[
+  {
+    "name": "checkin",
+    "version": "1.0.0",
+    "author": "JuanNiang-Neo",
+    "description": "签到插件，提供 /qd 签到 和 /rank 排名功能",
+    "path": "checkin"
+  },
+  {
+    "name": "Cron 示例插件",
+    "version": "1.0.0",
+    "author": "JuanNiang",
+    "description": "示例插件：通过 CronJob 定时触发，向 Payload 中指定的 QQ 号发送消息",
+    "path": "cron-example"
+  },
+  {
+    "name": "ping",
+    "version": "1.1.0",
+    "author": "JuanNiang",
+    "description": "Ping 插件示例，使用 jn SDK 注册 /ping 命令",
+    "path": "ping"
+  },
+  {
+    "name": "system",
+    "version": "1.0.0",
+    "author": "JuanNiang-Neo",
+    "description": "系统插件，封装 Agent/Provider/MCP/Tool/T2I/Sandbox/Session 管理命令",
+    "path": "system"
+  },
+  {
+    "name": "入群欢迎",
+    "version": "1.0.0",
+    "author": "JuanNiang",
+    "description": "监听群成员增加事件，发送个性化欢迎语",
+    "path": "welcome"
+  },
+  {
+    "name": "富文本图片示例",
+    "version": "1.0.0",
+    "author": "JuanNiang",
+    "description": "演示使用消息段发送带图片的富文本消息，注册 /rich 命令",
+    "path": "rich-demo"
+  },
+  {
+    "name": "戳一戳回复",
+    "version": "1.0.0",
+    "author": "JuanNiang",
+    "description": "监听戳一戳事件，回复消息",
+    "path": "poke-reply"
+  }
+]
