@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,15 +37,23 @@ type PluginsIndex struct {
 	Chunks []string `json:"chunks"`
 }
 
-func cmdScan(args []string) {
+var scanCmd = &cobra.Command{
+	Use:   "scan",
+	Short: "扫描插件并更新元数据",
+	Long:  "遍历 plugins/ 目录，读取所有 pluggin.yaml，生成分片元数据到 metadata/ 目录并更新 plugins.json 索引。",
+	Args:  cobra.NoArgs,
+	RunE:  runScan,
+}
+
+func runScan(cmd *cobra.Command, args []string) error {
 	pDir := pluginsDir()
 	mDir := metadataDir()
 	os.MkdirAll(mDir, 0755)
 
-	fmt.Println("🔍 正在扫描插件仓库...")
+	fmt.Println(color.CyanString("🔍 正在扫描插件仓库..."))
 
 	var entries []PluginEntry
-	filepath.Walk(pDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(pDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || !info.IsDir() || path == pDir {
 			return nil
 		}
@@ -68,9 +78,12 @@ func cmdScan(args []string) {
 			}
 		}
 		entries = append(entries, e)
-		fmt.Printf("   ✓ %s (%s)\n", filepath.Base(path), m.Version)
+		fmt.Printf("   %s %s (%s)\n", color.GreenString("✓"), color.CyanString(filepath.Base(path)), m.Version)
 		return filepath.SkipDir
 	})
+	if err != nil {
+		return fmt.Errorf("扫描失败: %w", err)
+	}
 
 	sort.Slice(entries, func(i, j int) bool {
 		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
@@ -94,5 +107,8 @@ func cmdScan(args []string) {
 	idxData, _ := json.MarshalIndent(idx, "", "  ")
 	os.WriteFile(filepath.Join(repoRoot(), "plugins.json"), idxData, 0644)
 
-	fmt.Printf("\n✅ 扫描完成!\n   📊 %d 个插件, %d 个分片\n", len(entries), chunks)
+	fmt.Println()
+	fmt.Println(color.GreenString("✅ 扫描完成!"))
+	fmt.Printf("   📊 %d 个插件, %d 个分片\n", len(entries), chunks)
+	return nil
 }

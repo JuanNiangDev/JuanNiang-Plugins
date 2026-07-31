@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
 )
 
 type PluginMeta struct {
@@ -15,23 +18,27 @@ type PluginMeta struct {
 	Description string
 }
 
-func cmdInit(args []string) {
-	if len(args) < 1 {
-		fmt.Println("❌ 用法: hago init <插件名>")
-		os.Exit(1)
-	}
+var initCmd = &cobra.Command{
+	Use:   "init <name>",
+	Short: "创建一个新的 JuanNiang 插件",
+	Long:  "交互式创建新的 JuanNiang 插件，自动生成 pluggin.yaml、main.lua 和 jn.lua SDK。",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runInit,
+}
+
+func runInit(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Print("📝 作者名 (默认: anonymous): ")
+	fmt.Print(color.CyanString("📝 作者名 (默认: anonymous): "))
 	author, _ := reader.ReadString('\n')
 	author = strings.TrimSpace(author)
 	if author == "" {
 		author = "anonymous"
 	}
 
-	fmt.Print("📝 插件简介: ")
+	fmt.Print(color.CyanString("📝 插件简介: "))
 	desc, _ := reader.ReadString('\n')
 	desc = strings.TrimSpace(desc)
 	if desc == "" {
@@ -42,34 +49,30 @@ func cmdInit(args []string) {
 
 	targetDir := filepath.Join(pluginsDir(), name)
 	if _, err := os.Stat(targetDir); err == nil {
-		fmt.Printf("❌ 插件目录已存在: %s\n", targetDir)
-		os.Exit(1)
+		return fmt.Errorf("插件目录已存在: %s", targetDir)
 	}
 
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		fmt.Printf("❌ 创建目录失败: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("创建目录失败: %w", err)
 	}
 
 	files := []string{"pluggin.yaml", "main.lua"}
 	for _, f := range files {
 		tmpl, err := template.ParseFiles(filepath.Join(templateDir(), f))
 		if err != nil {
-			fmt.Printf("❌ 读取模板失败 %s: %v\n", f, err)
-			os.Exit(1)
+			return fmt.Errorf("读取模板失败 %s: %w", f, err)
 		}
 		out, err := os.Create(filepath.Join(targetDir, f))
 		if err != nil {
-			fmt.Printf("❌ 创建文件失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("创建文件失败: %w", err)
 		}
 		defer out.Close()
 		if err := tmpl.Execute(out, meta); err != nil {
-			fmt.Printf("❌ 渲染失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("渲染失败: %w", err)
 		}
 	}
 
+	// 复制 SDK 文件
 	sdkSrc := filepath.Join(sdkDir(), "jn.lua")
 	sdkDst := filepath.Join(targetDir, "jn.lua")
 	sdkData, err := os.ReadFile(sdkSrc)
@@ -78,11 +81,14 @@ func cmdInit(args []string) {
 	}
 
 	fmt.Println()
-	fmt.Printf("✅ 插件创建成功!\n")
-	fmt.Printf("   📁 %s\n", targetDir)
-	fmt.Printf("   📄 pluggin.yaml, main.lua")
+	fmt.Println(color.GreenString("✅ 插件创建成功!"))
+	fmt.Printf("   📁 %s\n", color.CyanString(targetDir))
+	fmt.Print("   📄 pluggin.yaml, main.lua")
 	if _, err := os.Stat(sdkDst); err == nil {
-		fmt.Printf(", jn.lua (SDK)")
+		fmt.Print(", jn.lua (SDK)")
 	}
-	fmt.Printf("\n\n   放入 JuanNiang-Neo 的 data/pluggins/ 即可加载。\n")
+	fmt.Println()
+	fmt.Println()
+	fmt.Printf("   放入 JuanNiang-Neo 的 %s 即可加载。\n", color.YellowString("data/pluggins/"))
+	return nil
 }

@@ -7,33 +7,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
 )
 
-func cmdPack(args []string) {
-	if len(args) < 1 {
-		fmt.Println("❌ 用法: hago pack <插件名>")
-		os.Exit(1)
-	}
+var packCmd = &cobra.Command{
+	Use:   "pack <name>",
+	Short: "将插件打包为 .zip",
+	Long:  "将指定插件目录打包为 .zip 文件，方便分发和上传。",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runPack,
+}
+
+func runPack(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
 	srcDir := filepath.Join(pluginsDir(), name)
 	if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-		fmt.Printf("❌ 插件目录不存在: %s\n", srcDir)
-		os.Exit(1)
+		return fmt.Errorf("插件目录不存在: %s", srcDir)
 	}
 
 	zipPath := filepath.Join(pluginsDir(), name+".zip")
 	zipFile, err := os.Create(zipPath)
 	if err != nil {
-		fmt.Printf("❌ 创建 ZIP 失败: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("创建 ZIP 失败: %w", err)
 	}
 	defer zipFile.Close()
 
 	zw := zip.NewWriter(zipFile)
 	defer zw.Close()
 
-	fmt.Printf("📦 正在打包 %s ...\n", name)
+	fmt.Printf("📦 正在打包 %s ...\n", color.CyanString(name))
 
 	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
@@ -56,10 +61,12 @@ func cmdPack(args []string) {
 		return nil
 	})
 	if err != nil {
-		fmt.Printf("❌ 打包失败: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("打包失败: %w", err)
 	}
 
 	info, _ := os.Stat(zipPath)
-	fmt.Printf("\n✅ 打包完成!\n   📦 %s (%.1f KB)\n", zipPath, float64(info.Size())/1024)
+	fmt.Println()
+	fmt.Println(color.GreenString("✅ 打包完成!"))
+	fmt.Printf("   📦 %s (%.1f KB)\n", color.CyanString(zipPath), float64(info.Size())/1024)
+	return nil
 }
