@@ -33,6 +33,8 @@ local REPLIES = {
     join = "扫描下方二维码，进入“青春邮约”，选择红岩网校工作站，让redrocker成为你最骄傲的自称吧~~",
     achievement = "嘿嘿，红岩网校的成果有这些：“重邮帮”小程序，“重邮小帮手”公众号，“掌上重邮”APP，美育学分管理系统，H5页面……",
     location = "太极运动场西3号门和西4号门都可以进入，具体可以到达西3号门查看楼内地图噢",
+    freshman = "新生导航：https://gis.cqupt.edu.cn/",
+    fun = "趣味功能：戳一戳 猜单词 运行代码",
 }
 
 -- ====================================================================
@@ -48,7 +50,7 @@ local RULES = {
     -- 子部门/部门
     { keywords = { "android", "安卓", "android开发", "安卓开发" }, reply = REPLIES.android },
     { keywords = { "ios", "ios开发" },                      reply = REPLIES.ios },
-    { keywords = { "ai", "人工智能", "人工智能开发与应用部" }, reply = REPLIES.ai },
+    { keywords = { "ai", "人工智能", "人工智能开发与应用部", "人工智能开发及应用部" }, reply = REPLIES.ai },
     { keywords = { "前端", "前端研发部" },                   reply = REPLIES.frontend },
     { keywords = { "后端", "后端研发部" },                   reply = REPLIES.backend },
     { keywords = { "产品", "产品策划", "产品策划及运营部" },    reply = REPLIES.product },
@@ -75,6 +77,12 @@ local RULES = {
     { keywords = { "招新", "宣讲会", "招新宣讲会" },          reply = REPLIES.recruit },
     { keywords = { "成果", "成就" },                         reply = REPLIES.achievement },
 
+    -- 新生导航
+    { keywords = { "新生导航", "导航" },                       reply = REPLIES.freshman },
+
+    -- 趣味功能
+    { keywords = { "趣味功能", "有哪些功能", "有什么功能", "功能" }, reply = REPLIES.fun },
+
     -- 红岩兜底
     { keywords = { "红岩", "网校", "redrock", "红岩网校", "红岩网校工作站" },
         reply = REPLIES.redrock },
@@ -83,6 +91,7 @@ local RULES = {
 -- 尾部语气词/标点/问法后缀（完全匹配前剥离，最长优先）
 local SUFFIXES = {
     "是干什么的", "是做什么的", "是什么", "怎么样", "如何", "什么",
+    "介绍",
     "吗", "呢", "啊", "吧", "么", "的", "了",
     "？", "?", "！", "!", "。", "～", "~", "…",
 }
@@ -249,5 +258,33 @@ function on_message(event)
 
     return false, nil
 end
+
+-- ====================================================================
+-- 命令: /redrock —— 查看提问清单
+-- ====================================================================
+jn.command.register("redrock", function(args, event)
+    local text = [[有问题就找卷娘吧！试试问我如下问题吧：
+记得先@我哦 格式【@卷娘＋关键词】
+【提问清单】
+红岩网校介绍
+产品策划及运营部介绍
+视觉设计部介绍
+前端介绍
+后端介绍
+移动开发部介绍
+运维安全部介绍
+人工智能开发及应用部介绍
+在红岩网校能学到什么
+如何加入红岩网校
+红岩网校成果
+红岩网校在哪里
+新生导航
+趣味功能]]
+    reply(event, text)
+    return true
+end, {
+    description = "查看红岩网校问答清单",
+    usage = "/redrock",
+})
 
 jn.log.info("[redrock_faq] 关键词问答插件已加载")
