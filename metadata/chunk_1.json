@@ -84,10 +84,17 @@
     "path": "system"
   },
   {
+    "name": "t2i-example",
+    "version": "1.0.0",
+    "author": "JuanNiang",
+    "description": "T2I 文生图示例插件",
+    "path": "t2i-example"
+  },
+  {
     "name": "webhook-example",
     "version": "1.0.0",
     "author": "JuanNiang",
-    "description": "Webhook 示例插件：接收 HTTP 回调并转发到群",
+    "description": "Webhook 示例插件：处理 GitHub/告警/钉钉等外部推送，转发到 QQ 群",
     "path": "webhook-example"
   },
   {
