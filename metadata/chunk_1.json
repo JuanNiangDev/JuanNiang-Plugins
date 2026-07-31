@@ -35,6 +35,13 @@
     "path": "redrock_code"
   },
   {
+    "name": "redrock_faq",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "红岩网校招新群关键词问答插件",
+    "path": "redrock_faq"
+  },
+  {
     "name": "redrock_welcome",
     "version": "1.0.0",
     "author": "Redrock",
