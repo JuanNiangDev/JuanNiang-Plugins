@@ -30,9 +30,9 @@ local REPLIES = {
     ai = "人工智能开发与应用部是红岩网校的新兴部门，主攻AI应用落地，具有广阔的发展前景。",
     study = "扎实的技术，互联网前沿知识，独一无二的项目经验，志同道合的朋友，都在红岩网校等着你呢！快来提升你的自学能力和沟通能力，强化你的自驱和自制力吧！",
     recruit = "网校的招新活动已经开始火热筹备！届时会开设招新宣讲会，帮助你进一步的了解红岩网校。会上我们还准备了精美的礼品等你来拿，时刻关注群消息，一定不要错过哦！",
-    join = "扫描下方二维码，进入“青春邮约”，选择红岩网校工作站，让redrocker成为你最骄傲的自称吧~~",
-    achievement = "嘿嘿，红岩网校的成果有这些：“重邮帮”小程序，“重邮小帮手”公众号，“掌上重邮”APP，美育学分管理系统，H5页面……",
-    location = "太极运动场西3号门和西4号门都可以进入，具体可以到达西3号门查看楼内地图噢",
+    join = [[扫描下方二维码，进入"青春邮约"，选择红岩网校工作站，让redrocker成为你最骄傲的自称吧~~]],
+    achievement = [[嘿嘿，红岩网校的成果有这些："重邮帮"小程序，"重邮小帮手"公众号，"掌上重邮"APP，美育学分管理系统，H5页面……]],
+    location = [[太极运动场西3号门和西4号门都可以进入，具体可以到达西3号门查看楼内地图噢]],
     freshman = "新生导航：https://gis.cqupt.edu.cn/",
     fun = "被你发现啦！试试玩游戏吧！\n【清单】\n戳一戳\n猜单词: /猜单词\n运行代码: /code",
     daily = "卷娘今天也在努力回答邮子们的问题呢！给自己加鸡腿~",
@@ -225,34 +225,134 @@ local function reply(event, text, image)
     end
 end
 
+-- 私聊已打招呼的用户集合（避免重复发引导）
+local greeted = {}
+
 -- ====================================================================
--- on_message: 关键词问答
+-- on_message: 关键词问答 + 私聊引导 + 数字菜单
 -- ====================================================================
 function on_message(event)
     local raw = (event.raw_message or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if raw == "" then return false, nil end
 
-    -- 群聊需要 @ 机器人；私聊无需 @
-    if event.message_type == "group" and not is_mentioned(raw) then
+    local lower = raw:lower()
+
+    -- 私聊：首次互动发引导菜单
+    if event.message_type == "private" then
+        local uid = tostring(event.user_id)
+
+        -- 数字菜单响应
+        if raw == "1" then
+            reply(event, REPLIES.redrock)
+            return true
+        elseif raw == "2" then
+            local depts = [[红岩网校六大部门：
+1. 产品策划及运营部
+2. 视觉设计部
+3. 前端研发部
+4. 后端研发部
+5. 移动开发部（Android / iOS）
+6. 运维安全部
+7. 人工智能开发及应用部
+
+回复部门名了解更多，比如"前端""后端"～]]
+            reply(event, depts)
+            return true
+        elseif raw == "3" then
+            reply(event, REPLIES.recruit)
+            return true
+        elseif raw == "4" then
+            reply(event, [[【常见问题】
+红岩网校介绍
+部门介绍
+在红岩网校能学到什么
+如何加入红岩网校
+红岩网校成果
+红岩网校在哪里
+新生导航
+趣味功能
+
+直接打字问我吧～]])
+            return true
+        elseif raw == "5" then
+            reply(event, REPLIES.fun)
+            return true
+        end
+
+        -- 首次私聊发引导
+        if not greeted[uid] then
+            greeted[uid] = true
+            reply(event, [[嗨！欢迎来到红岩网校～这里是卷娘的秘密基地！
+你想了解什么？点下面的数字吧👇
+1️⃣ 网校介绍  2️⃣ 部门介绍  3️⃣ 最近活动  4️⃣ 常见问题  5️⃣ 找卷娘玩
+
+或者直接打字告诉我，比如"前端是干嘛的""宣讲会在哪"]])
+            return true
+        end
+
+        -- 私聊后续走关键词匹配
+        local cleaned = clean(raw):lower()
+        for _, rule in ipairs(RULES) do
+            for _, kw in ipairs(rule.keywords) do
+                if match_kw(lower, kw) then
+                    reply(event, rule.reply)
+                    return true
+                end
+            end
+        end
         return false, nil
     end
 
-    local lower = raw:lower()
+    -- 群聊：需要 @ 机器人
+    if not is_mentioned(raw) then return false, nil end
+
     local cleaned = clean(raw):lower()
     local anchored = has_anchor(lower)
+
+    -- 数字菜单
+    if cleaned == "1" then
+        reply(event, REPLIES.redrock)
+        return true
+    elseif cleaned == "2" then
+        local depts = [[红岩网校六大部门：
+1. 产品策划及运营部 — 产品的设计蓝图都出自他们之手
+2. 视觉设计部 — 用色彩渲染世界
+3. 前端研发部 — 小程序、网站、webAPP的幕后画师
+4. 后端研发部 — 网校最可靠的保障
+5. 移动开发部 — APP的无限可能
+6. 运维安全部 — 系统安全稳定的守护者
+7. 人工智能开发及应用部 — 主攻AI应用落地
+
+试试 @卷娘 + 部门名 了解更多～]]
+        reply(event, depts)
+        return true
+    elseif cleaned == "3" then
+        reply(event, REPLIES.recruit)
+        return true
+    elseif cleaned == "4" then
+        reply(event, [[【常见问题】
+红岩网校介绍 | 部门介绍
+在红岩网校能学到什么
+如何加入红岩网校 | 红岩网校成果
+红岩网校在哪里 | 新生导航
+趣味功能
+
+试试 @卷娘 + 关键词 问我吧～]])
+        return true
+    elseif cleaned == "5" then
+        reply(event, REPLIES.fun)
+        return true
+    end
 
     for _, rule in ipairs(RULES) do
         for _, kw in ipairs(rule.keywords) do
             local kw_lower = kw:lower()
             local hit = false
 
-            -- 宽松模式：闲聊类关键词，消息中出现即触发
             if rule.loose and match_kw(lower, kw) then
                 hit = true
-            -- 完全匹配：清洗后消息与关键词相等 → 直接触发
             elseif cleaned == kw_lower then
                 hit = true
-            -- 不完全匹配：关键词出现 + 消息带红岩锚点 → 触发
             elseif anchored and match_kw(lower, kw) then
                 hit = true
             end
