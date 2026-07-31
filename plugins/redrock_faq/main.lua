@@ -35,6 +35,8 @@ local REPLIES = {
     location = "太极运动场西3号门和西4号门都可以进入，具体可以到达西3号门查看楼内地图噢",
     freshman = "新生导航：https://gis.cqupt.edu.cn/",
     fun = "被你发现啦！试试玩游戏吧！\n【清单】\n戳一戳\n猜单词: /猜单词\n运行代码: /code",
+    daily = "卷娘今天也在努力回答邮子们的问题呢！给自己加鸡腿~",
+    moyu = "嘘！",
 }
 
 -- ====================================================================
@@ -83,6 +85,10 @@ local RULES = {
     -- 趣味功能
     { keywords = { "趣味功能", "有哪些功能", "有什么功能", "功能" }, reply = REPLIES.fun },
 
+    -- 日常闲聊
+    { keywords = { "干嘛", "今天干嘛", "在干嘛", "你在干嘛", "干啥" },            reply = REPLIES.daily, loose = true },
+    { keywords = { "摸鱼", "在摸鱼" },                                 reply = REPLIES.moyu, image = "xu.png", loose = true },
+
     -- 红岩兜底
     { keywords = { "红岩", "网校", "redrock", "红岩网校", "红岩网校工作站" },
         reply = REPLIES.redrock },
@@ -92,7 +98,7 @@ local RULES = {
 local SUFFIXES = {
     "是干什么的", "是做什么的", "是什么", "怎么样", "如何", "什么",
     "介绍",
-    "吗", "呢", "啊", "吧", "么", "的", "了",
+    "吗", "呢", "啊", "吧", "么", "的", "了", "呀", "啦", "嘛", "哦", "哟",
     "？", "?", "！", "!", "。", "～", "~", "…",
 }
 
@@ -240,8 +246,11 @@ function on_message(event)
             local kw_lower = kw:lower()
             local hit = false
 
+            -- 宽松模式：闲聊类关键词，消息中出现即触发
+            if rule.loose and match_kw(lower, kw) then
+                hit = true
             -- 完全匹配：清洗后消息与关键词相等 → 直接触发
-            if cleaned == kw_lower then
+            elseif cleaned == kw_lower then
                 hit = true
             -- 不完全匹配：关键词出现 + 消息带红岩锚点 → 触发
             elseif anchored and match_kw(lower, kw) then
