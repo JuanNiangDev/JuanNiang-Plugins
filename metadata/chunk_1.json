@@ -28,6 +28,13 @@
     "path": "redrock_caidanci"
   },
   {
+    "name": "redrock_code",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "基于 Judge0 的在线代码运行插件",
+    "path": "redrock_code"
+  },
+  {
     "name": "redrock_welcome",
     "version": "1.0.0",
     "author": "Redrock",
