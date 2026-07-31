@@ -42,6 +42,13 @@
     "path": "redrock_faq"
   },
   {
+    "name": "redrock_poke",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "卷娘戳一戳回复插件",
+    "path": "redrock_poke"
+  },
+  {
     "name": "redrock_welcome",
     "version": "1.0.0",
     "author": "Redrock",
