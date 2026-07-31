@@ -21,6 +21,20 @@
     "path": "ping"
   },
   {
+    "name": "redrock_caidanci",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "红岩网校猜单词小游戏",
+    "path": "redrock_caidanci"
+  },
+  {
+    "name": "redrock_welcome",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "红岩网校招新群欢迎插件",
+    "path": "redrock_welcome"
+  },
+  {
     "name": "system",
     "version": "1.0.0",
     "author": "JuanNiang-Neo",
