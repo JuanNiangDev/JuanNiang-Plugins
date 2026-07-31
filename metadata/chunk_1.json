@@ -42,6 +42,13 @@
     "path": "redrock_faq"
   },
   {
+    "name": "redrock_group_manager",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "红岩群管理工具",
+    "path": "redrock_group_manager"
+  },
+  {
     "name": "redrock_poke",
     "version": "1.0.0",
     "author": "Redrock",
