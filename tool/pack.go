@@ -49,7 +49,7 @@ func runPack(cmd *cobra.Command, args []string) error {
 		if strings.HasSuffix(rel, ".zip") {
 			return nil
 		}
-		h := &zip.FileHeader{Name: filepath.Join(name, rel), Method: zip.Deflate}
+		h := &zip.FileHeader{Name: rel, Method: zip.Deflate}
 		h.SetModTime(info.ModTime())
 		w, _ := zw.CreateHeader(h)
 		f, _ := os.Open(path)
