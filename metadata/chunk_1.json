@@ -49,6 +49,13 @@
     "path": "redrock_poke"
   },
   {
+    "name": "redrock_special",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "彩蛋关键词",
+    "path": "redrock_special"
+  },
+  {
     "name": "redrock_welcome",
     "version": "1.0.0",
     "author": "Redrock",

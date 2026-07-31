@@ -1,0 +1,9 @@
+name: "redrock_special"
+version: "1.0.0"
+author: "Redrock"
+description: "彩蛋关键词"
+entry: "main.lua"
+permissions:
+  - onebot11
+system: false
+enabled: true
