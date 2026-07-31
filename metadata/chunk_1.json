@@ -84,6 +84,13 @@
     "path": "system"
   },
   {
+    "name": "webhook-example",
+    "version": "1.0.0",
+    "author": "JuanNiang",
+    "description": "Webhook 示例插件：接收 HTTP 回调并转发到群",
+    "path": "webhook-example"
+  },
+  {
     "name": "入群欢迎",
     "version": "1.0.0",
     "author": "JuanNiang",
