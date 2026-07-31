@@ -5,6 +5,6 @@ description: "红岩群管理工具"
 entry: "main.lua"
 permissions:
   - onebot11
-  - cache
+  - database
 system: false
 enabled: true

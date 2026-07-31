@@ -62,26 +62,54 @@ local function now_ts()
     return os.time()
 end
 
---- Redis 辅助（直接读写字符串，避免 JSON 序列化问题）
-local function cache_get(key)
-    local v = jn.cache.get(key)
-    if v and type(v) == "string" and v ~= "" then return v end
-    return nil
-end
+-- ====================================================================
+-- 存储层：内存缓存 + SQLite (表自动前缀 pluggin_redrock_group_manager_)
+-- ====================================================================
 
-local function cache_set(key, val)
-    jn.cache.set(key, val)
+-- 初始化数据库表
+local function init_db()
+    jn.database.exec([[
+        CREATE TABLE IF NOT EXISTS pluggin_redrock_group_manager_kv (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    ]])
 end
+init_db()
 
-local function cache_incr(key)
-    local v = tonumber(jn.cache.get(key)) or 0
-    v = v + 1
-    jn.cache.set(key, tostring(v))
+-- 模块级内存缓存
+local store = {}
+
+local function get_kv(key)
+    local v = store[key]
+    if v ~= nil then return v end
+    local rows, err = jn.database.query(
+        string.format("SELECT value FROM pluggin_redrock_group_manager_kv WHERE key = '%s'", key))
+    if rows and #rows > 0 then
+        v = rows[1].value
+        if v then store[key] = v end
+    end
     return v
 end
 
-local function cache_del(key)
-    jn.cache.del(key)
+local function set_kv(key, val)
+    store[key] = val
+    local v = type(val) == "string" and val or tostring(val)
+    jn.database.exec(string.format(
+        "INSERT OR REPLACE INTO pluggin_redrock_group_manager_kv (key, value) VALUES ('%s', '%s')",
+        key, v))
+end
+
+local function incr_kv(key)
+    local v = tonumber(get_kv(key)) or 0
+    v = v + 1
+    set_kv(key, v)
+    return v
+end
+
+local function del_kv(key)
+    store[key] = nil
+    jn.database.exec(string.format("DELETE FROM pluggin_redrock_group_manager_kv WHERE key = '%s'", key))
 end
 
 --- 构建 key（带群前缀）
@@ -91,7 +119,12 @@ end
 
 --- 消息中是否包含图片/表情
 local function has_image(raw)
-    return raw:find("%[CQ:image") ~= nil or raw:find("%[CQ:face") ~= nil
+    -- CQ 图片码 / 表情码 / 文本占位符
+    return raw:find("%[CQ:image") ~= nil
+        or raw:find("%[CQ:face") ~= nil
+        or raw:find("%[CQ:mface") ~= nil
+        or raw:find("%[图片%]") ~= nil
+        or raw:find("%[表情%]") ~= nil
 end
 
 --- 匹配任意敏感词
@@ -157,11 +190,13 @@ local function check_image_spam(event)
 
     local group_id = event.group_id
     local user_id = event.user_id
+    jn.log.info(string.format("[group_mgr] 检测到图片: user=%d 群=%d", user_id, group_id))
+
     local key = gkey(group_id, "ims:" .. tostring(user_id))
     local warn_key = gkey(group_id, "ims_w:" .. tostring(user_id))
 
     -- 获取历史时间戳
-    local raw_ts = cache_get(key) or ""
+    local raw_ts = get_kv(key) or ""
     local timestamps = {}
     if raw_ts ~= "" then
         for ts in raw_ts:gmatch("[^,]+") do
@@ -185,27 +220,27 @@ local function check_image_spam(event)
     for _, ts in ipairs(recent) do
         vals[#vals + 1] = tostring(ts)
     end
-    cache_set(key, table.concat(vals, ","))
+    set_kv(key, table.concat(vals, ","))
 
     -- 判断
     if #recent >= IMG_SPAM_THRESHOLD then
-        local warned = cache_get(warn_key)
+        local warned = get_kv(warn_key)
         if warned == "1" then
             -- 已经警告过，还在刷 → 禁言
             jn.onebot11.ban_group_member(group_id, user_id, IMG_MUTE_DURATION)
-            cache_incr(gkey(group_id, "stats:mute"))
+            incr_kv(gkey(group_id, "stats:mute"))
             jn.log.info(string.format("[group_mgr] %d 刷屏禁言 %ds 群 %d", user_id, IMG_MUTE_DURATION, group_id))
             notify_admins(event, user_id .. " 因图片刷屏被禁言 " .. IMG_MUTE_DURATION .. "s")
         else
             -- 首次警告
-            cache_set(warn_key, "1")
+            set_kv(warn_key, "1")
             reply(event, "做文明群友，杜绝刷屏哦！", "img/shuaping.png")
-            cache_incr(gkey(group_id, "stats:warn"))
+            incr_kv(gkey(group_id, "stats:warn"))
         end
         return true
     elseif #recent == 1 then
         -- 解除警告标记（重新开始计数）
-        cache_set(warn_key, "0")
+        set_kv(warn_key, "0")
     end
 
     return false
@@ -226,38 +261,42 @@ local function check_copy_spam(event)
     local count_key = gkey(group_id, "cp:count")
     local users_key = gkey(group_id, "cp:users")
 
-    local last_msg = cache_get(last_key) or ""
+    local last_msg = get_kv(last_key) or ""
 
     if raw == last_msg then
         -- 同一消息，检查用户是否已参与
-        local users = cache_get(users_key) or ""
+        local users = get_kv(users_key) or ""
         if users:find(tostring(user_id)) then
             return false -- 同一用户不算复读
         end
         users = users .. "," .. tostring(user_id)
-        cache_set(users_key, users)
+        set_kv(users_key, users)
 
-        local count = cache_incr(count_key)
+        local count = incr_kv(count_key)
 
         if count >= COPY_THRESHOLD then
+            jn.log.info(string.format("[group_mgr] 复读触发: count=%d 群=%d", count, group_id))
             -- 触发复读警告（仅首次）
             local triggered_key = gkey(group_id, "cp:trig")
-            if cache_get(triggered_key) ~= "1" then
-                reply(event, "你们这群人机能不能别刷屏了", "img/shuaping_2.png")
-                cache_set(triggered_key, "1")
+            if get_kv(triggered_key) ~= "1" then
+                jn.onebot11.send_group_msg(group_id, {
+                    { type = "text", data = { text = "你们这群人机能不能别刷屏了" } },
+                    { type = "image", data = { file = "img/shuaping_2.png" } },
+                })
+                set_kv(triggered_key, "1")
                 -- 10 秒后重置触发标记
                 -- (无法做延迟，用 TTL 近似：下次不同消息时重置)
-                cache_incr(gkey(group_id, "stats:copy_warn"))
+                incr_kv(gkey(group_id, "stats:copy_warn"))
             end
             return true
         end
         return false
     else
         -- 不同消息，重置
-        cache_set(last_key, raw)
-        cache_set(count_key, "1")
-        cache_set(users_key, tostring(user_id))
-        cache_set(gkey(group_id, "cp:trig"), "0")
+        set_kv(last_key, raw)
+        set_kv(count_key, "1")
+        set_kv(users_key, tostring(user_id))
+        set_kv(gkey(group_id, "cp:trig"), "0")
         return false
     end
 end
@@ -278,7 +317,7 @@ local function check_sensitive(event)
     if pw then
         delete_msg(event)
         reply(event, "小鬼，别碰这个话题")
-        cache_incr(gkey(group_id, "stats:political"))
+        incr_kv(gkey(group_id, "stats:political"))
         jn.log.info(string.format("[group_mgr] %d 触发政治敏感词: %s", user_id, pw))
         return true
     end
@@ -288,7 +327,7 @@ local function check_sensitive(event)
     if aw then
         delete_msg(event)
         reply(event, "打广告先交200宣传费")
-        cache_incr(gkey(group_id, "stats:ad"))
+        incr_kv(gkey(group_id, "stats:ad"))
         jn.log.info(string.format("[group_mgr] %d 触发广告词: %s", user_id, aw))
         notify_admins(event, tostring(user_id) .. " 发送广告被撤回\n关键词: " .. aw)
         return true
@@ -298,7 +337,7 @@ local function check_sensitive(event)
     local nw = match_any(raw, NSFW_WORDS)
     if nw then
         delete_msg(event)
-        cache_incr(gkey(group_id, "stats:nsfw"))
+        incr_kv(gkey(group_id, "stats:nsfw"))
         jn.log.info(string.format("[group_mgr] %d 触发色情敏感词: %s", user_id, nw))
         notify_admins(event, tostring(user_id) .. " 发送色情敏感内容被撤回\n关键词: " .. nw)
         return true
@@ -332,7 +371,7 @@ function on_notice(event)
     if event.notice_type ~= "group_increase" then return end
     local group_id = event.group_id
     local date = os.date("%Y-%m-%d")
-    cache_incr(gkey(group_id, "stats:join:" .. date))
+    incr_kv(gkey(group_id, "stats:join:" .. date))
 end
 
 -- ====================================================================
@@ -347,13 +386,13 @@ jn.command.register("groupstats", function(args, event)
     local group_id = event.group_id
     local date = os.date("%Y-%m-%d")
 
-    local joins = tonumber(cache_get(gkey(group_id, "stats:join:" .. date)) or "0")
-    local warns = tonumber(cache_get(gkey(group_id, "stats:warn")) or "0")
-    local mutes = tonumber(cache_get(gkey(group_id, "stats:mute")) or "0")
-    local political = tonumber(cache_get(gkey(group_id, "stats:political")) or "0")
-    local ad = tonumber(cache_get(gkey(group_id, "stats:ad")) or "0")
-    local nsfw = tonumber(cache_get(gkey(group_id, "stats:nsfw")) or "0")
-    local copy_warn = tonumber(cache_get(gkey(group_id, "stats:copy_warn")) or "0")
+    local joins = tonumber(get_kv(gkey(group_id, "stats:join:" .. date)) or "0")
+    local warns = tonumber(get_kv(gkey(group_id, "stats:warn")) or "0")
+    local mutes = tonumber(get_kv(gkey(group_id, "stats:mute")) or "0")
+    local political = tonumber(get_kv(gkey(group_id, "stats:political")) or "0")
+    local ad = tonumber(get_kv(gkey(group_id, "stats:ad")) or "0")
+    local nsfw = tonumber(get_kv(gkey(group_id, "stats:nsfw")) or "0")
+    local copy_warn = tonumber(get_kv(gkey(group_id, "stats:copy_warn")) or "0")
 
     local text = string.format([[
 📊 群管理统计 (%s)
