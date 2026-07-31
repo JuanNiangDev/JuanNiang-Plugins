@@ -417,9 +417,9 @@ function on_message(event)
 
     -- 没有游戏时：检查引导触发词
     if not game or game.status ~= "playing" then
-        local trigger_words = { "无聊", "好无聊", "好没意思", "玩什么", "有啥好玩的" }
-        for _, word in ipairs(trigger_words) do
-            if raw == word then
+        local triggers = { "无聊", "没意思", "没劲", "有啥好玩", "有什么好玩", "好玩的", "玩什么" }
+        for _, kw in ipairs(triggers) do
+            if raw:find(kw, 1, true) then
                 reply(event, "来玩猜单词呀！@卷娘 /猜单词 就能开局～\n看看你能用几次猜出正确答案 🤔")
                 return true
             end
