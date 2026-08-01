@@ -96,7 +96,8 @@ local function set_kv(key, val)
     store[key] = val
     local v = type(val) == "string" and val or tostring(val)
     jn.database.exec(string.format(
-        "INSERT OR REPLACE INTO pluggin_redrock_group_manager_kv (key, value) VALUES ('%s', '%s')",
+        "INSERT INTO pluggin_redrock_group_manager_kv (key, value) VALUES ('%s', '%s') " ..
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         key, v))
 end
 

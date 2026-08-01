@@ -401,7 +401,7 @@ end, {
 })
 
 -- ====================================================================
--- on_message: 处理猜测和引导
+-- on_message: 引导触发
 -- ====================================================================
 function on_message(event)
     -- 仅群聊可用
@@ -410,13 +410,8 @@ function on_message(event)
     local raw = (event.raw_message or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if raw == "" then return false, nil end
 
-    local group_id = event.group_id
-
-    -- 检查是否有进行中的游戏
-    local game = get_game(group_id)
-
     -- 没有游戏时：检查引导触发词
-    if not game or game.status ~= "playing" then
+    if not get_game(event.group_id) then
         local triggers = { "无聊", "没意思", "没劲", "有啥好玩", "有什么好玩", "好玩的", "玩什么" }
         for _, kw in ipairs(triggers) do
             if raw:find(kw, 1, true) then
@@ -424,75 +419,105 @@ function on_message(event)
                 return true
             end
         end
-        return false, nil
-    end
-
-    -- 有游戏时：处理猜测（纯字母组成的单词）
-    -- 只处理恰好等于游戏单词长度的纯英文字母输入
-    if #raw == game.length and raw:match("^[a-zA-Z]+$") then
-        local guess = raw:lower()
-
-        -- 检查是否已猜过
-        for _, att in ipairs(game.attempts) do
-            if att.guess == guess then
-                reply(event, "这个单词已经猜过啦～换一个试试吧！")
-                return true
-            end
-        end
-
-        local feedback = compare_guess(guess, game.word)
-        local attempt_num = #game.attempts + 1
-        game.attempts[#game.attempts + 1] = { guess = guess, feedback = feedback }
-
-        -- 猜对了
-        if guess == game.word then
-            game.status = "won"
-            save_game(group_id, game)
-
-            local lines = {
-                get_victory_msg(game.word, attempt_num),
-                "",
-                format_history(game),
-                "",
-                "发送 /猜单词 再来一局～",
-            }
-            reply(event, table.concat(lines, "\n"))
-            return true
-        end
-
-        -- 次数用完了
-        if #game.attempts >= game.max_attempts then
-            game.status = "lost"
-            save_game(group_id, game)
-
-            local lines = {
-                get_defeat_msg(game.word),
-                "",
-                format_history(game),
-                "",
-                "发送 /猜单词 再来一局～",
-            }
-            reply(event, table.concat(lines, "\n"))
-            return true
-        end
-
-        -- 还没结束
-        save_game(group_id, game)
-
-        local encouragement = get_encouragement(attempt_num, game.max_attempts, feedback)
-        local remaining = game.max_attempts - #game.attempts
-        local lines = {
-            "第 " .. attempt_num .. " 次猜测：" .. feedback,
-            encouragement,
-        }
-        if game.hints_given < 4 and remaining <= 3 then
-            lines[#lines + 1] = "（剩余 " .. remaining .. " 次，发送 /提示 获取帮助）"
-        end
-        reply(event, table.concat(lines, "\n"))
-        return true
     end
 
     return false, nil
 end
+
+-- ====================================================================
+-- 命令: /猜 —— 提交猜测
+-- ====================================================================
+jn.command.register("猜", function(args, event)
+    -- 仅群聊可用
+    if event.message_type ~= "group" then return true end
+    local group_id = event.group_id
+
+    local game = get_game(group_id)
+    if not game or game.status ~= "playing" then
+        reply(event, "本群还没有进行中的游戏哦～发送 /猜单词 来一局吧！")
+        return true
+    end
+
+    if #args == 0 then
+        reply(event, "请输入要猜的单词，例如：/猜 apple")
+        return true
+    end
+
+    local guess = args[1]:lower()
+
+    -- 长度检查
+    if #guess ~= game.length then
+        reply(event, "单词长度不对哦～当前单词有 " .. game.length .. " 个字母")
+        return true
+    end
+
+    -- 纯字母检查
+    if not guess:match("^[a-z]+$") then
+        reply(event, "请输入纯英文字母的单词～")
+        return true
+    end
+
+    -- 检查是否已猜过
+    for _, att in ipairs(game.attempts) do
+        if att.guess == guess then
+            reply(event, "这个单词已经猜过啦～换一个试试吧！")
+            return true
+        end
+    end
+
+    local feedback = compare_guess(guess, game.word)
+    local attempt_num = #game.attempts + 1
+    game.attempts[#game.attempts + 1] = { guess = guess, feedback = feedback }
+
+    -- 猜对了
+    if guess == game.word then
+        game.status = "won"
+        save_game(group_id, game)
+
+        local lines = {
+            get_victory_msg(game.word, attempt_num),
+            "",
+            format_history(game),
+            "",
+            "发送 /猜单词 再来一局～",
+        }
+        reply(event, table.concat(lines, "\n"))
+        return true
+    end
+
+    -- 次数用完了
+    if #game.attempts >= game.max_attempts then
+        game.status = "lost"
+        save_game(group_id, game)
+
+        local lines = {
+            get_defeat_msg(game.word),
+            "",
+            format_history(game),
+            "",
+            "发送 /猜单词 再来一局～",
+        }
+        reply(event, table.concat(lines, "\n"))
+        return true
+    end
+
+    -- 还没结束
+    save_game(group_id, game)
+
+    local encouragement = get_encouragement(attempt_num, game.max_attempts, feedback)
+    local remaining = game.max_attempts - #game.attempts
+    local lines = {
+        "第 " .. attempt_num .. " 次猜测：" .. feedback,
+        encouragement,
+    }
+    if game.hints_given < 4 and remaining <= 3 then
+        lines[#lines + 1] = "（剩余 " .. remaining .. " 次，发送 /提示 获取帮助）"
+    end
+    reply(event, table.concat(lines, "\n"))
+    return true
+end, {
+    description = "提交猜单词的猜测",
+    usage = "/猜 <单词>",
+})
 
 jn.log.info("[redrock_caidanci] 猜单词插件已加载")
