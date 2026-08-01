@@ -42,3 +42,4 @@ func pluginsDir() string  { return filepath.Join(repoRoot(), "plugins") }
 func metadataDir() string { return filepath.Join(repoRoot(), "metadata") }
 func templateDir() string { return filepath.Join(repoRoot(), "template") }
 func sdkDir() string      { return filepath.Join(repoRoot(), "sdk") }
+func distDir() string     { return filepath.Join(repoRoot(), "dist") }

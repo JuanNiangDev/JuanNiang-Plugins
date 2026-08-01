@@ -17,7 +17,7 @@ build:
 ## clean: 清理编译产物和打包文件
 clean:
 	@rm -f $(BINARY)
-	@rm -f plugins/*.zip
+	@rm -rf dist/
 	@echo "✅ 清理完成"
 
 ## scan: 扫描插件并更新元数据

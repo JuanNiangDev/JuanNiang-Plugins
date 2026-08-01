@@ -28,7 +28,8 @@ func runPack(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("插件目录不存在: %s", srcDir)
 	}
 
-	zipPath := filepath.Join(pluginsDir(), name+".zip")
+	zipPath := filepath.Join(distDir(), name+".zip")
+	os.MkdirAll(distDir(), 0755)
 	zipFile, err := os.Create(zipPath)
 	if err != nil {
 		return fmt.Errorf("创建 ZIP 失败: %w", err)
