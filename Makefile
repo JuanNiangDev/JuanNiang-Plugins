@@ -24,13 +24,21 @@ clean:
 scan: build
 	./$(BINARY) scan
 
-## pack: 打包指定插件 (用法: make pack NAME=ping)
+## pack: 打包指定插件 (用法: make pack NAME=ping / NAME=redrock_\*)
 pack: build
 	@if [ -z "$(NAME)" ]; then \
 		echo "❌ 请指定插件名: make pack NAME=<name>"; \
 		exit 1; \
 	fi
 	./$(BINARY) pack $(NAME)
+
+## pack-all: 打包所有插件
+pack-all: build
+	./$(BINARY) pack --all
+
+## pack-redrock: 打包所有 redrock_ 插件
+pack-redrock: build
+	./$(BINARY) pack "redrock_*"
 
 ## init: 创建新插件 (用法: make init NAME=my-plugin)
 init: build
