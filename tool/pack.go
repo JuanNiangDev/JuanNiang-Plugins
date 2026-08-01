@@ -12,24 +12,107 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var packAll bool
+
 var packCmd = &cobra.Command{
-	Use:   "pack <name>",
+	Use:   "pack <name|prefix*>",
 	Short: "将插件打包为 .zip",
-	Long:  "将指定插件目录打包为 .zip 文件，方便分发和上传。",
-	Args:  cobra.ExactArgs(1),
+	Long:  "将指定插件目录打包为 .zip 文件。支持通配符（如 redrock_*）和 --all 全量打包。",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runPack,
 }
 
+func init() {
+	packCmd.Flags().BoolVarP(&packAll, "all", "a", false, "打包所有插件")
+}
+
 func runPack(cmd *cobra.Command, args []string) error {
+	os.MkdirAll(distDir(), 0755)
+
+	// --all: 打包所有
+	if packAll {
+		return packAllPlugins()
+	}
+
+	if len(args) == 0 {
+		return fmt.Errorf("请指定插件名或使用 --all 打包全部")
+	}
+
 	name := args[0]
 
+	// 通配符匹配
+	if strings.HasSuffix(name, "*") {
+		prefix := strings.TrimSuffix(name, "*")
+		return packByPrefix(prefix)
+	}
+
+	return packOne(name)
+}
+
+func packAllPlugins() error {
+	entries, err := os.ReadDir(pluginsDir())
+	if err != nil {
+		return fmt.Errorf("读取插件目录失败: %w", err)
+	}
+
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && e.Name() != "sdk" {
+			names = append(names, e.Name())
+		}
+	}
+
+	if len(names) == 0 {
+		fmt.Println("📭 没有找到插件")
+		return nil
+	}
+
+	fmt.Printf("📦 打包全部 %d 个插件...\n\n", len(names))
+	for _, name := range names {
+		if err := packOne(name); err != nil {
+			fmt.Println(color.RedString("   ✖ %s: %s", name, err))
+		}
+	}
+	fmt.Printf("\n" + color.GreenString("✅ 全部打包完成!"))
+	fmt.Printf("   📁 %s\n", color.CyanString(distDir()))
+	return nil
+}
+
+func packByPrefix(prefix string) error {
+	entries, err := os.ReadDir(pluginsDir())
+	if err != nil {
+		return fmt.Errorf("读取插件目录失败: %w", err)
+	}
+
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+			names = append(names, e.Name())
+		}
+	}
+
+	if len(names) == 0 {
+		return fmt.Errorf("没有匹配 '%s*' 的插件", prefix)
+	}
+
+	fmt.Printf("📦 打包 %d 个匹配 '%s*' 的插件...\n\n", len(names), prefix)
+	for _, name := range names {
+		if err := packOne(name); err != nil {
+			fmt.Println(color.RedString("   ✖ %s: %s", name, err))
+		}
+	}
+	fmt.Printf("\n" + color.GreenString("✅ 全部打包完成!"))
+	fmt.Printf("   📁 %s\n", color.CyanString(distDir()))
+	return nil
+}
+
+func packOne(name string) error {
 	srcDir := filepath.Join(pluginsDir(), name)
 	if _, err := os.Stat(srcDir); os.IsNotExist(err) {
 		return fmt.Errorf("插件目录不存在: %s", srcDir)
 	}
 
 	zipPath := filepath.Join(distDir(), name+".zip")
-	os.MkdirAll(distDir(), 0755)
 	zipFile, err := os.Create(zipPath)
 	if err != nil {
 		return fmt.Errorf("创建 ZIP 失败: %w", err)
