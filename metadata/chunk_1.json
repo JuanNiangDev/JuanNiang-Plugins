@@ -63,6 +63,13 @@
     "path": "redrock_poke"
   },
   {
+    "name": "redrock_quiz",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "红岩知识快问快答小游戏",
+    "path": "redrock_quiz"
+  },
+  {
     "name": "redrock_special",
     "version": "1.0.0",
     "author": "Redrock",
