@@ -1,0 +1,30 @@
+# ====================================================================
+# redrock_welcome 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# ====================================================================
+
+configs:
+  - key: enabled
+    type: bool
+    label: 启用插件
+    description: 是否启用招新群欢迎消息
+    default: true
+
+  - key: welcome_text
+    type: string
+    label: 欢迎语
+    description: 新成员入群时发送的欢迎文本（@ 后追加）
+    default: " 欢迎到来！这里是红岩网校工作站的新生群，有什么问题都可以问我哦！没有头绪就试试发送/redrock吧。"
+
+  - key: welcome_image
+    type: string
+    label: 欢迎图片
+    description: 欢迎消息附带的海报图片（相对插件目录路径）
+    default: "welcome.png"

@@ -44,4 +44,19 @@ cd tool && go build -o ../hago .
 
 ## 插件格式
 
-每个插件是一个包含 `pluggin.yaml` + `main.lua` 的目录，详见 [JuanNiang-Neo 插件开发文档](https://github.com/JuanNiangDev/JuanNiang-Neo/blob/main/docs/plugin-development.md)。
+每个插件是一个目录，包含以下文件（新格式 5 件套）：
+
+```
+plugins/<name>/
+├── main.lua       # 插件入口（Lua 程序）
+├── pluggin.yaml   # 插件元数据
+├── config.yaml    # 动态配置声明（type: bool/string/list）
+├── README.md      # 插件说明文档
+└── avatar.png     # 插件图标
+```
+
+详见 [JuanNiang-Neo 插件开发文档](https://github.com/JuanNiangDev/JuanNiang-Neo/blob/main/docs/plugin-development.md) 与 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 审核流程
+
+提交 PR 后 CI 自动校验格式与版本（见 `.github/workflows/plugin-review.yml`），维护者 Review + Merge 后，每晚 UTC 16:00 自动更新元数据（见 `.github/workflows/metadata-update.yml`）。

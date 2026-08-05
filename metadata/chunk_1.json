@@ -4,125 +4,179 @@
     "version": "1.0.0",
     "author": "JuanNiang-Neo",
     "description": "签到插件，提供 /qd 签到 和 /rank 排名功能",
-    "path": "checkin"
+    "path": "checkin",
+    "image": "checkin/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "Cron 示例插件",
     "version": "1.0.0",
     "author": "JuanNiang",
     "description": "示例插件：通过 CronJob 定时触发，向 Payload 中指定的 QQ 号发送消息",
-    "path": "cron-example"
+    "path": "cron-example",
+    "image": "cron-example/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "ping",
     "version": "1.1.0",
     "author": "JuanNiang",
     "description": "Ping 插件示例，使用 jn SDK 注册 /ping 命令",
-    "path": "ping"
+    "path": "ping",
+    "image": "ping/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "redrock_caidanci",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "红岩网校猜单词小游戏",
-    "path": "redrock_caidanci"
+    "path": "redrock_caidanci",
+    "image": "redrock_caidanci/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "redrock_code",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "基于 Judge0 的在线代码运行插件",
-    "path": "redrock_code"
+    "path": "redrock_code",
+    "image": "redrock_code/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "redrock_cron_msg",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "定时发送消息到指定群",
-    "path": "redrock_cron_msg"
+    "path": "redrock_cron_msg",
+    "image": "redrock_cron_msg/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "redrock_faq",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "红岩网校招新群关键词问答插件",
-    "path": "redrock_faq"
+    "path": "redrock_faq",
+    "image": "redrock_faq/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "redrock_group_manager",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "红岩群管理工具",
-    "path": "redrock_group_manager"
+    "path": "redrock_group_manager",
+    "image": "redrock_group_manager/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "redrock_poke",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "卷娘戳一戳回复插件",
-    "path": "redrock_poke"
+    "path": "redrock_poke",
+    "image": "redrock_poke/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "redrock_quiz",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "红岩知识快问快答小游戏",
-    "path": "redrock_quiz"
+    "path": "redrock_quiz",
+    "image": "redrock_quiz/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "redrock_special",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "彩蛋关键词",
-    "path": "redrock_special"
+    "path": "redrock_special",
+    "image": "redrock_special/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "redrock_welcome",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "红岩网校招新群欢迎插件",
-    "path": "redrock_welcome"
+    "path": "redrock_welcome",
+    "image": "redrock_welcome/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "system",
     "version": "1.0.0",
     "author": "JuanNiang-Neo",
     "description": "系统插件，封装 Agent/Provider/MCP/Tool/T2I/Sandbox/Session 管理命令",
-    "path": "system"
+    "path": "system",
+    "image": "system/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "t2i-example",
     "version": "1.0.0",
     "author": "JuanNiang",
     "description": "T2I 文生图示例插件",
-    "path": "t2i-example"
+    "path": "t2i-example",
+    "image": "t2i-example/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "webhook-example",
     "version": "1.0.0",
     "author": "JuanNiang",
     "description": "Webhook 示例插件：处理 GitHub/告警/钉钉等外部推送，转发到 QQ 群",
-    "path": "webhook-example"
+    "path": "webhook-example",
+    "image": "webhook-example/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "入群欢迎",
     "version": "1.0.0",
     "author": "JuanNiang",
     "description": "监听群成员增加事件，发送个性化欢迎语",
-    "path": "welcome"
+    "path": "welcome",
+    "image": "welcome/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "富文本图片示例",
     "version": "1.0.0",
     "author": "JuanNiang",
     "description": "演示使用消息段发送带图片的富文本消息，注册 /rich 命令",
-    "path": "rich-demo"
+    "path": "rich-demo",
+    "image": "rich-demo/avatar.png",
+    "has_config": true,
+    "has_readme": true
   },
   {
     "name": "戳一戳回复",
     "version": "1.0.0",
     "author": "JuanNiang",
     "description": "监听戳一戳事件，回复消息",
-    "path": "poke-reply"
+    "path": "poke-reply",
+    "image": "poke-reply/avatar.png",
+    "has_config": true,
+    "has_readme": true
   }
 ]

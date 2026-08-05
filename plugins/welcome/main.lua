@@ -6,9 +6,12 @@
 
 local jn = require("jn")
 
+local ENABLED = jn.config.get("enabled")
+
 ---@param event jn.Event
 function on_notice(event)
     if event.notice_type ~= "group_increase" then return end
+    if ENABLED == false then return end
 
     local user_id = event.user_id
     local group_id = event.group_id

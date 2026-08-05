@@ -48,6 +48,14 @@ init: build
 	fi
 	./$(BINARY) init $(NAME)
 
+## validate: 校验插件格式 (用法: make validate NAME=ping)
+validate: build
+	@if [ -z "$(NAME)" ]; then \
+		echo "❌ 请指定插件名: make validate NAME=<name>"; \
+		exit 1; \
+	fi
+	./$(BINARY) validate $(NAME) --strict
+
 ## tidy: 整理 Go 依赖
 tidy:
 	cd $(TOOL_DIR) && $(GO) mod tidy

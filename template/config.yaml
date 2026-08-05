@@ -1,0 +1,30 @@
+# ====================================================================
+# {{.Name}} 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# ====================================================================
+
+configs:
+  # - key: example_bool
+  #   type: bool
+  #   label: 示例开关
+  #   description: 是否启用示例功能
+  #   default: true
+  #
+  # - key: example_string
+  #   type: string
+  #   label: 示例文本
+  #   description: 单行文本配置
+  #   default: ""
+  #
+  # - key: example_list
+  #   type: list
+  #   label: 示例列表
+  #   description: 可配置多个值
+  #   default: ["a", "b"]

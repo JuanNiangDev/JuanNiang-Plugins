@@ -56,7 +56,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("创建目录失败: %w", err)
 	}
 
-	files := []string{"pluggin.yaml", "main.lua"}
+	files := []string{"pluggin.yaml", "main.lua", "config.yaml", "README.md"}
 	for _, f := range files {
 		tmpl, err := template.ParseFiles(filepath.Join(templateDir(), f))
 		if err != nil {
@@ -80,12 +80,22 @@ func runInit(cmd *cobra.Command, args []string) error {
 		os.WriteFile(sdkDst, sdkData, 0644)
 	}
 
+	// 复制默认头像
+	avatarSrc := filepath.Join(templateDir(), "avatar.png")
+	avatarDst := filepath.Join(targetDir, "avatar.png")
+	if avatarData, err := os.ReadFile(avatarSrc); err == nil {
+		os.WriteFile(avatarDst, avatarData, 0644)
+	}
+
 	fmt.Println()
 	fmt.Println(color.GreenString("✅ 插件创建成功!"))
 	fmt.Printf("   📁 %s\n", color.CyanString(targetDir))
-	fmt.Print("   📄 pluggin.yaml, main.lua")
+	fmt.Print("   📄 pluggin.yaml, main.lua, config.yaml, README.md")
 	if _, err := os.Stat(sdkDst); err == nil {
 		fmt.Print(", jn.lua (SDK)")
+	}
+	if _, err := os.Stat(avatarDst); err == nil {
+		fmt.Print(", avatar.png (图标)")
 	}
 	fmt.Println()
 	fmt.Println()

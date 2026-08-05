@@ -1,0 +1,18 @@
+# ====================================================================
+# cron-example 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# ====================================================================
+
+configs:
+  - key: default_message
+    type: string
+    label: 兜底消息
+    description: CronJob Payload 未提供 message 时发送的兜底消息文本
+    default: ""

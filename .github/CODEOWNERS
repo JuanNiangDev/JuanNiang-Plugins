@@ -1,0 +1,11 @@
+# 插件审核负责人
+# 更新作者信息后，在此指定负责审核 plugins/ 目录变更的团队/用户。
+# 参考：https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# 默认所有者
+* @JuanNiangDev
+
+# 插件目录由维护者审核
+plugins/ @JuanNiangDev
+tool/ @JuanNiangDev
+sdk/ @JuanNiangDev

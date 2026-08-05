@@ -1,0 +1,30 @@
+# ====================================================================
+# rich-demo 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# ====================================================================
+
+configs:
+  - key: image_file
+    type: string
+    label: 图片文件名
+    description: 插件目录下要发送的示例图片文件名（如 test.png）
+    default: "test.png"
+
+  - key: text_before
+    type: string
+    label: 图片前文本
+    description: 图片之前的说明文本
+    default: "这是一张示例图片 👇\n"
+
+  - key: show_face
+    type: bool
+    label: 附加表情
+    description: 是否在消息末尾附加 CQ 表情
+    default: true

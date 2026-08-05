@@ -15,14 +15,19 @@
 
 ## 1. 创建插件目录
 
-每个插件是 `data/pluggins/<plugin-name>/` 下的一个独立目录，至少含 `pluggin.yaml`（清单）和 Lua 入口（默认 `main.lua`）。
+每个插件是 `data/pluggins/<plugin-name>/` 下的一个独立目录，采用**新格式 5 件套**：
 
 ```
 data/pluggins/
 └── my-hello/
-    ├── pluggin.yaml
-    └── main.lua
+    ├── main.lua       # 插件入口
+    ├── pluggin.yaml   # 元数据
+    ├── config.yaml    # 动态配置声明（可选）
+    ├── README.md      # 说明文档（商店详情页渲染）
+    └── avatar.png     # 图标（商店网格卡片展示）
 ```
+
+其中 `pluggin.yaml` + `main.lua` 为必需，`config.yaml` / `README.md` / `avatar.png` 为商店展示与动态配置所需（缺失时插件仍可运行，但商店会标记缺项）。
 
 ## 2. 编写 manifest — `pluggin.yaml`
 
@@ -49,6 +54,54 @@ permissions:
 | `permissions` | string[] | 申请的权限，决定哪些全局表被注入 |
 | `system` | bool | 系统插件（undeletable / unstoppable），仅内置 `system` 用 |
 | `enabled` | bool | 是否在 `LoadAll` 时加载 |
+
+## 2.5 动态配置 — `config.yaml`
+
+`config.yaml` 声明插件的可配置项，Web 面板据此动态渲染表单，插件通过 `jn.config` 读取。
+
+```yaml
+configs:
+  - key: admin_qq
+    type: string
+    label: 管理员QQ
+    description: 可操作本插件的管理员
+    default: ""
+  - key: auto_reply
+    type: bool
+    label: 自动回复
+    default: true
+  - key: trigger_words
+    type: list
+    label: 触发关键词
+    default: ["你好", "在吗"]
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `key` | string | 配置键（唯一） |
+| `type` | string | `bool`\|`string`\|`list`，决定 Web 控件 |
+| `label` | string | Web 面板展示名 |
+| `description` | string | 说明（可选） |
+| `default` | any | 默认值 |
+| `value` | any | 用户当前值（可选，缺省回退 default） |
+
+**type → Web 控件映射：**
+
+- `bool` → 开关（v-switch）
+- `string` → 单行输入框（v-text-field）
+- `list` → 可增删的多项输入框
+
+插件内读取配置（无需权限，默认注入）：
+
+```lua
+local jn = require("jn")
+
+local admin = jn.config.get("admin_qq")   -- 单值：value 优先，回退 default
+local all   = jn.config.all()              -- 全部配置 {key=value}
+local schema= jn.config.schema()           -- 完整 schema（含 label/type/...）
+```
+
+保存配置后插件会自动重载使新值生效。
 
 ## 3. 编写入口 — `main.lua`
 

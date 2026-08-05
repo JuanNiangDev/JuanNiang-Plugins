@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -30,11 +31,14 @@ type PluginEntry struct {
 	Description string `json:"description"`
 	Path        string `json:"path"`
 	Image       string `json:"image,omitempty"`
+	HasConfig   bool   `json:"has_config,omitempty"`
+	HasReadme   bool   `json:"has_readme,omitempty"`
 }
 
 type PluginsIndex struct {
-	Total  int      `json:"total"`
-	Chunks []string `json:"chunks"`
+	Total     int      `json:"total"`
+	Chunks    []string `json:"chunks"`
+	UpdatedAt string   `json:"updated_at,omitempty"`
 }
 
 var scanCmd = &cobra.Command{
@@ -71,14 +75,26 @@ func runScan(cmd *cobra.Command, args []string) error {
 			Author: m.Author, Description: m.Description,
 			Path: rel,
 		}
-		for _, img := range []string{"logo.png", "logo.jpg", "icon.png"} {
+		// 图标：优先 avatar.png，兼容旧 logo.png/logo.jpg/icon.png
+		for _, img := range []string{"avatar.png", "logo.png", "logo.jpg", "icon.png"} {
 			if _, err := os.Stat(filepath.Join(path, img)); err == nil {
 				e.Image = filepath.Join(rel, img)
 				break
 			}
 		}
+		// 元数据标记：是否含 config.yaml / README.md
+		if _, err := os.Stat(filepath.Join(path, "config.yaml")); err == nil {
+			e.HasConfig = true
+		}
+		if _, err := os.Stat(filepath.Join(path, "README.md")); err == nil {
+			e.HasReadme = true
+		}
+		if !e.HasReadme || !e.HasConfig || !strings.HasSuffix(e.Image, "avatar.png") {
+			fmt.Printf("   %s %s %s (%s)\n", color.YellowString("⚑"), color.CyanString(filepath.Base(path)), m.Version, missingMeta(e))
+		} else {
+			fmt.Printf("   %s %s %s (%s)\n", color.GreenString("✓"), color.CyanString(filepath.Base(path)), m.Version, "v"+m.Version)
+		}
 		entries = append(entries, e)
-		fmt.Printf("   %s %s (%s)\n", color.GreenString("✓"), color.CyanString(filepath.Base(path)), m.Version)
 		return filepath.SkipDir
 	})
 	if err != nil {
@@ -103,7 +119,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 		chunkFiles = append(chunkFiles, cn)
 	}
 
-	idx := PluginsIndex{Total: len(entries), Chunks: chunkFiles}
+	idx := PluginsIndex{Total: len(entries), Chunks: chunkFiles, UpdatedAt: time.Now().Format(time.RFC3339)}
 	idxData, _ := json.MarshalIndent(idx, "", "  ")
 	os.WriteFile(filepath.Join(repoRoot(), "plugins.json"), idxData, 0644)
 
@@ -111,4 +127,19 @@ func runScan(cmd *cobra.Command, args []string) error {
 	fmt.Println(color.GreenString("✅ 扫描完成!"))
 	fmt.Printf("   📊 %d 个插件, %d 个分片\n", len(entries), chunks)
 	return nil
+}
+
+// missingMeta 汇总插件缺失的必需元数据（新格式 5 件套）。
+func missingMeta(e PluginEntry) string {
+	missing := []string{}
+	if !e.HasReadme {
+		missing = append(missing, "README.md")
+	}
+	if !e.HasConfig {
+		missing = append(missing, "config.yaml")
+	}
+	if !strings.HasSuffix(e.Image, "avatar.png") {
+		missing = append(missing, "avatar.png")
+	}
+	return "缺: " + strings.Join(missing, ", ")
 }

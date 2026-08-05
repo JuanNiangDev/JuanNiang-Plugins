@@ -1,0 +1,24 @@
+# ====================================================================
+# redrock_special 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# ====================================================================
+
+configs:
+  - key: enabled
+    type: bool
+    label: 启用插件
+    description: 是否启用卷娘彩蛋关键词回复
+    default: true
+
+  - key: bot_name
+    type: string
+    label: 机器人名称
+    description: 群聊中需要 @ 或提及的机器人称呼（用于触发彩蛋）
+    default: "卷娘"

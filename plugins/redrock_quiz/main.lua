@@ -70,8 +70,9 @@ local QUESTIONS = {
 -- ====================================================================
 -- 配置
 -- ====================================================================
-local MAX_WRONG = 4       -- 最多答错次数
-local QUESTIONS_PER_GAME = 5  -- 每局题数
+local ENABLED = jn.config.get("enabled")
+local MAX_WRONG = tonumber(jn.config.get("max_wrong")) or 4       -- 最多答错次数
+local QUESTIONS_PER_GAME = tonumber(jn.config.get("questions_per_game")) or 5  -- 每局题数
 
 -- ====================================================================
 -- 奖励语录
@@ -202,6 +203,12 @@ local function start_quiz(event)
     local group_id = event.group_id or 0
     local user_id = event.user_id
     local key = game_key(group_id, user_id)
+
+    -- 未启用时直接拒绝
+    if ENABLED == false then
+        reply(event, "快问快答功能暂未启用～")
+        return
+    end
 
     -- 检查是否已有游戏
     if get_game(key) then

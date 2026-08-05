@@ -13,16 +13,23 @@ jn.command.register("rich", function(args, event)
     local target_id = event.group_id ~= 0 and event.group_id or event.user_id
     local is_group = event.group_id ~= 0
 
+    -- 读取动态配置
+    local image_file = jn.config.get("image_file") or "test.png"
+    local text_before = jn.config.get("text_before")
+    local show_face = jn.config.get("show_face")
+
     -- 组装消息段：文本 + 图片 + 表情
     local segments = {
-        { type = "text", data = { text = "这是一张示例图片 👇\n" } },
+        { type = "text", data = { text = text_before } },
         {
             type = "image",
-            data = { file = "test.png" }   -- 插件目录下的 test.png，自动转 base64
+            data = { file = image_file }   -- 插件目录下的图片，自动转 base64
         },
-        { type = "text", data = { text = "\n👆 以上是插件目录中的 test.png" } },
-        { type = "face", data = { id = "66" } },  -- CQ 表情：[爱心]
+        { type = "text", data = { text = "\n👆 以上是插件目录中的 " .. image_file } },
     }
+    if show_face then
+        segments[#segments + 1] = { type = "face", data = { id = "66" } }  -- CQ 表情：[爱心]
+    end
 
     if is_group then
         jn.log.info(string.format("[rich-demo] 群 %d 触发 /rich", event.group_id))

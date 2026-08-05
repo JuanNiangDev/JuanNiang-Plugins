@@ -8,10 +8,9 @@
 local jn = require("jn")
 
 -- ====================================================================
--- 配置：Judge0 地址（无鉴权）
+-- 配置：Judge0 地址（无鉴权，可在 Web 面板配置）
 -- ====================================================================
--- local JUDGE0_BASE_URL = "http://2.2.2.1:2358"
-local JUDGE0_BASE_URL = "https://ce.judge0.com"
+local JUDGE0_BASE_URL = jn.config.get("judge0_base_url") or "https://ce.judge0.com"
 
 -- ====================================================================
 -- 语言 → Judge0 language_id 映射
@@ -143,8 +142,9 @@ local function reply(event, text)
 end
 
 --- 截断过长的输出
+local MAX_OUTPUT_LEN = tonumber(jn.config.get("max_output_len")) or 1500
 local function truncate(str, max_len)
-    max_len = max_len or 1500
+    max_len = max_len or MAX_OUTPUT_LEN
     if #str > max_len then
         return str:sub(1, max_len) .. "\n... (输出过长已截断)"
     end

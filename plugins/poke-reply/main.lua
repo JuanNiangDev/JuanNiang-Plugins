@@ -22,6 +22,11 @@ function on_notice(event)
         return
     end
 
+    -- 是否启用戳一戳回复
+    if jn.config.get("enable_poke_reply") == false then
+        return
+    end
+
     -- target_id 是被戳的人，user_id 是戳的人
     local from_qq = event.user_id       -- 发起戳一戳的人
     local to_qq = event.target_id       -- 被戳的人（可能是机器人自己）
@@ -31,11 +36,22 @@ function on_notice(event)
         return  -- 私聊戳一戳暂不处理（私聊戳一戳通常没有 group_id）
     end
 
-    -- 随机选一条回复
-    local reply_text = REPLIES[math.random(#REPLIES)]
+    -- 读取自定义回复语列表，为空则使用内置默认
+    local replies = jn.config.get("replies")
+    if type(replies) ~= "table" or #replies == 0 then
+        replies = REPLIES
+    end
 
-    -- 用 CQ 码 @ 发起戳一戳的人
-    local msg = string.format("[CQ:at,qq=%d] %s", from_qq, reply_text)
+    -- 随机选一条回复
+    local reply_text = replies[math.random(#replies)]
+
+    -- 是否 @ 发起戳一戳的人，用 CQ 码 @
+    local msg
+    if jn.config.get("mention_sender") then
+        msg = string.format("[CQ:at,qq=%d] %s", from_qq, reply_text)
+    else
+        msg = reply_text
+    end
     jn.onebot11.send_group_msg(group_id, msg)
 
     jn.log.info(string.format("[poke-reply] %d 戳了 %d 在群 %d", from_qq, to_qq, group_id))

@@ -84,10 +84,10 @@ local word_pool = {
 }
 
 -- ====================================================================
--- 常量
+-- 常量（可在 Web 面板配置中调整）
 -- ====================================================================
-local DEFAULT_LENGTH = 5
-local MAX_ATTEMPTS = 6
+local DEFAULT_LENGTH = tonumber(jn.config.get("default_length")) or 5
+local MAX_ATTEMPTS = tonumber(jn.config.get("max_attempts")) or 6
 
 -- ====================================================================
 -- 辅助函数
@@ -409,6 +409,10 @@ function on_message(event)
 
     local raw = (event.raw_message or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if raw == "" then return false, nil end
+
+    -- 引导触发开关
+    local enable_trigger = jn.config.get("enable_trigger") ~= false
+    if not enable_trigger then return false, nil end
 
     -- 没有游戏时：检查引导触发词
     if not get_game(event.group_id) then

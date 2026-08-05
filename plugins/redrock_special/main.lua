@@ -44,7 +44,8 @@ local RULES = {
 -- 辅助函数
 -- ====================================================================
 
-local BOT_NAME = "卷娘"
+local ENABLED = jn.config.get("enabled")
+local BOT_NAME = jn.config.get("bot_name") or "卷娘"
 local bot_qq = nil
 
 local function get_bot_qq()
@@ -111,6 +112,7 @@ end
 function on_message(event)
     local raw = (event.raw_message or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if raw == "" then return false, nil end
+    if ENABLED == false then return false, nil end
 
     -- 群聊需要 @ 卷娘
     if event.message_type == "group" and not is_mentioned(raw) then
