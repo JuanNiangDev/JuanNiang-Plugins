@@ -5,5 +5,6 @@ description: "{{.Description}}"
 entry: "main.lua"
 permissions:
   - onebot11
+  # - file   # 插件目录内文本文件读写（可选，见 SDK jn.file）
 system: false
 enabled: true
