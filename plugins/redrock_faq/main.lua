@@ -10,20 +10,20 @@ local jn = require("jn")
 -- ====================================================================
 local REPLIES = {
     -- 部门介绍
-    redrock = "我们红岩网校是重邮团委旗下唯一一个从事互联网开发运营的学生组织，不仅培育出了一大批优秀的人才，还荣获多个荣誉奖项，深受大企青睐！\n\n🔗 了解更多：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-A35ed3K3UoeylOxD7Zac3nFcnkg",
-    product = "产品策划及运营部是点子不冻港，产品的设计蓝图都出自他们之手。\n\n🔗 了解更多：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-XUacdJ6ZjorepWxEiqlcvcognWe",
-    visual = "视觉设计部的同学是创意设计者，用色彩渲染世界。\n\n🔗 了解更多：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-WoEPdI9abo6iLixn807cTHtYnpc",
-    frontend = "他们是网站前台的画师。小程序、网站、webAPP里都有他们的影子。打造完美的网页是前端的宗旨！\n\n🔗 了解更多：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-JdaedCrzNokW79xGwAYc9ADFnKg",
+    redrock = "我们红岩网校是重邮团委旗下唯一一个从事互联网开发运营的学生组织，不仅培育出了一大批优秀的人才，还荣获多个荣誉奖项，深受大企青睐！\n\n🔗 了解更多：https://docs.qq.com/doc/DWWpYYXZPdGFUZVRT",
+    product = "产品策划及运营部是点子不冻港，产品的设计蓝图都出自他们之手。\n\n🔗 了解更多：https://docs.qq.com/doc/DWXRZRWFMUE5sRXJw",
+    visual = "视觉设计部的同学是创意设计者，用色彩渲染世界。\n\n🔗 了解更多：https://docs.qq.com/doc/DWW9YdERBU1FIWkhT",
+    frontend = "他们是网站前台的画师。小程序、网站、webAPP里都有他们的影子。打造完美的网页是前端的宗旨！\n\n🔗 了解更多：https://docs.qq.com/doc/DWWZsdWtNVGtBYXFw",
     backend = [[后端是数据架构师，千万别小看它，这可是网校背后最可靠的保障。
 
-🔗 了解更多：https://redrock.feishu.cn/docx/IcmzdrdREoTmJ0xYtd0cRpZ3nIe]],
-    mobile = "移动开发部的同学是APP的开发者，想解锁APP的无限可能吗？\n\n🔗 了解更多：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-JZfudR64noUzYexObDLcQ79qnIe",
-    ops = "运维安全部的成员技术高超，多亏了他们的存在，网校的系统才维持着安全稳定！\n\n🔗 了解更多：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-GoUad3yAsoVCybxXGnuctO9gnzh",
-    android = "Android是移动开发部从事安卓系统APP研发的子部门。他们利用Java和Kotlin来创造无限的可能，想在手机拥有一个自己创造的APP吗？加入Android吧！\n\n🔗 移动开发部：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-JZfudR64noUzYexObDLcQ79qnIe",
-    ios = "iOS是移动开发部从事苹果系统APP研发的子部门，拥有着强大的苹果生态与无限的可能。想从App Store上看到自己的应用吗？想成为下一个Apple Developer吗？来iOS吧！\n\n🔗 移动开发部：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-JZfudR64noUzYexObDLcQ79qnIe",
-    ai = "人工智能开发与应用部是红岩网校的新兴部门，主攻AI应用落地，具有广阔的发展前景。\n\n🔗 了解更多：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-IFiVdwbxuoIcyMx8ZZ2caD5onfb",
-    study = "扎实的技术，互联网前沿知识，独一无二的项目经验，志同道合的朋友，都在红岩网校等着你呢！快来提升你的自学能力和沟通能力，强化你的自驱和自制力吧！\n\n🔗 了解更多：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-Vy60dGu2zovNAVx3AWucInvLndh",
-    recruit = "网校的招新活动已经开始火热筹备！届时会开设招新宣讲会，帮助你进一步的了解红岩网校。会上我们还准备了精美的礼品等你来拿，时刻关注群消息，一定不要错过哦！\n\n🔗 了解更多：https://ncnmb0lnxlng.feishu.cn/wiki/IxTFw5V3uiHH9Hk5LmEcjY8nng7#share-HMpJdnM4GoKsmdxyyjicunkInIN",
+🔗 了解更多：https://docs.qq.com/doc/DWWpEc1dYUEhRVEph]],
+    mobile = "移动开发部的同学是APP的开发者，想解锁APP的无限可能吗？\n\n🔗 了解更多：https://docs.qq.com/doc/DWXRjZGZyRk9MVmxW",
+    ops = "运维安全部的成员技术高超，多亏了他们的存在，网校的系统才维持着安全稳定！\n\n🔗 了解更多：https://docs.qq.com/doc/DWXpiSnBwdEN1TGps",
+    android = "Android是移动开发部从事安卓系统APP研发的子部门。他们利用Java和Kotlin来创造无限的可能，想在手机拥有一个自己创造的APP吗？加入Android吧！\n\n🔗 移动开发部：https://docs.qq.com/doc/DWXRjZGZyRk9MVmxW",
+    ios = "iOS是移动开发部从事苹果系统APP研发的子部门，拥有着强大的苹果生态与无限的可能。想从App Store上看到自己的应用吗？想成为下一个Apple Developer吗？来iOS吧！\n\n🔗 移动开发部：https://docs.qq.com/doc/DWXRjZGZyRk9MVmxW",
+    ai = "人工智能开发与应用部是红岩网校的新兴部门，主攻AI应用落地，具有广阔的发展前景。\n\n🔗 了解更多：https://docs.qq.com/doc/DWVhJY0pwSm9iSXpu",
+    study = "扎实的技术，互联网前沿知识，独一无二的项目经验，志同道合的朋友，都在红岩网校等着你呢！快来提升你的自学能力和沟通能力，强化你的自驱和自制力吧！\n\n🔗 了解更多：https://docs.qq.com/doc/DWWpYYXZPdGFUZVRT",
+    recruit = "网校的招新活动已经开始火热筹备！届时会开设招新宣讲会，帮助你进一步的了解红岩网校。会上我们还准备了精美的礼品等你来拿，时刻关注群消息，一定不要错过哦！\n\n🔗 了解更多：https://docs.qq.com/doc/DWWpYYXZPdGFUZVRT",
     join = [[扫描下方二维码，进入"青春邮约"，选择红岩网校工作站，让redrocker成为你最骄傲的自称吧~~]],
     achievement = [[嘿嘿，红岩网校的成果有这些："重邮帮"小程序，"重邮小帮手"公众号，"掌上重邮"APP，美育学分管理系统，H5页面……]],
     location = [[太极运动场西3号门和西4号门都可以进入，具体可以到达西3号门查看楼内地图噢]],

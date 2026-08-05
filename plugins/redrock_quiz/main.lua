@@ -2,6 +2,9 @@
 -- redrock_quiz
 -- 红岩知识快问快答小游戏
 -- 触发: /来一局 /快问快答
+-- 答题: /答 <答案>
+-- 结束: /结束快答
+-- 状态: 内存缓存 + PostgreSQL KV 表持久化
 -- ====================================================================
 
 local jn = require("jn")
@@ -31,7 +34,7 @@ local QUESTIONS = {
     {
         q = "红岩网校下设六个部门还是七个部门？",
         a = "七个部门",
-        match = { "七", "七个", "7", "七个部门", "7个", "七" },
+        match = { "七", "七个", "7", "七个部门", "7个" },
         hint = "比六多一个哦～",
     },
     {
@@ -65,9 +68,10 @@ local QUESTIONS = {
 }
 
 -- ====================================================================
--- 游戏状态（模块级表，key = "group_id:user_id"）
+-- 配置
 -- ====================================================================
-local games = {}
+local MAX_WRONG = 4       -- 最多答错次数
+local QUESTIONS_PER_GAME = 5  -- 每局题数
 
 -- ====================================================================
 -- 奖励语录
@@ -91,7 +95,53 @@ local WRONG_REPLY = {
 local FINISH_PERFECT = "🏆 满分通关！你对红岩网校的了解已经超越了卷娘！"
 local FINISH_GREAT = "🎯 太棒了！%d/%d 正确，你是红岩知识达人！"
 local FINISH_GOOD = "👍 不错哦！%d/%d 正确，再来一局冲击满分？"
-local FINISH_OK = "📖 %d/%d 正确，多了解一点红岩的故事吧～\n小卷提示：https://ncnmb0lnxlng.feishu.cn/wiki/AxqGwtJjgiAIEZklvGncnSTjnpf"
+local FINISH_OK = "📖 %d/%d 正确，多了解一点红岩的故事吧～\n小卷提示：https://docs.qq.com/doc/DWWpYYXZPdGFUZVRT"
+
+-- ====================================================================
+-- 存储层：内存缓存 + SQLite (表自动前缀 pluggin_redrock_quiz_)
+-- ====================================================================
+local store = {}
+
+local function init_db()
+    jn.database.exec([[
+        CREATE TABLE IF NOT EXISTS pluggin_redrock_quiz_games (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    ]])
+end
+init_db()
+
+local function get_game(key)
+    local v = store[key]
+    if v ~= nil then return v end
+    local rows, err = jn.database.query(
+        string.format("SELECT value FROM pluggin_redrock_quiz_games WHERE key = '%s'", key))
+    if rows and #rows > 0 and rows[1].value then
+        local ok, decoded = pcall(jn.json.decode, rows[1].value)
+        if ok and decoded then
+            store[key] = decoded
+            return decoded
+        end
+    end
+    return nil
+end
+
+local function save_game(key, game)
+    store[key] = game
+    local ok, encoded = pcall(jn.json.encode, game)
+    if ok and encoded then
+        jn.database.exec(string.format(
+            "INSERT INTO pluggin_redrock_quiz_games (key, value) VALUES ('%s', '%s') " ..
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            key, encoded))
+    end
+end
+
+local function delete_game(key)
+    store[key] = nil
+    jn.database.exec(string.format("DELETE FROM pluggin_redrock_quiz_games WHERE key = '%s'", key))
+end
 
 -- ====================================================================
 -- 辅助函数
@@ -124,17 +174,13 @@ local function check_answer(question, user_answer)
     local lower = user_answer:lower():gsub("%s+", ""):gsub("[%p]+", "")
     local cm = question.match
 
-    -- 多词全匹配
     if question.match_all then
         for _, kw in ipairs(cm) do
-            if not lower:find(kw, 1, true) then
-                return false
-            end
+            if not lower:find(kw, 1, true) then return false end
         end
         return true
     end
 
-    -- 最少匹配 N 个
     if question.match_min then
         local count = 0
         for _, kw in ipairs(cm) do
@@ -143,133 +189,158 @@ local function check_answer(question, user_answer)
         return count >= question.match_min
     end
 
-    -- 任意匹配
     for _, kw in ipairs(cm) do
-        if lower:find(kw, 1, true) then
-            return true
-        end
+        if lower:find(kw, 1, true) then return true end
     end
     return false
 end
 
 -- ====================================================================
--- 命令: /来一局 /快问快答
+-- 开局
 -- ====================================================================
 local function start_quiz(event)
     local group_id = event.group_id or 0
     local user_id = event.user_id
     local key = game_key(group_id, user_id)
 
-    local pool = {}
-    for i, q in ipairs(QUESTIONS) do
-        pool[i] = q
+    -- 检查是否已有游戏
+    if get_game(key) then
+        reply(event, "你已经有进行中的快问快答啦！发送 /结束快答 可以结束当前游戏。")
+        return
     end
+
+    local pool = {}
+    for i, q in ipairs(QUESTIONS) do pool[i] = q end
     shuffle(pool)
 
-    local total = 5
     local selected = {}
-    for i = 1, math.min(total, #pool) do
+    for i = 1, math.min(QUESTIONS_PER_GAME, #pool) do
         selected[i] = pool[i]
     end
 
-    games[key] = {
+    local game = {
         questions = selected,
         current = 1,
         score = 0,
         total = #selected,
+        wrong = 0,
+        status = "playing",
     }
+    save_game(key, game)
 
     local q = selected[1]
-    reply(event, "🎮 红岩知识快问快答开始！共 " .. #selected .. " 题\n\n" ..
-        "第 1 题：" .. q.q)
+    reply(event, "🎮 红岩知识快问快答开始！共 " .. #selected .. " 题（答错 " .. MAX_WRONG .. " 次结束）\n\n" ..
+        "第 1 题：" .. q.q .. "\n\n发送 /答 <答案> 来回答～")
 
     jn.log.info(string.format("[quiz] %d 开始答题", user_id))
 end
 
+-- ====================================================================
+-- 结束
+-- ====================================================================
+local function finish_quiz(event, game, key)
+    local score = game.score
+    local total = game.total
+    local msg
+    if score == total then
+        msg = FINISH_PERFECT
+    elseif score >= total * 0.8 then
+        msg = string.format(FINISH_GREAT, score, total)
+    elseif score >= total * 0.5 then
+        msg = string.format(FINISH_GOOD, score, total)
+    else
+        msg = string.format(FINISH_OK, score, total)
+    end
+    reply(event, msg)
+    delete_game(key)
+end
+
+-- ====================================================================
+-- 命令
+-- ====================================================================
 jn.command.register("来一局", function(args, event)
     start_quiz(event)
     return true
-end, {
-    description = "开始红岩知识快问快答",
-    usage = "/来一局",
-})
+end, { description = "开始红岩知识快问快答", usage = "/来一局" })
 
 jn.command.register("快问快答", function(args, event)
     start_quiz(event)
     return true
-end, {
-    description = "开始红岩知识快问快答",
-    usage = "/快问快答",
-})
+end, { description = "开始红岩知识快问快答", usage = "/快问快答" })
 
 jn.command.register("结束快答", function(args, event)
     local key = game_key(event.group_id or 0, event.user_id)
-    local game = games[key]
+    local game = get_game(key)
     if not game then
         reply(event, "你还没有进行中的快问快答哦～发送 /来一局 开始吧！")
         return true
     end
-    games[key] = nil
     reply(event, "快问快答已结束～得分: " .. game.score .. "/" .. game.total)
+    delete_game(key)
     return true
-end, {
-    description = "结束当前快问快答",
-    usage = "/结束快答",
-})
+end, { description = "结束当前快问快答", usage = "/结束快答" })
 
 -- ====================================================================
--- on_message: 答题
+-- 命令: /答 <答案>
 -- ====================================================================
-function on_message(event)
-    if event.message_type ~= "group" then return false, nil end
-
-    local raw = (event.raw_message or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if raw == "" then return false, nil end
+jn.command.register("答", function(args, event)
+    if event.message_type ~= "group" then return true end
 
     local key = game_key(event.group_id, event.user_id)
-    local game = games[key]
-    if not game then return false, nil end
+    local game = get_game(key)
+    if not game or game.status ~= "playing" then
+        reply(event, "你还没有进行中的快问快答哦～发送 /来一局 开始吧！")
+        return true
+    end
 
+    if #args == 0 then
+        reply(event, "请输入答案，例如：/答 2000年")
+        return true
+    end
+
+    local answer = table.concat(args, " ")
     local q = game.questions[game.current]
-    local correct = check_answer(q, raw)
+    local correct = check_answer(q, answer)
 
     if correct then
         game.score = game.score + 1
         local praise = PRAISE[math.random(#PRAISE)]
         game.current = game.current + 1
 
-        -- 所有题目答完
         if game.current > game.total then
-            local msg
-            local score = game.score
-            local total = game.total
-            if score == total then
-                msg = praise .. "\n\n" .. FINISH_PERFECT
-            elseif score >= total * 0.8 then
-                msg = praise .. "\n\n" .. string.format(FINISH_GREAT, score, total)
-            elseif score >= total * 0.5 then
-                msg = praise .. "\n\n" .. string.format(FINISH_GOOD, score, total)
-            else
-                msg = praise .. "\n\n" .. string.format(FINISH_OK, score, total)
-            end
-            reply(event, msg)
-            games[key] = nil
+            finish_quiz(event, game, key)
             return true
         end
 
-        -- 下一题
+        save_game(key, game)
         local next_q = game.questions[game.current]
         reply(event, praise .. "\n\n第 " .. game.current .. " 题：" .. next_q.q)
         return true
     end
 
-    -- 答错了
-    local msg = WRONG_REPLY[math.random(#WRONG_REPLY)]
-    if q.hint then
-        msg = msg .. "\n💡 提示：" .. q.hint
+    -- 答错
+    game.wrong = game.wrong + 1
+    save_game(key, game)
+
+    if game.wrong >= MAX_WRONG then
+        reply(event, "😵 答错 " .. MAX_WRONG .. " 次，游戏结束！\n正确答案是：" .. q.a)
+        delete_game(key)
+        return true
     end
+
+    local remaining = MAX_WRONG - game.wrong
+    local msg = WRONG_REPLY[math.random(#WRONG_REPLY)]
+    if q.hint then msg = msg .. "\n💡 提示：" .. q.hint end
+    msg = msg .. "\n（还可答错 " .. remaining .. " 次）"
     reply(event, msg)
     return true
+end, { description = "提交快问快答的答案", usage = "/答 <答案>" })
+
+-- ====================================================================
+-- on_message: 不做处理（答案统一走 /答 命令）
+-- ====================================================================
+function on_message(event)
+    return false, nil
 end
 
 jn.log.info("[redrock_quiz] 红岩快问快答插件已加载")
