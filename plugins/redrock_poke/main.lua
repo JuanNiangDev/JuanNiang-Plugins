@@ -47,6 +47,33 @@ end
 -- 上次发送的索引，避免连续两次一样
 local last_index = 0
 
+-- 机器人自身 QQ（惰性获取并缓存；配置变更重载后自动重新解析）
+local self_qq = nil
+local self_qq_warned = false
+
+-- 获取机器人自身 QQ：优先配置 bot_qq，其次自动调用 get_login_info。
+-- 失败时返回 nil（不缓存，下次事件重试），避免启动时适配器未连接导致永久失效。
+local function get_self_qq()
+    if self_qq then
+        return self_qq
+    end
+    local cfg_qq = jn.config.get("bot_qq")
+    if cfg_qq and tostring(cfg_qq) ~= "" then
+        self_qq = tonumber(cfg_qq)
+        return self_qq
+    end
+    local info, err = jn.onebot11.get_login_info()
+    if info and info.user_id then
+        self_qq = tonumber(info.user_id)
+        return self_qq
+    end
+    if not self_qq_warned then
+        self_qq_warned = true
+        jn.log.warn(string.format("[redrock_poke] 获取机器人QQ失败(%s)，戳一戳回复暂时停用，可在配置中指定 bot_qq", tostring(err)))
+    end
+    return nil
+end
+
 -- ====================================================================
 -- on_notice: 戳一戳事件
 -- ====================================================================
@@ -61,6 +88,18 @@ function on_notice(event)
 
     local group_id = event.group_id
     if group_id == 0 then return end
+
+    -- 只响应"被戳对象是机器人自己"的戳一戳：
+    -- OneBot11 poke 事件中 user_id=戳人者，target_id=被戳者。
+    -- 若 target_id 缺失（=0）或不是机器人自己，直接忽略，避免误回戳别人的戳一戳。
+    local bot_qq = get_self_qq()
+    if not bot_qq then
+        return
+    end
+    local target = tonumber(event.target_id)
+    if not target or target ~= bot_qq then
+        return
+    end
 
     local from_qq = event.user_id
 

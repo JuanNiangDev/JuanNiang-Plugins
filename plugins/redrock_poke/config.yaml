@@ -17,6 +17,12 @@ configs:
     description: 是否在被戳时自动回复（默认 true）
     default: true
 
+  - key: bot_qq
+    type: string
+    label: 机器人QQ号
+    description: 仅当戳一戳的目标是本QQ时才回复；留空则自动通过 get_login_info 获取（一般无需手动填写）
+    default: ""
+
   - key: poke_replies
     type: list
     label: 戳一戳回复语
