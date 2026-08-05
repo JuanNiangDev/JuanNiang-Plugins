@@ -60,6 +60,16 @@
     "has_readme": true
   },
   {
+    "name": "redrock_fanzha",
+    "version": "1.2.0",
+    "author": "Redrock",
+    "description": "开学季反诈提醒：发送 /反诈提醒 获取完整反诈指南",
+    "path": "redrock_fanzha",
+    "image": "redrock_fanzha/avatar.png",
+    "has_config": true,
+    "has_readme": true
+  },
+  {
     "name": "redrock_faq",
     "version": "1.0.0",
     "author": "Redrock",
