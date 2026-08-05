@@ -25,7 +25,7 @@ local jn = require("jn")
 function on_timer_call(event)
     local payload = event.payload or {}
     local target_qq = payload.target_qq
-    local message = payload.message
+    local message = payload.message or jn.config.get("default_message")
     local msg_type = payload.message_type or "private"
     local group_id = payload.group_id
 

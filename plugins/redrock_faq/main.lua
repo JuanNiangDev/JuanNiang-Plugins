@@ -135,7 +135,7 @@ local SUFFIXES = {
     "？", "?", "！", "!", "。", "～", "~", "…",
 }
 
-local BOT_NAME = "卷娘"
+local BOT_NAME = jn.config.get("bot_name") or "卷娘"
 local bot_qq = nil
 
 local function strip_suffixes(s)
@@ -257,10 +257,12 @@ function on_message(event)
             return true
         end
 
-        -- 私聊语料库匹配
-        for _, rule in ipairs(CHAT_RULES) do
-            for _, kw in ipairs(rule.keywords) do
-                if match_kw(lower, kw) then reply(event, rule.reply, rule.image); return true end
+        -- 私聊语料库匹配（可配置开关）
+        if jn.config.get("enable_chat_rules") ~= false then
+            for _, rule in ipairs(CHAT_RULES) do
+                for _, kw in ipairs(rule.keywords) do
+                    if match_kw(lower, kw) then reply(event, rule.reply, rule.image); return true end
+                end
             end
         end
         return false, nil
@@ -296,17 +298,19 @@ function on_message(event)
     end
 
     -- 语料库优先（loose 匹配，≤2字符做精确匹配避免误触）
-    for _, rule in ipairs(CHAT_RULES) do
-        for _, kw in ipairs(rule.keywords) do
-            local hit = false
-            if #kw <= 2 then
-                hit = (cleaned == kw)
-            elseif match_kw(lower, kw) then
-                hit = true
-            end
-            if hit then
-                reply(event, rule.reply, rule.image)
-                return true
+    if jn.config.get("enable_chat_rules") ~= false then
+        for _, rule in ipairs(CHAT_RULES) do
+            for _, kw in ipairs(rule.keywords) do
+                local hit = false
+                if #kw <= 2 then
+                    hit = (cleaned == kw)
+                elseif match_kw(lower, kw) then
+                    hit = true
+                end
+                if hit then
+                    reply(event, rule.reply, rule.image)
+                    return true
+                end
             end
         end
     end

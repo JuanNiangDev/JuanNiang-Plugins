@@ -41,7 +41,7 @@ jn.command.register("t2i", function(args, event)
     end
 
     jn.log.info("[t2i-example] 图片 URL: " .. url)
-    reply(event, "✅ 图片生成成功\nURL: " .. url)
+    reply(event, (jn.config.get("success_prefix") or "✅ 图片生成成功\nURL: ") .. url)
     return true
 end, {
     description = "生成图片（T2I），返回 URL",

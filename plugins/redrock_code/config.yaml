@@ -1,0 +1,24 @@
+# ====================================================================
+# redrock_code 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# ====================================================================
+
+configs:
+  - key: judge0_base_url
+    type: string
+    label: Judge0 服务地址
+    description: 用于运行代码的 Judge0 服务地址（无鉴权）
+    default: "https://ce.judge0.com"
+
+  - key: max_output_len
+    type: string
+    label: 输出最大长度
+    description: 运行结果输出的最大字符数，超出部分会被截断（默认 1500）
+    default: "1500"

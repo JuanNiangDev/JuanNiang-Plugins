@@ -8,9 +8,9 @@
 local jn = require("jn")
 
 -- ====================================================================
--- 卷娘的人设回复库
+-- 内置默认回复库（可在 Web 面板配置 poke_replies 覆盖）
 -- ====================================================================
-local REPLIES = {
+local DEFAULT_REPLIES = {
     -- 俏皮傲娇类
     "哼！别戳了，再戳狮子座可是会炸毛的哦～🦁",
     "哎呀，戳坏了你赔吗！卷娘才18岁，很娇贵的！(〃＞＿＜;〃)",
@@ -38,6 +38,12 @@ local REPLIES = {
     "卷娘今年18岁，在红岩网校等你来！这里有一群超棒的小伙伴～",
 }
 
+-- 回复库：优先使用配置的 poke_replies，否则回退内置默认库
+local REPLIES = jn.config.get("poke_replies") or DEFAULT_REPLIES
+if type(REPLIES) ~= "table" or #REPLIES == 0 then
+    REPLIES = DEFAULT_REPLIES
+end
+
 -- 上次发送的索引，避免连续两次一样
 local last_index = 0
 
@@ -49,6 +55,9 @@ function on_notice(event)
     if event.notice_type ~= "notify" or event.sub_type ~= "poke" then
         return
     end
+
+    -- 启用开关
+    if jn.config.get("enabled") == false then return end
 
     local group_id = event.group_id
     if group_id == 0 then return end

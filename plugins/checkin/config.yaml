@@ -1,0 +1,30 @@
+# ====================================================================
+# checkin 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# ====================================================================
+
+configs:
+  - key: score_range
+    type: string
+    label: 签到积分范围
+    description: 每次签到随机获得的积分范围（最小值-最大值，如 "1-10"）
+    default: "1-10"
+
+  - key: enable_quote
+    type: bool
+    label: 附带每日金句
+    description: 签到成功后是否附带一条每日金句
+    default: true
+
+  - key: rank_limit
+    type: string
+    label: 排行榜人数
+    description: /rank 排行榜最多显示的人数（如 "10"）
+    default: "10"

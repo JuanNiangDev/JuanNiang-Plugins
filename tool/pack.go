@@ -73,7 +73,7 @@ func packAllPlugins() error {
 			fmt.Println(color.RedString("   ✖ %s: %s", name, err))
 		}
 	}
-	fmt.Printf("\n" + color.GreenString("✅ 全部打包完成!"))
+	fmt.Print("\n", color.GreenString("✅ 全部打包完成!"))
 	fmt.Printf("   📁 %s\n", color.CyanString(distDir()))
 	return nil
 }
@@ -101,7 +101,7 @@ func packByPrefix(prefix string) error {
 			fmt.Println(color.RedString("   ✖ %s: %s", name, err))
 		}
 	}
-	fmt.Printf("\n" + color.GreenString("✅ 全部打包完成!"))
+	fmt.Print("\n", color.GreenString("✅ 全部打包完成!"))
 	fmt.Printf("   📁 %s\n", color.CyanString(distDir()))
 	return nil
 }
@@ -110,6 +110,18 @@ func packOne(name string) error {
 	srcDir := filepath.Join(pluginsDir(), name)
 	if _, err := os.Stat(srcDir); os.IsNotExist(err) {
 		return fmt.Errorf("插件目录不存在: %s", srcDir)
+	}
+
+	// 校验新格式必需文件（弱提示，不阻断打包）
+	for _, required := range []string{"pluggin.yaml", "main.lua"} {
+		if _, err := os.Stat(filepath.Join(srcDir, required)); err != nil {
+			return fmt.Errorf("缺少必需文件 %s", required)
+		}
+	}
+	for _, optional := range []string{"config.yaml", "README.md", "avatar.png"} {
+		if _, err := os.Stat(filepath.Join(srcDir, optional)); err != nil {
+			fmt.Printf("   ⚠ 缺少 %s（建议补齐新格式 5 件套）\n", optional)
+		}
 	}
 
 	zipPath := filepath.Join(distDir(), name+".zip")

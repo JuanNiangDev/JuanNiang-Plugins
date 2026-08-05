@@ -1,0 +1,24 @@
+# ====================================================================
+# redrock_poke 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# ====================================================================
+
+configs:
+  - key: enabled
+    type: bool
+    label: 启用戳一戳回复
+    description: 是否在被戳时自动回复（默认 true）
+    default: true
+
+  - key: poke_replies
+    type: list
+    label: 戳一戳回复语
+    description: 被戳时随机选用的一条回复语（留空则使用内置默认回复库）
+    default: []

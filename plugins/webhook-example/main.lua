@@ -16,7 +16,7 @@
 
 local jn = require("jn")
 
-local DEFAULT_GROUP = 123456789  -- 默认通知群号
+local DEFAULT_GROUP = tonumber(jn.config.get("default_group")) or 123456789  -- 默认通知群号
 
 -- ====================================================================
 -- on_webhook 回调

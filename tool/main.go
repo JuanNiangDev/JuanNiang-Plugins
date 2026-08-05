@@ -22,6 +22,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(packCmd)
 	rootCmd.AddCommand(scanCmd)
+	rootCmd.AddCommand(validateCmd)
 }
 
 func main() {

@@ -7,7 +7,7 @@ local jn = require("jn")
 -- /ping 顶层命令
 -- --------------------------------------------------------------------
 jn.command.register("ping", function(args, event)
-    local reply_text = "pong!"
+    local reply_text = jn.config.get("reply_text") or "pong!"
     if event.message_type == "group" then
         jn.onebot11.send_group_msg(event.group_id, reply_text)
     else
@@ -27,10 +27,11 @@ end, {
 function on_message(event)
     local raw = event.raw_message or ""
     if raw == "/ping" then
+        local reply_text = jn.config.get("reply_text") or "pong!"
         if event.message_type == "group" then
-            jn.onebot11.send_group_msg(event.group_id, "pong!")
+            jn.onebot11.send_group_msg(event.group_id, reply_text)
         else
-            jn.onebot11.send_private_msg(event.user_id, "pong!")
+            jn.onebot11.send_private_msg(event.user_id, reply_text)
         end
         return true, event
     end

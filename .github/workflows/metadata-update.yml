@@ -1,0 +1,57 @@
+name: Nightly Metadata Update
+
+on:
+  # 每天 UTC 16:00（北京时间次日 0:00）自动更新商店元数据
+  schedule:
+    - cron: '0 16 * * *'
+  # 支持手动触发
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制提交（即使无变更）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build & scan metadata
+        run: |
+          cd tool && go build -o ../hago .
+          cd .. && ./hago scan
+
+      - name: Pack dist zips
+        run: |
+          ./hago pack --all
+
+      - name: Commit metadata & dist changes
+        id: commit
+        run: |
+          git config user.name "juanniang-bot"
+          git config user.email "bot@juanniang.dev"
+          # dist/ 在 .gitignore 中，需要强制添加以便商店可从仓库直接下载 zip
+          git add -f metadata/ plugins.json dist/
+          if git diff --cached --quiet; then
+            echo "no changes"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore(metadata): nightly metadata & dist update"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push
+        if: steps.commit.outputs.changed == 'true'
+        run: git push

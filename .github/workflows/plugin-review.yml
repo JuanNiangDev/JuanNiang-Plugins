@@ -1,0 +1,91 @@
+name: Plugin Review
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/**'
+      - 'tool/**'
+      - '.github/workflows/plugin-review.yml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build hago tool
+        run: cd tool && go build -o ../hago .
+
+      - name: List changed plugins
+        id: changed
+        run: |
+          # 提取 PR 中真实变更的插件目录（plugins/<name>/）
+          CHANGED=$(git diff --name-only origin/main...HEAD -- plugins/ \
+            | grep -E '^plugins/[^/]+/' | cut -d/ -f2 | sort -u)
+          echo "changed=$(echo $CHANGED | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          echo "Changed plugins: $CHANGED"
+
+      - name: Validate plugins
+        run: |
+          CHANGED="${{ steps.changed.outputs.changed }}"
+          if [ -z "$CHANGED" ]; then
+            echo "No plugin changes detected, skipping validation."
+            exit 0
+          fi
+          FAIL=0
+          for name in $CHANGED; do
+            # 跳过 sdk / system 目录
+            if [ "$name" = "sdk" ] || [ "$name" = "system" ]; then
+              continue
+            fi
+            echo "=== Validating $name ==="
+            if ! ./hago validate "$name" --strict; then
+              FAIL=1
+            fi
+          done
+          exit $FAIL
+
+      - name: Check version bump
+        run: |
+          CHANGED="${{ steps.changed.outputs.changed }}"
+          if [ -z "$CHANGED" ]; then
+            exit 0
+          fi
+          FAIL=0
+          for name in $CHANGED; do
+            if [ "$name" = "sdk" ] || [ "$name" = "system" ]; then
+              continue
+            fi
+            # 若插件在 main 已存在，则必须递增 version
+            OLD=$(git show origin/main:plugins/$name/pluggin.yaml 2>/dev/null | grep '^version:' | awk '{print $2}' | tr -d '"' || true)
+            NEW=$(grep '^version:' plugins/$name/pluggin.yaml | awk '{print $2}' | tr -d '"' || true)
+            if [ -n "$OLD" ] && [ "$OLD" = "$NEW" ]; then
+              echo "❌ $name: 版本未递增（$OLD -> $NEW），请更新 pluggin.yaml 的 version"
+              FAIL=1
+            fi
+          done
+          exit $FAIL
+
+      - name: Leave review comment on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '❌ **插件格式校验未通过**。请检查：\n- 必需文件是否齐全（main.lua / pluggin.yaml / config.yaml / README.md / avatar.png）\n- config.yaml 的 type 是否合法（bool/string/list）\n- pluggin.yaml 的 version 是否相对 main 分支递增\n\n运行 `./hago validate <name> --strict` 本地复现。'
+            })

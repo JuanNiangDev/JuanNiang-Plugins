@@ -9,6 +9,20 @@
 local jn = require("jn")
 
 -- --------------------------------------------------------------------
+-- 辅助函数：解析 "min-max" 形式的积分范围
+-- --------------------------------------------------------------------
+local function parse_range(str, default_min, default_max)
+    local min, max = tostring(str):match("^(%d+)%s*[-~]%s*(%d+)$")
+    if min and max then
+        min, max = tonumber(min), tonumber(max)
+        if min and max and min <= max then
+            return min, max
+        end
+    end
+    return default_min, default_max
+end
+
+-- --------------------------------------------------------------------
 -- 辅助函数：根据 event 回复消息
 -- --------------------------------------------------------------------
 local function reply(event, text)
@@ -103,7 +117,8 @@ end
 -- 执行签到
 -- --------------------------------------------------------------------
 local function do_checkin(user_id, group_id, user_name)
-    local score = math.random(1, 10)
+    local min, max = parse_range(jn.config.get("score_range"), 1, 10)
+    local score = math.random(min, max)
     local date = today()
     local sql = string.format(
         "INSERT INTO pluggin_checkin_records (user_id, group_id, user_name, score, check_date, created_at) VALUES (%d, %d, '%s', %d, '%s', '%s')",
@@ -170,16 +185,16 @@ jn.command.register("qd", function(args, event)
     -- 获取总积分
     local total = get_user_score(user_id, group_id)
 
-    -- 获取金句
-    local quote = get_quote()
-
     -- 构造回复
     local lines = {
         string.format("签到成功！%s", user_name),
         string.format("本次获得 +%d 分 | 累计 %d 分", score, total),
-        "",
-        quote,
     }
+    -- 是否附带每日金句
+    if jn.config.get("enable_quote") then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = get_quote()
+    end
     reply(event, table.concat(lines, "\n"))
     return true
 end, {
@@ -193,14 +208,15 @@ end, {
 jn.command.register("rank", function(args, event)
     local group_id = event.group_id or 0
 
+    local rank_limit = tonumber(jn.config.get("rank_limit")) or 10
     local sql = string.format(
         [[SELECT user_id, user_name, COALESCE(SUM(score), 0) AS total, COUNT(*) AS check_days
           FROM pluggin_checkin_records
           WHERE group_id = %d
           GROUP BY user_id, user_name
           ORDER BY total DESC
-          LIMIT 10]],
-        group_id
+          LIMIT %d]],
+        group_id, rank_limit
     )
     local rows, err = jn.database.query(sql)
     if err then
@@ -214,7 +230,7 @@ jn.command.register("rank", function(args, event)
         return true
     end
 
-    local lines = {"签到排行榜 (Top 10):"}
+    local lines = {string.format("签到排行榜 (Top %d):", rank_limit)}
     local medals = { "🥇", "🥈", "🥉" }
     for i, row in ipairs(rows) do
         local medal = medals[i] or string.format("%d.", i)

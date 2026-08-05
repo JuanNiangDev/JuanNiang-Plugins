@@ -7,16 +7,16 @@
 local jn = require("jn")
 
 -- ====================================================================
--- 配置
+-- 配置（可在 Web 面板配置）
 -- ====================================================================
 
--- 图片刷屏：2 秒内 3 张触发警告
-local IMG_SPAM_WINDOW = 2
-local IMG_SPAM_THRESHOLD = 3
-local IMG_MUTE_DURATION = 60
+-- 图片刷屏：IMGP_SPAM_WINDOW 秒内 IMG_SPAM_THRESHOLD 张触发警告
+local IMG_SPAM_WINDOW = tonumber(jn.config.get("img_spam_window")) or 2
+local IMG_SPAM_THRESHOLD = tonumber(jn.config.get("img_spam_threshold")) or 3
+local IMG_MUTE_DURATION = tonumber(jn.config.get("img_mute_duration")) or 60
 
--- +1 复读：3 人连续发相同消息触发
-local COPY_THRESHOLD = 3
+-- +1 复读：COPY_THRESHOLD 人连续发相同消息触发
+local COPY_THRESHOLD = tonumber(jn.config.get("copy_threshold")) or 3
 
 -- ====================================================================
 -- 敏感词库
@@ -261,6 +261,9 @@ local function check_copy_spam(event)
     local last_key = gkey(group_id, "cp:last")
     local count_key = gkey(group_id, "cp:count")
     local users_key = gkey(group_id, "cp:users")
+
+    -- 复读检测开关
+    if jn.config.get("enable_copy_check") == false then return false end
 
     local last_msg = get_kv(last_key) or ""
 
