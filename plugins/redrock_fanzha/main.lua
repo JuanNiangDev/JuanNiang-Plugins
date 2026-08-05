@@ -1,8 +1,9 @@
 -- ====================================================================
 -- redrock_fanzha
 -- 开学季反诈提醒插件
--- 在群聊或私聊发送 /反诈提醒，向当前会话发送完整反诈指南图文
--- （缴费陷阱 / 兼职诱惑 / 个人信息安全 / 终极提醒 + 骗局示意图）。
+-- 命令：
+--   /反诈提醒      向当前会话发送完整反诈指南图文
+--   /全体反诈提醒  群聊中发送，指南前附加 @全体成员
 -- 示意图 anticheat.jpg 需放在插件目录下（自动转 base64 发送）。
 -- ====================================================================
 
@@ -30,6 +31,28 @@ local ANTI_FRAUD_TEXT = [[开学季是诈骗高发期，骗子的"KPI"可能就�
 🆘 如果不幸被骗：不要慌张，更不要因为觉得丢脸而隐瞒。第一时间保留所有聊天记录、转账凭证等证据，并立即联系辅导员和大学城派出所报警！
 以下是几种常见骗局的示意图，请牢记于心：]]
 
+--- 发送反诈提醒图文
+---@param event jn.Event
+---@param at_all boolean 是否在文本前附加 @全体成员（仅群聊）
+local function send_reminder(event, at_all)
+    local image_file = jn.config.get("image_file") or "anticheat.jpg"
+    local segments = {}
+    if at_all then
+        segments[#segments + 1] = { type = "at", data = { qq = "all" } }
+    end
+    segments[#segments + 1] = { type = "text",  data = { text = ANTI_FRAUD_TEXT } }
+    segments[#segments + 1] = { type = "image", data = { file = image_file } }
+
+    if event.message_type == "group" then
+        jn.onebot11.send_group_msg(event.group_id, segments)
+        jn.log.info(string.format("[redrock_fanzha] 已向群 %d 发送反诈提醒%s", event.group_id,
+            at_all and "（@全体成员）" or ""))
+    else
+        jn.onebot11.send_private_msg(event.user_id, segments)
+        jn.log.info(string.format("[redrock_fanzha] 已向 QQ %d 发送反诈提醒", event.user_id))
+    end
+end
+
 --- /反诈提醒 命令：发送反诈指南图文
 ---@param args string[]
 ---@param event jn.Event
@@ -37,26 +60,30 @@ jn.command.register("反诈提醒", function(args, event)
     if ENABLED == false then
         return true, "反诈提醒功能未启用"
     end
-
-    local image_file = jn.config.get("image_file") or "anticheat.jpg"
-    local segments = {
-        { type = "text",  data = { text = ANTI_FRAUD_TEXT } },
-        { type = "image", data = { file = image_file } },
-    }
-
-    if event.message_type == "group" then
-        jn.onebot11.send_group_msg(event.group_id, segments)
-        jn.log.info(string.format("[redrock_fanzha] 已向群 %d 发送反诈提醒", event.group_id))
-    else
-        jn.onebot11.send_private_msg(event.user_id, segments)
-        jn.log.info(string.format("[redrock_fanzha] 已向 QQ %d 发送反诈提醒", event.user_id))
-    end
-
+    send_reminder(event, false)
     -- 已手动发送富文本，返回 consumed=true 阻止 Agent 处理
     return true, ""
 end, {
     description = "发送开学季反诈提醒指南",
     usage = "/反诈提醒",
+})
+
+--- /全体反诈提醒 命令：发送 @全体成员 版反诈指南图文（仅群聊）
+---@param args string[]
+---@param event jn.Event
+jn.command.register("全体反诈提醒", function(args, event)
+    if ENABLED == false then
+        return true, "反诈提醒功能未启用"
+    end
+    if event.message_type ~= "group" then
+        return true, "该命令仅限群聊使用"
+    end
+    send_reminder(event, true)
+    -- 已手动发送富文本，返回 consumed=true 阻止 Agent 处理
+    return true, ""
+end, {
+    description = "发送@全体成员版反诈提醒（仅群聊）",
+    usage = "/全体反诈提醒",
 })
 
 jn.log.info("[redrock_fanzha] 反诈提醒插件已加载")
