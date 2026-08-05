@@ -91,7 +91,7 @@
   },
   {
     "name": "redrock_poke",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "Redrock",
     "description": "卷娘戳一戳回复插件",
     "path": "redrock_poke",
