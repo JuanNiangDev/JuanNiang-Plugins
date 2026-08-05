@@ -21,3 +21,18 @@ configs:
     label: 示意图文件名
     description: 骗局示意图文件名（插件目录内，支持相对路径）
     default: "anticheat.jpg"
+  - key: at_all_senders
+    type: list
+    label: 全体反诈提醒发送人
+    description: 可触发 /全体反诈提醒 的 QQ 号列表（留空则仅系统管理员可触发）
+    default: []
+  - key: rate_limit_enabled
+    type: bool
+    label: 启用限流
+    description: 同一会话（群/私聊）在限流时间内最多发送一条反诈提醒
+    default: true
+  - key: rate_limit_minutes
+    type: string
+    label: 限流时间（分钟）
+    description: 两次反诈提醒的最小间隔（分钟）
+    default: "30"
