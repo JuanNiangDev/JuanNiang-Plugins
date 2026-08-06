@@ -7,7 +7,7 @@
 3. **守护个人信息与账号安全** — 钓鱼邮件/网站、QQ/微信好友借钱核实、守住身份证/银行卡/验证码防线
 4. **小Nao的终极提醒** — 黄金法则（万事走官方渠道）、被骗后的应对流程
 
-图文末尾附带骗局示意图（`anticheat.jpg`）。
+图文末尾附带骗局示意图（`anticheat.png`）。
 
 ## 使用
 
@@ -21,7 +21,7 @@
 | key | 类型 | 说明 | 默认 |
 |------|------|------|------|
 | `enabled` | bool | 是否启用反诈提醒命令 | `true` |
-| `image_file` | string | 骗局示意图文件名（插件目录内，支持相对路径） | `anticheat.jpg` |
+| `image_file` | string | 骗局示意图文件名（插件目录内，支持相对路径） | `anticheat.png` |
 | `at_all_senders` | list | 可触发 `/全体反诈提醒` 的 QQ 号列表（留空则仅系统管理员可触发） | `[]` |
 | `rate_limit_enabled` | bool | 是否启用限流 | `true` |
 | `rate_limit_minutes` | string | 限流窗口（分钟），同一会话（群/私聊）内两条反诈提醒的最小间隔 | `"30"` |
@@ -31,5 +31,5 @@
 ## 文件
 
 - `main.lua` — 插件入口（命令注册 + 图文发送）
-- `anticheat.jpg` — 骗局示意图
+- `anticheat.png` — 骗局示意图
 - `pluggin.yaml` / `config.yaml` / `README.md` / `avatar.png` — 商店元数据五件套
