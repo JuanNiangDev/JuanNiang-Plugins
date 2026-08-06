@@ -1,0 +1,10 @@
+name: "redrock_caidanci"
+version: "1.0.0"
+author: "Redrock"
+description: "红岩网校猜单词小游戏"
+entry: "main.lua"
+permissions:
+  - onebot11
+  - cache
+system: false
+enabled: true
