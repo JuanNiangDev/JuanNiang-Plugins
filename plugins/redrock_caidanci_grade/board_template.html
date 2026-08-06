@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>Wordle Board</title>
+  <style>
+    /* 本地字体：PoetsenOne（base64 内嵌，禁止远程字体） */
+    @font-face {
+      font-family: 'PoetsenOne';
+      src: url(data:font/truetype;charset=utf-8;base64,__FONT_B64__) format('truetype');
+      font-weight: 400;
+      font-style: normal;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background-color: #ffffff;
+    }
+    .wrap {
+      display: inline-block;
+      padding: 16px;
+      background-color: #ffffff;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(__LEN__, 52px);
+      grid-template-rows: repeat(__ROWS__, 52px);
+      gap: 7px;
+      font-family: 'PoetsenOne', 'Arial', sans-serif;
+      font-weight: 400;
+      font-size: 26px;
+      color: #ffffff;
+    }
+    .tile {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      box-sizing: border-box;
+      user-select: none;
+    }
+    .grey { background-color: #787878; }
+    .green { background-color: #85a068; }
+    .yellow { background-color: #c7b057; }
+    .hint { background-color: #00BFFF; }
+    .empty {
+      border: 2px solid #787878;
+      background-color: transparent;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="grid">
+__ROWS_HTML__
+    </div>
+  </div>
+</body>
+</html>
