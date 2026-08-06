@@ -1,6 +1,7 @@
 -- ====================================================================
 -- redrock_faq
--- 红岩网校招新群关键词问答 + 卷娘语料库
+-- 红岩网校 FAQ 查询插件（命令式）
+-- 用法: /redrock [参数] —— 无参数显示查询清单，带参数查询对应信息
 -- ====================================================================
 
 local jn = require("jn")
@@ -32,7 +33,7 @@ local REPLIES = {
     daily = "卷娘今天也在努力回答邮子们的问题呢！给自己加鸡腿~",
     moyu = "嘘！",
 
-    -- 卷娘语料库
+    -- 卷娘语料库（命令式触发）
     six = "6，卷娘给你扣个666，你也很会冲浪嘛〜",
     here = "在的在的，卷娘24小时在线（除了睡觉和偷偷摸鱼的时候）",
     dating = "有啊，红岩网校就是我的对象，你要来认识一下吗？",
@@ -53,153 +54,96 @@ local REPLIES = {
 2005年10月9日下午2:30，重庆市人民政府新闻办公室在重庆市新闻发布中心举行了新闻发布会。会议郑重发布了"世界第一颗0.13微米工艺的TD-SCDMA 3G手机核心芯片在重庆诞生"这一令国人自豪和骄傲的重大喜讯。它是世界上第一颗采用0.13微米工艺的TD-SCDMA手机基带芯片，功耗低，内核尺寸小，成本低，标志着中国3G通信核心芯片的关键技术达到了世界领先水平。重邮信科"通芯一号"芯片是符合3GPP TD-SCDMA标准自主研发的手机芯片，它具有优良的总体构架和实现算法，经过了充分的仿真和验证，具有极高的性能和稳定性，可完成TD-SCDMA手机物理层、协议栈和应用软件所有处理工作。"通芯一号"芯片的开发成功，是邮电学院从1998年开始参与大唐电信为首组织的TD-SCDMA标准研究，并在2003年采用通用芯片独立开发出世界上第一部TD-SCDMA（TSM）手机后在TD-SCDMA自主创新上的又一重大突破，是重邮信科对TD-SCDMA产业化的重大贡献，标志着重邮信科在TD-SCDMA终端产业链上已经确立了重要的基础地位。]],
 }
 
+-- 部门清单（/redrock 部门）
+local DEPARTMENT_LIST = [[红岩网校七个部门：
+1. 产品策划及运营部 — 产品的设计蓝图都出自他们之手
+2. 视觉设计部 — 用色彩渲染世界
+3. 前端研发部 — 小程序、网站、webAPP的幕后画师
+4. 后端研发部 — 网校最可靠的保障
+5. 移动开发部 — APP的无限可能（Android / iOS）
+6. 运维安全部 — 系统安全稳定的守护者
+7. 人工智能开发及应用部 — 主攻AI应用落地
+
+使用 /redrock <部门名> 查看具体介绍，如：/redrock 前端]]
+
 -- ====================================================================
--- 关键词规则
+-- 查询条目：names 为可查询的参数别名（忽略大小写），reply 为回复内容
 -- ====================================================================
-local ANCHORS = { "红岩", "网校", "redrock", "工作站", "招新" }
-
-local RULES = {
-    -- 子部门/部门
-    { keywords = { "android", "安卓", "android开发", "安卓开发" }, reply = REPLIES.android },
-    { keywords = { "ios", "ios开发" },                      reply = REPLIES.ios },
-    { keywords = { "ai", "人工智能", "人工智能开发与应用部", "人工智能开发及应用部" }, reply = REPLIES.ai },
-    { keywords = { "前端", "前端研发部" },                   reply = REPLIES.frontend },
-    { keywords = { "后端", "后端研发部" },                   reply = REPLIES.backend },
-    { keywords = { "产品", "产品策划", "产品策划及运营部" },    reply = REPLIES.product },
-    { keywords = { "视觉", "视觉设计部" },                   reply = REPLIES.visual },
-    { keywords = { "运维", "运维安全部", "运维安全", "安全", "sre", "SRE" }, reply = REPLIES.ops },
-    { keywords = { "移动", "移动开发", "移动开发部", "移动部" }, reply = REPLIES.mobile },
-
-    -- 加入/报名/进入
-    { keywords = { "加入", "报名", "进入", "怎么进", "怎么加入", "如何加入",
-        "在哪报名", "怎么报名", "如何报名", "加入方式", "报名方式" },
-        reply = REPLIES.join, image = "join.png" },
-
+local QUERIES = {
+    -- 网校介绍
+    { names = { "网校", "红岩", "redrock", "介绍", "是什么", "网校介绍", "红岩网校" }, reply = REPLIES.redrock },
+    -- 部门
+    { names = { "部门", "部门介绍", "有哪些部门" }, reply = DEPARTMENT_LIST },
+    { names = { "产品", "产品策划", "产品策划及运营部" }, reply = REPLIES.product },
+    { names = { "视觉", "视觉设计部" }, reply = REPLIES.visual },
+    { names = { "前端", "前端研发部" }, reply = REPLIES.frontend },
+    { names = { "后端", "后端研发部" }, reply = REPLIES.backend },
+    { names = { "移动", "移动开发", "移动开发部", "移动部" }, reply = REPLIES.mobile },
+    { names = { "安卓", "android", "android开发" }, reply = REPLIES.android },
+    { names = { "ios", "ios开发" }, reply = REPLIES.ios },
+    { names = { "运维", "运维安全", "运维安全部", "安全", "sre" }, reply = REPLIES.ops },
+    { names = { "ai", "人工智能", "人工智能开发", "人工智能开发及应用部" }, reply = REPLIES.ai },
+    -- 加入/报名
+    { names = { "加入", "报名", "怎么加入", "如何加入", "加入方式", "报名方式" }, reply = REPLIES.join, image = "join.png" },
     -- 地点
-    { keywords = { "太极运动场", "西3号门", "西4号门", "楼内地图",
-        "地点", "在哪", "哪里", "地址", "位置", "怎么去" },
-        reply = REPLIES.location },
-
+    { names = { "位置", "地点", "在哪", "地址", "怎么去", "太极运动场" }, reply = REPLIES.location },
     -- 学习/收获
-    { keywords = { "能学到", "可以学到", "学到", "学习", "收获",
-        "收获什么", "有什么收获" },
-        reply = REPLIES.study },
-
+    { names = { "学习", "能学到", "能学到什么", "学到什么", "收获" }, reply = REPLIES.study },
     -- 招新/成果
-    { keywords = { "招新", "宣讲会", "招新宣讲会" },          reply = REPLIES.recruit },
-    { keywords = { "成果", "成就" },                         reply = REPLIES.achievement },
-
+    { names = { "招新", "活动", "宣讲会", "招新宣讲会" }, reply = REPLIES.recruit },
+    { names = { "成果", "成就" }, reply = REPLIES.achievement },
     -- 新生导航
-    { keywords = { "新生导航", "导航" },                       reply = REPLIES.freshman },
-
+    { names = { "新生导航", "导航" }, reply = REPLIES.freshman },
     -- 趣味功能
-    { keywords = { "趣味功能", "有哪些功能", "有什么功能", "功能" }, reply = REPLIES.fun },
-
-    -- 红岩兜底
-    { keywords = { "红岩", "网校", "redrock", "红岩网校", "红岩网校工作站" },
-        reply = REPLIES.redrock },
+    { names = { "趣味功能", "功能", "游戏", "玩什么" }, reply = REPLIES.fun },
+    -- 重邮特色彩蛋
+    { names = { "3g", "芯片", "3g芯片" }, reply = REPLIES.chip3g },
+    { names = { "特色" }, reply = REPLIES.redrock_special_trait },
+    -- 闲聊彩蛋（命令式触发）
+    { names = { "在吗", "在不在" }, reply = REPLIES.here },
+    { names = { "对象", "单身", "有对象" }, reply = REPLIES.dating },
+    { names = { "内卷" }, reply = REPLIES.juan },
+    { names = { "摆烂", "躺平" }, reply = REPLIES.bailan },
+    { names = { "emo", "难过" }, reply = REPLIES.emo_casual },
+    { names = { "吃饭", "吃什么", "食堂" }, reply = REPLIES.food },
+    { names = { "早八", "好困", "好累" }, reply = REPLIES.morning },
+    { names = { "学长", "大佬" }, reply = REPLIES.senior },
+    { names = { "重邮", "学校" }, reply = REPLIES.cqupt },
+    { names = { "感谢", "谢谢" }, reply = REPLIES.thanks },
+    { names = { "拜拜", "再见", "晚安" }, reply = REPLIES.bye },
+    { names = { "校花" }, reply = REPLIES.beauty },
+    { names = { "学不会", "学不懂", "太难了" }, reply = REPLIES.hard },
+    { names = { "无聊" }, reply = REPLIES.bored },
+    { names = { "6", "666" }, reply = REPLIES.six },
+    { names = { "干嘛", "在干嘛" }, reply = REPLIES.daily },
+    { names = { "摸鱼", "在摸鱼" }, reply = REPLIES.moyu, image = "xu.png" },
 }
 
--- ====================================================================
--- 卷娘语料库（loose 模式，消息中出现即触发）
--- ====================================================================
-local CHAT_RULES = {
-    { keywords = { "6", "牛", "绝了" },                     reply = REPLIES.six },
-    { keywords = { "在吗", "在不在" },                       reply = REPLIES.here },
-    { keywords = { "有对象", "单身", "有男朋友", "有女朋友" },    reply = REPLIES.dating },
-    { keywords = { "内卷" },                         reply = REPLIES.juan },
-    { keywords = { "摆烂", "躺平" },                         reply = REPLIES.bailan },
-    { keywords = { "emo", "难过", "呜呜" },                   reply = REPLIES.emo_casual },
-    { keywords = { "吃饭", "吃什么", "食堂" },                  reply = REPLIES.food },
-    { keywords = { "早八", "困", "好困", "好累", "累死了" },       reply = REPLIES.morning },
-    { keywords = { "学长学姐", "大佬", "大神" },                reply = REPLIES.senior },
-    { keywords = { "重邮", "学校" },                         reply = REPLIES.cqupt },
-    { keywords = { "感谢", "谢谢", "谢谢卷娘" },               reply = REPLIES.thanks },
-    { keywords = { "拜拜", "再见", "晚安" },                   reply = REPLIES.bye },
-    { keywords = { "校花" },                               reply = REPLIES.beauty },
-    { keywords = { "学不懂", "学不会", "太难了" },              reply = REPLIES.hard },
-    { keywords = { "无聊" },                               reply = REPLIES.bored },
-    { keywords = { "特色" },                               reply = REPLIES.redrock_special_trait },
-    { keywords = { "3g", "3G" },                           reply = REPLIES.chip3g },
-    { keywords = { "干嘛", "今天干嘛", "在干嘛", "你在干嘛", "干啥" }, reply = REPLIES.daily },
-    { keywords = { "摸鱼", "在摸鱼" },                       reply = REPLIES.moyu, image = "xu.png" },
-}
+-- 查询清单菜单（无参数时显示）
+local MENU = [[【红岩网校查询】发送 /redrock <关键词> 查询对应信息～
+
+📋 可查询内容：
+- 网校介绍     /redrock 网校
+- 部门介绍     /redrock 部门
+- 前端         /redrock 前端
+- 后端         /redrock 后端
+- 产品         /redrock 产品
+- 视觉         /redrock 视觉
+- 移动/安卓/ios /redrock 移动 | 安卓 | ios
+- 运维         /redrock 运维
+- AI           /redrock ai
+- 如何加入     /redrock 加入
+- 网校位置     /redrock 位置
+- 能学到什么   /redrock 学习
+- 招新活动     /redrock 招新
+- 网校成果     /redrock 成果
+- 新生导航     /redrock 新生导航
+- 趣味功能     /redrock 趣味功能
+- 3G 科普      /redrock 3g]]
 
 -- ====================================================================
 -- 辅助函数
 -- ====================================================================
-local SUFFIXES = {
-    "是干什么的", "是做什么的", "是什么", "怎么样", "如何", "什么",
-    "介绍",
-    "吗", "呢", "啊", "吧", "么", "的", "了", "呀", "啦", "嘛", "哦", "哟",
-    "？", "?", "！", "!", "。", "～", "~", "…",
-}
-
-local BOT_NAME = jn.config.get("bot_name") or "卷娘"
-local bot_qq = nil
-
-local function strip_suffixes(s)
-    while true do
-        local changed = false
-        for _, sfx in ipairs(SUFFIXES) do
-            if s:sub(-#sfx) == sfx then
-                s = s:sub(1, -#sfx - 1)
-                changed = true
-                break
-            end
-        end
-        if not changed then break end
-    end
-    return s
-end
-
-local function clean(raw)
-    local s = raw:gsub("%[CQ:[^%]]*%]", "")
-    s = s:gsub("@[^%s@]+", "")
-    s = s:gsub("^%s+", ""):gsub("%s+$", "")
-    return strip_suffixes(s)
-end
-
-local function find_word(lower, word)
-    local from = 1
-    while true do
-        local s = lower:find(word, from, true)
-        if not s then return false end
-        local prev = s > 1 and lower:sub(s - 1, s - 1) or ""
-        local next = lower:sub(s + #word, s + #word)
-        if not prev:match("[a-z]") and not next:match("[a-z]") then
-            return true
-        end
-        from = s + #word
-    end
-end
-
-local function match_kw(lower, kw)
-    if kw:match("^[a-z0-9]+$") then return find_word(lower, kw) end
-    return lower:find(kw, 1, true) ~= nil
-end
-
-local function has_anchor(lower)
-    for _, a in ipairs(ANCHORS) do
-        if match_kw(lower, a) then return true end
-    end
-    return false
-end
-
-local function get_bot_qq()
-    if bot_qq == nil then
-        local info, _ = jn.onebot11.get_login_info()
-        if info and info.user_id then bot_qq = tonumber(info.user_id) end
-    end
-    return bot_qq
-end
-
-local function is_mentioned(raw)
-    local qq = get_bot_qq()
-    if qq and raw:find("[CQ:at,qq=" .. tostring(qq), 1, true) then return true end
-    return raw:find("@" .. BOT_NAME, 1, true) ~= nil
-end
-
 local function reply(event, text, image)
     if event.message_type == "group" then
         local segments = {
@@ -213,153 +157,47 @@ local function reply(event, text, image)
     end
 end
 
--- ====================================================================
--- on_message
--- ====================================================================
-local greeted = {}
-
-function on_message(event)
-    local raw = (event.raw_message or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if raw == "" then return false, nil end
-    local lower = raw:lower()
-
-    -- 私聊引导
-    if event.message_type == "private" then
-        local uid = tostring(event.user_id)
-        if raw == "1" then reply(event, REPLIES.redrock); return true
-        elseif raw == "2" then
-            reply(event, [[红岩网校七个部门：
-1. 产品策划及运营部
-2. 视觉设计部
-3. 前端研发部
-4. 后端研发部
-5. 移动开发部（Android / iOS）
-6. 运维安全部
-7. 人工智能开发及应用部
-回复部门名了解更多～]])
-            return true
-        elseif raw == "3" then reply(event, REPLIES.recruit); return true
-        elseif raw == "4" then
-            reply(event, [[【常见问题】
-红岩网校介绍 | 部门介绍 | 能学到什么
-如何加入 | 成果 | 位置 | 新生导航 | 趣味功能
-直接打字问我吧～]])
-            return true
-        elseif raw == "5" then reply(event, REPLIES.fun); return true
+-- 查询匹配：先精确匹配，再双向包含匹配（过短的词不参与包含匹配，避免误命中）
+local function query(key)
+    for _, q in ipairs(QUERIES) do
+        for _, n in ipairs(q.names) do
+            if n == key then return q end
         end
-
-        if not greeted[uid] then
-            greeted[uid] = true
-            reply(event, [[嗨！欢迎来到红岩网校～这里是卷娘的秘密基地！
-你想了解什么？点下面的数字吧👇
-1️⃣ 网校介绍  2️⃣ 部门介绍  3️⃣ 最近活动  4️⃣ 常见问题  5️⃣ 找卷娘玩
-或者直接打字告诉我～]])
-            return true
-        end
-
-        -- 私聊语料库匹配（可配置开关）
-        if jn.config.get("enable_chat_rules") ~= false then
-            for _, rule in ipairs(CHAT_RULES) do
-                for _, kw in ipairs(rule.keywords) do
-                    if match_kw(lower, kw) then reply(event, rule.reply, rule.image); return true end
-                end
-            end
-        end
-        return false, nil
     end
-
-    -- 群聊需要 @ 卷娘
-    if not is_mentioned(raw) then return false, nil end
-
-    local cleaned = clean(raw):lower()
-    local anchored = has_anchor(lower)
-
-    -- 数字菜单
-    if cleaned == "1" then reply(event, REPLIES.redrock); return true
-    elseif cleaned == "2" then
-        reply(event, [[红岩网校七个部门：
-1. 产品策划及运营部 — 产品的设计蓝图都出自他们之手
-2. 视觉设计部 — 用色彩渲染世界
-3. 前端研发部 — 小程序、网站、webAPP的幕后画师
-4. 后端研发部 — 网校最可靠的保障
-5. 移动开发部 — APP的无限可能
-6. 运维安全部 — 系统安全稳定的守护者
-7. 人工智能开发及应用部 — 主攻AI应用落地
-试试 @卷娘 + 部门名 了解更多～]])
-        return true
-    elseif cleaned == "3" then reply(event, REPLIES.recruit); return true
-    elseif cleaned == "4" then
-        reply(event, [[【常见问题】
-红岩网校介绍 | 部门介绍 | 能学到什么
-如何加入 | 成果 | 位置 | 新生导航 | 趣味功能
-试试 @卷娘 + 关键词 问我吧～]])
-        return true
-    elseif cleaned == "5" then reply(event, REPLIES.fun); return true
-    end
-
-    -- 语料库优先（loose 匹配，≤2字符做精确匹配避免误触）
-    if jn.config.get("enable_chat_rules") ~= false then
-        for _, rule in ipairs(CHAT_RULES) do
-            for _, kw in ipairs(rule.keywords) do
-                local hit = false
-                if #kw <= 2 then
-                    hit = (cleaned == kw)
-                elseif match_kw(lower, kw) then
-                    hit = true
-                end
-                if hit then
-                    reply(event, rule.reply, rule.image)
-                    return true
-                end
+    for _, q in ipairs(QUERIES) do
+        for _, n in ipairs(q.names) do
+            if #n >= 2 and #key >= 2 and (key:find(n, 1, true) or n:find(key, 1, true)) then
+                return q
             end
         end
     end
-
-    -- 部门/官方问答
-    for _, rule in ipairs(RULES) do
-        for _, kw in ipairs(rule.keywords) do
-            local hit = false
-            if cleaned == kw:lower() then hit = true
-            elseif anchored and match_kw(lower, kw) then hit = true
-            end
-            if hit then reply(event, rule.reply, rule.image); return true end
-        end
-    end
-
-    return false, nil
+    return nil
 end
 
 -- ====================================================================
--- /redrock 命令
+-- /redrock [参数] 命令
 -- ====================================================================
 jn.command.register("redrock", function(args, event)
-    local text = [[有问题就找卷娘吧！试试问我如下问题吧：
-记得先@我哦 格式【@卷娘＋关键词】
+    -- 无参数 → 查询清单
+    if #args == 0 then
+        reply(event, MENU)
+        return true
+    end
 
-📋 快捷菜单（回复数字即可）：
-1️⃣ 红岩网校是什么？
-2️⃣ 七个部门介绍
-3️⃣ 最近有什么活动？
-4️⃣ 常见问题（FAQ）
-5️⃣ 玩个游戏放松一下
+    local key = table.concat(args, " "):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+    if key == "" then
+        reply(event, MENU)
+        return true
+    end
 
-【提问清单】
-红岩网校介绍
-产品策划及运营部介绍
-视觉设计部介绍
-前端介绍
-后端介绍
-移动开发部介绍
-运维安全部介绍
-人工智能开发及应用部介绍
-在红岩网校能学到什么
-如何加入红岩网校
-红岩网校成果
-红岩网校在哪里
-新生导航
-趣味功能]]
-    reply(event, text)
+    local q = query(key)
+    if q then
+        reply(event, q.reply, q.image)
+        return true
+    end
+
+    reply(event, "没有找到与「" .. key .. "」相关的内容，试试 /redrock 查看查询清单吧～")
     return true
-end, { description = "查看红岩网校问答清单", usage = "/redrock" })
+end, { description = "查询红岩网校相关信息", usage = "/redrock <关键词>" })
 
-jn.log.info("[redrock_faq] 关键词问答插件已加载")
+jn.log.info("[redrock_faq] 红岩网校查询插件已加载")

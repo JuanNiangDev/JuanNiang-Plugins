@@ -1,7 +1,7 @@
 name: "redrock_faq"
-version: "1.0.0"
+version: "1.1.0"
 author: "Redrock"
-description: "红岩网校招新群关键词问答插件"
+description: "红岩网校 FAQ 查询插件（/redrock <关键词> 命令式查询）"
 entry: "main.lua"
 permissions:
   - onebot11
