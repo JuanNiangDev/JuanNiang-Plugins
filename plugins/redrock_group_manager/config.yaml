@@ -40,3 +40,27 @@ configs:
     label: 启用复读检测
     description: 是否启用 +1 复读检测
     default: true
+
+  - key: violation_mute_seconds
+    type: string
+    label: 违规禁言时长(秒)
+    description: 第二次违规时禁言时长，默认 1800（30 分钟）
+    default: "1800"
+
+  - key: exempt_users
+    type: list
+    label: 豁免 QQ 列表
+    description: 被豁免的 QQ 号不参与任何违规检测（/豁免 可添加，面板可增删）
+    default: []
+
+  - key: admin_users
+    type: list
+    label: 手动管理员 QQ 列表
+    description: 群角色无法识别时手动指定的管理员账号（面板可增删）
+    default: []
+
+  - key: violations
+    type: list
+    label: 违规记录(群号:QQ:次数)
+    description: 违规人及违规等级，格式 群号:QQ号:次数；删除某行即重置该用户违规
+    default: []

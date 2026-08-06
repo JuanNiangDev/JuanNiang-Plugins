@@ -6,5 +6,6 @@ entry: "main.lua"
 permissions:
   - onebot11
   - database
+  - file
 system: false
 enabled: true
