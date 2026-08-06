@@ -20,7 +20,7 @@ configs:
     type: string
     label: 示意图文件名
     description: 骗局示意图文件名（插件目录内，支持相对路径）
-    default: "anticheat.jpg"
+    default: "anticheat.png"
   - key: at_all_senders
     type: list
     label: 全体反诈提醒发送人

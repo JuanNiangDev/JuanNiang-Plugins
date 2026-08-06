@@ -8,7 +8,7 @@
 --   at_all_senders     可触发 /全体反诈提醒 的 QQ 号列表（空则仅系统管理员）
 --   rate_limit_enabled 是否启用限流
 --   rate_limit_minutes 限流窗口（分钟，默认 30）
--- 示意图 anticheat.jpg 需放在插件目录下（自动转 base64 发送）。
+-- 示意图 anticheat.png 需放在插件目录下（自动转 base64 发送）。
 -- ====================================================================
 
 local jn = require("jn")
@@ -29,7 +29,7 @@ local ANTI_FRAUD_TEXT = [[开学季是诈骗高发期，骗子的"KPI"可能就�
 · 远离非法"校园贷"：树立健康的消费观，切勿被"无抵押、低利息、秒到账"的宣传迷惑。如有资金需求，请务必咨询学校或正规金融机构。
 · 警惕"免费"礼品：路边或宿舍推销中，以"创业学长/学姐"名义求支持、或扫码送礼品的，背后往往是高价推销或个人信息窃取的陷阱。请礼貌但坚定地拒绝。
 三、守护你的个人信息与账号安全
-· 警惕钓鱼邮件/网站：警惕任何自称"教务处"、"学校官方"的邮件。务必检查发件人邮箱地址，非 `@sdnu.edu.cn` 官方后缀的都是假的！骗子会用假冒页面骗取你的账号密码，你的QQ号也被骗子利用诈骗其他同学！
+· 警惕钓鱼邮件/网站：警惕任何自称"教务处"、"学校官方"的邮件。务必检查发件人邮箱地址，非 `@cqupt.edu.cn` 官方后缀的都是假的！骗子会用假冒页面骗取你的账号密码，你的QQ号也被骗子利用诈骗其他同学！
 · QQ/微信好友借钱要核实：如果"好友"或"老同学"在社交软件上突然求助，并用各种理由借钱，请务必通过电话或视频直接确认！声音可以模仿，但视频通话很难伪装。
 · 守住最后防线：身份证、银行卡、手机验证码是你的财产最后防线，绝不透露给任何人，更不要把手机交给陌生人操作！
 四、卷娘的终极提醒
@@ -84,7 +84,7 @@ end
 ---@param at_all boolean 是否在文本前附加 @全体成员（仅群聊）
 ---@return boolean 是否发送成功
 local function send_reminder(event, at_all)
-    local image_file = jn.config.get("image_file") or "anticheat.jpg"
+    local image_file = jn.config.get("image_file") or "anticheat.png"
     local segments = {}
     if at_all then
         segments[#segments + 1] = { type = "at", data = { qq = "all" } }
