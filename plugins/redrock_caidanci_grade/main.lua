@@ -1,93 +1,91 @@
 -- ====================================================================
--- redrock_caidanci
--- 红岩网校猜单词小游戏 (Wordle)
--- 使用 Redis 缓存存储游戏状态
+-- redrock_caidanci_grade
+-- 红岩网校分级猜单词小游戏 (Wordle)
+-- 难度: 高考/四级/六级/考研/雅思/托福/GRE（默认四级）
+-- 词库: 插件目录 txt（启动时加载进内存索引）
+-- 棋盘: HTML 模板 + T2I 渲染 PNG（本地 PoetsenOne 字体），按棋盘状态缓存
 -- ====================================================================
 
 local jn = require("jn")
 
 -- ====================================================================
--- 单词库
+-- 词库
 -- ====================================================================
-local word_pool = {
-    -- 5 字母 (默认)
-    { word = "apple",  category = "水果",     clue = "一种红色/绿色的水果，乔布斯用它命名了公司" },
-    { word = "linux",  category = "技术",     clue = "开源操作系统，红岩服务器上跑的就是它" },
-    { word = "debug",  category = "技术",     clue = "程序员每天都在干的事：找 bug 修 bug" },
-    { word = "stack",  category = "技术",     clue = "数据结构中的'栈'，也指全栈开发的那个栈" },
-    { word = "cache",  category = "技术",     clue = "缓存，让系统跑得更快的小助手" },
-    { word = "proxy",  category = "技术",     clue = "代理服务器，翻墙必备" },
-    { word = "route",  category = "技术",     clue = "路由，决定数据包该往哪走" },
-    { word = "query",  category = "技术",     clue = "数据库查询，SQL 的 Q 就是这个" },
-    { word = "token",  category = "技术",     clue = "令牌，登录认证就靠它" },
-    { word = "patch",  category = "技术",     clue = "补丁，修 bug 的小更新包" },
-    { word = "merge",  category = "技术",     clue = "合并代码，Git 操作中最让人紧张的环节" },
-    { word = "shell",  category = "技术",     clue = "命令行界面，终端里黑色的那个窗口" },
-    { word = "scale",  category = "技术",     clue = "扩展/伸缩，服务器扛不住了就加机器" },
-    { word = "build",  category = "技术",     clue = "构建/编译，写完代码后的第一步" },
-    { word = "logic",  category = "技术",     clue = "逻辑，写代码离不开的基本功" },
-    { word = "array",  category = "技术",     clue = "数组，最基础的数据结构之一" },
-    { word = "class",  category = "技术",     clue = "面向对象编程的核心：类" },
-    { word = "value",  category = "技术",     clue = "变量里的那个'值'" },
-    { word = "cloud",  category = "技术",     clue = "云，服务器不在本地就在这上面" },
-    { word = "spark",  category = "技术",     clue = "大数据计算框架，也是 Apache 的顶级项目" },
-    { word = "react",  category = "技术",     clue = "前端最火的框架之一，Facebook 出品" },
-    { word = "skill",  category = "通用",     clue = "技能，红岩教你各种新技能" },
-    { word = "learn",  category = "校园",     clue = "学习，来红岩就是要学东西的" },
-    { word = "group",  category = "校园",     clue = "群组，你现在就在群里聊天呢" },
-    { word = "start",  category = "通用",     clue = "开始，万事开头难，但开始了就好" },
-    { word = "focus",  category = "通用",     clue = "专注，写代码时最需要保持的状态" },
-    { word = "error",  category = "技术",     clue = "程序出错了！红色的报错信息" },
-    { word = "frame",  category = "技术",     clue = "框架，比如 Spring、Django、Vue" },
-    { word = "level",  category = "通用",     clue = "等级/水平，祝你在红岩不断提升" },
-    { word = "share",  category = "通用",     clue = "分享，好知识要一起分享" },
-    { word = "guide",  category = "通用",     clue = "指南/引导，学长学姐给你指路" },
-    { word = "match",  category = "通用",     clue = "匹配，找个合适的队友一起做项目" },
 
-    -- 4 字母
-    { word = "code",  category = "技术",     clue = "代码，程序员的日常" },
-    { word = "node",  category = "技术",     clue = "Node.js，JavaScript 的后端运行时" },
-    { word = "push",  category = "技术",     clue = "Git push，把代码推送到远程仓库" },
-    { word = "pull",  category = "技术",     clue = "Git pull，拉取最新代码" },
-    { word = "json",  category = "技术",     clue = "最常用的数据交换格式" },
-    { word = "html",  category = "技术",     clue = "网页的基础标记语言" },
-    { word = "sync",  category = "技术",     clue = "同步，async/await 的那个 sync" },
-    { word = "disc",  category = "技术",     clue = "Discord，国外程序员常用的交流工具" },
-    { word = "chat",  category = "通用",     clue = "聊天，就像你们现在在做的事" },
-    { word = "ping",  category = "技术",     clue = "检测网络连通性，pong!" },
-    { word = "team",  category = "校园",     clue = "团队，红岩每个组都是一个团队" },
-    { word = "club",  category = "校园",     clue = "社团，红岩网校就是一个技术社团" },
-    { word = "plan",  category = "通用",     clue = "计划，做项目前要先规划好" },
-    { word = "play",  category = "通用",     clue = "玩/播放，学累了就放松一下" },
-    { word = "link",  category = "技术",     clue = "链接，网页之间就靠它跳转" },
-    { word = "test",  category = "技术",     clue = "测试，写完代码别忘了测一测" },
-    { word = "task",  category = "通用",     clue = "任务，Todo List 上的待办事项" },
-
-    -- 6 字母
-    { word = "python",  category = "技术", clue = "最流行的编程语言之一，语法简洁优雅" },
-    { word = "docker",  category = "技术", clue = "容器化技术，一次打包到处运行" },
-    { word = "server",  category = "技术", clue = "服务器，后台服务就运行在这上面" },
-    { word = "design",  category = "技术", clue = "设计，好看的界面靠的就是它" },
-    { word = "commit",  category = "技术", clue = "Git commit，保存代码快照" },
-    { word = "branch",  category = "技术", clue = "Git 分支，多人协作的基础" },
-    { word = "deploy",  category = "技术", clue = "部署，把代码发布到服务器上" },
-    { word = "import",  category = "技术", clue = "导入，引用别的模块或库" },
-    { word = "export",  category = "技术", clue = "导出，把数据/函数暴露出去" },
-    { word = "script",  category = "技术", clue = "脚本，自动化任务的利器" },
-    { word = "format",  category = "技术", clue = "格式化，让代码看起来整齐划一" },
-    { word = "campus",  category = "校园", clue = "校园，你正在度过青春的地方" },
-    { word = "studio",  category = "校园", clue = "工作室，红岩是一个很棒的工作室" },
-    { word = "online",  category = "通用", clue = "在线，现在大多数事情都在线上做" },
-    { word = "commit",  category = "技术", clue = "提交，Git 版本控制的关键操作" },
-    { word = "review",  category = "技术", clue = "代码审查，合并前让同事帮忙看看" },
-    { word = "search",  category = "技术", clue = "搜索，程序员最常用的技能之一" },
+local DIFFICULTIES = {
+    { key = "gaokao", name = "高考", file = "gaokao.txt" },
+    { key = "cet4",   name = "四级", file = "CET4.txt" },
+    { key = "cet6",   name = "六级", file = "CET6.txt" },
+    { key = "kaoyan", name = "考研", file = "kaoyan.txt" },
+    { key = "ielts",  name = "雅思", file = "IELTS.txt" },
+    { key = "toefl",  name = "托福", file = "TOEFL.txt" },
+    { key = "gre",    name = "GRE",  file = "GRE.txt" },
 }
+
+-- 难度别名（命令参数，大小写不敏感）
+local ALIASES = {
+    gaokao = "gaokao", ["高考"] = "gaokao",
+    cet4 = "cet4", ["cet-4"] = "cet4", ["四级"] = "cet4",
+    cet6 = "cet6", ["cet-6"] = "cet6", ["六级"] = "cet6",
+    kaoyan = "kaoyan", ["考研"] = "kaoyan",
+    ielts = "ielts", ["雅思"] = "ielts",
+    toefl = "toefl", ["托福"] = "toefl",
+    gre = "gre",
+}
+
+local words_by_len = {}  -- [diff_key][len] = {word,...}
+local words_set = {}     -- [diff_key][word] = true
+local union_words = {}   -- 全部词库并集（词典校验用）
+
+local function load_wordlists()
+    for _, d in ipairs(DIFFICULTIES) do
+        local lines, err = jn.file.read_lines(d.file)
+        if not lines then
+            jn.log.error("[caidanci_grade] 词库加载失败 " .. d.file .. ": " .. (err or "unknown"))
+        else
+            words_by_len[d.key] = {}
+            words_set[d.key] = {}
+            local count = 0
+            for _, line in ipairs(lines) do
+                local w = line:lower()
+                if w:match("^[a-z]+$") then
+                    count = count + 1
+                    words_set[d.key][w] = true
+                    union_words[w] = true
+                    local L = #w
+                    local bucket = words_by_len[d.key][L]
+                    if not bucket then
+                        bucket = {}
+                        words_by_len[d.key][L] = bucket
+                    end
+                    bucket[#bucket + 1] = w
+                end
+            end
+            jn.log.info(string.format("[caidanci_grade] %s 加载 %d 词", d.file, count))
+        end
+    end
+end
+load_wordlists()
 
 -- ====================================================================
 -- 常量（可在 Web 面板配置中调整）
 -- ====================================================================
-local DEFAULT_LENGTH = tonumber(jn.config.get("default_length")) or 5
+local DEFAULT_DIFF = ALIASES[tostring(jn.config.get("default_difficulty") or "四级"):lower()] or "cet4"
+local MIN_LENGTH = 4
+local MAX_LENGTH = tonumber(jn.config.get("max_length")) or 12
+local DEFAULT_LEN_MIN = tonumber(jn.config.get("default_length_min")) or 4
+local DEFAULT_LEN_MAX = tonumber(jn.config.get("default_length_max")) or 6
 local MAX_ATTEMPTS = tonumber(jn.config.get("max_attempts")) or 6
+local BOARD_CACHE_TTL = 86400 -- 棋盘图片 URL 缓存（秒）
+
+-- 配置健壮性：随机长度范围必须落在合法区间内
+if MAX_LENGTH < MIN_LENGTH then MAX_LENGTH = MIN_LENGTH end
+if DEFAULT_LEN_MIN > DEFAULT_LEN_MAX then
+    DEFAULT_LEN_MIN, DEFAULT_LEN_MAX = DEFAULT_LEN_MAX, DEFAULT_LEN_MIN
+end
+if DEFAULT_LEN_MIN < MIN_LENGTH then DEFAULT_LEN_MIN = MIN_LENGTH end
+if DEFAULT_LEN_MAX > MAX_LENGTH then DEFAULT_LEN_MAX = MAX_LENGTH end
+if DEFAULT_LEN_MIN > DEFAULT_LEN_MAX then DEFAULT_LEN_MIN = DEFAULT_LEN_MAX end
 
 -- ====================================================================
 -- 辅助函数
@@ -108,7 +106,7 @@ end
 local function save_game(group_id, game)
     local ok, err = jn.cache.set(cache_key(group_id), game)
     if not ok then
-        jn.log.error("[caidanci] 保存游戏状态失败: " .. (err or "unknown"))
+        jn.log.error("[caidanci_grade] 保存游戏状态失败: " .. (err or "unknown"))
     end
 end
 
@@ -117,56 +115,52 @@ local function delete_game(group_id)
     jn.cache.del(cache_key(group_id))
 end
 
---- 从指定长度的单词中随机选一个
-local function pick_word(length)
-    local candidates = {}
-    for _, entry in ipairs(word_pool) do
-        if #entry.word == length then
-            candidates[#candidates + 1] = entry
-        end
-    end
-    if #candidates == 0 then return nil end
-    return candidates[math.random(#candidates)]
+--- 从指定难度的指定长度词中随机选一个
+local function pick_word(diff_key, length)
+    local bucket = words_by_len[diff_key] and words_by_len[diff_key][length]
+    if not bucket or #bucket == 0 then return nil end
+    return bucket[math.random(#bucket)]
 end
 
---- 比较猜测和目标单词，返回反馈符号串
+--- 难度 key → 显示名
+local function diff_name(diff_key)
+    for _, d in ipairs(DIFFICULTIES) do
+        if d.key == diff_key then return d.name end
+    end
+    return diff_key
+end
+
+--- 比较猜测和目标单词，返回状态串（G=绿 / Y=黄 / X=灰）
 --- 参考 Wordle 规则：先标记绿色，再标记黄色，最后灰色
 local function compare_guess(guess, target)
     local n = #target
     local result = {}
-    local used = {}  -- 目标单词中已被匹配的位置
+    local used = {}
 
     for i = 1, n do
-        result[i] = nil
+        result[i] = "X"
         used[i] = false
     end
 
     -- 第一遍：绿色 (位置正确)
     for i = 1, n do
         if string.sub(guess, i, i) == string.sub(target, i, i) then
-            result[i] = "🟩"
+            result[i] = "G"
             used[i] = true
         end
     end
 
     -- 第二遍：黄色 (字母存在但位置不对)
     for i = 1, n do
-        if result[i] == nil then
+        if result[i] == "X" then
             local ch = string.sub(guess, i, i)
             for j = 1, n do
                 if not used[j] and string.sub(target, j, j) == ch then
-                    result[i] = "🟨"
+                    result[i] = "Y"
                     used[j] = true
                     break
                 end
             end
-        end
-    end
-
-    -- 第三遍：灰色
-    for i = 1, n do
-        if result[i] == nil then
-            result[i] = "⬜"
         end
     end
 
@@ -176,11 +170,10 @@ end
 --- 获取第 N 次猜测的鼓励语
 local function get_encouragement(attempt_num, max_attempts, feedback)
     local green_count = 0
-    for _ in string.gmatch(feedback, "🟩") do
+    for _ in string.gmatch(feedback, "G") do
         green_count = green_count + 1
     end
 
-    -- 第一条鼓励语根据绿色数量
     if green_count >= 3 then
         local cheers = { "超对！就这样继续～💪", "很棒！大部分都对了！", "卷娘觉得你离答案越来越近了！", "厉害呀，方向完全正确！" }
         return cheers[math.random(#cheers)]
@@ -189,7 +182,6 @@ local function get_encouragement(attempt_num, max_attempts, feedback)
         return cheers[math.random(#cheers)]
     end
 
-    -- 根据剩余次数给出不同风格的鼓励
     local remaining = max_attempts - attempt_num
     if remaining <= 1 then
         return "最后一次机会啦！卷娘相信你一定能猜出来✨"
@@ -227,39 +219,239 @@ local function get_defeat_msg(word)
     return msgs[math.random(#msgs)]
 end
 
---- 格式化游戏历史记录
-local function format_history(game)
+--- emoji 兜底反馈（T2I 不可用时）
+local function emoji_feedback(states)
+    return states:gsub("G", "🟩"):gsub("Y", "🟨"):gsub("X", "⬜")
+end
+
+--- emoji 版猜测记录（T2I 兜底）
+local function format_history_emoji(game)
     local lines = {}
     for i, att in ipairs(game.attempts) do
-        lines[#lines + 1] = "第" .. i .. "次：" .. att.feedback .. "  " .. att.guess
+        lines[#lines + 1] = "第" .. i .. "次：" .. emoji_feedback(att.states) .. "  " .. att.guess
     end
     return table.concat(lines, "\n")
 end
 
---- 格式化提示信息
-local function format_hint(game)
-    local word = game.word_info
-    local hint_num = game.hints_given + 1
-    local total_hints = 4
-
-    if hint_num == 1 then
-        return "🧩 提示 " .. hint_num .. "/" .. total_hints .. "：" .. word.category .. "类单词"
-    elseif hint_num == 2 then
-        return "🔤 提示 " .. hint_num .. "/" .. total_hints .. "：首字母是 " .. string.upper(string.sub(word.word, 1, 1))
-    elseif hint_num == 3 then
-        return "🔤 提示 " .. hint_num .. "/" .. total_hints .. "：尾字母是 " .. string.upper(string.sub(word.word, -1))
-    else
-        return "💡 提示 " .. hint_num .. "/" .. total_hints .. "：" .. word.clue
-    end
-end
-
---- 回复消息
+--- 回复纯文本
 local function reply(event, text)
     if event.message_type == "group" then
         jn.onebot11.send_group_msg(event.group_id, text)
     else
         jn.onebot11.send_private_msg(event.user_id, text)
     end
+end
+
+local render_board -- 前向声明（reply_with_board 中使用）
+
+--- 回复文本 + 棋盘图片；T2I 不可用时降级为 emoji 文本
+local function reply_with_board(event, text, game)
+    local url = nil
+    if jn.t2i.is_active() then
+        url = render_board(game)
+    end
+    if not url then
+        local lines = { text }
+        if game and game.attempts and #game.attempts > 0 then
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = format_history_emoji(game)
+        end
+        text = table.concat(lines, "\n")
+    end
+    local segments = { { type = "text", data = { text = text } } }
+    if url then
+        segments[#segments + 1] = { type = "image", data = { file = url } }
+    end
+    if event.message_type == "group" then
+        jn.onebot11.send_group_msg(event.group_id, segments)
+    else
+        jn.onebot11.send_private_msg(event.user_id, segments)
+    end
+end
+
+-- ====================================================================
+-- 棋盘渲染（HTML → T2I PNG + Redis 缓存）
+-- ====================================================================
+
+local FONT_B64
+local TEMPLATE
+
+--- 读取并缓存字体 base64（去掉 base64:// 前缀，供 data URI 使用）
+local function get_font_b64()
+    if FONT_B64 == nil then
+        local b64, err = jn.onebot11.read_file_base64("PoetsenOne-Regular.ttf")
+        if b64 then
+            FONT_B64 = b64:gsub("^base64://", "")
+        else
+            jn.log.error("[caidanci_grade] 读取字体失败: " .. (err or "unknown"))
+            FONT_B64 = ""
+        end
+    end
+    return FONT_B64
+end
+
+--- 读取并缓存棋盘模板
+local function get_template()
+    if TEMPLATE == nil then
+        local content, err = jn.file.read("board_template.html")
+        if content then
+            TEMPLATE = content
+        else
+            jn.log.error("[caidanci_grade] 读取棋盘模板失败: " .. (err or "unknown"))
+            TEMPLATE = false
+        end
+    end
+    return TEMPLATE
+end
+
+local function tile_class(state)
+    if state == "G" then
+        return "green"
+    elseif state == "Y" then
+        return "yellow"
+    else
+        return "grey"
+    end
+end
+
+--- 生成棋盘逐行 HTML（max_attempts 行 × length 列）
+--- 提示只作用于最近一次尝试所在行；尚无尝试时落在第 1 行
+local function build_rows_html(game)
+    local n = game.length
+    local parts = {}
+    local hint_row = #game.attempts
+    local hint_positions = {}
+    for _, h in ipairs(game.hints or {}) do
+        hint_positions[h.pos] = h.letter
+    end
+    if hint_row == 0 and game.hints and #game.hints > 0 then
+        hint_row = 1
+    end
+    for r = 1, game.max_attempts do
+        local row = {}
+        local att = game.attempts[r]
+        for i = 1, n do
+            if r == hint_row and hint_positions[i] then
+                row[#row + 1] = '<div class="tile hint">' .. string.upper(hint_positions[i]) .. "</div>"
+            elseif att then
+                local letter = string.upper(string.sub(att.guess, i, i))
+                row[#row + 1] = '<div class="tile ' .. tile_class(string.sub(att.states, i, i)) .. '">' .. letter .. "</div>"
+            else
+                row[#row + 1] = '<div class="tile empty"></div>'
+            end
+        end
+        parts[#parts + 1] = table.concat(row, "")
+    end
+    return table.concat(parts, "")
+end
+
+--- 棋盘状态缓存 key（与群无关，相同局面共享渲染）
+local function board_cache_key(game)
+    local parts = { tostring(game.length), tostring(#game.attempts) }
+    for _, att in ipairs(game.attempts) do
+        parts[#parts + 1] = att.guess .. ":" .. att.states
+    end
+    local hints = {}
+    for _, h in ipairs(game.hints or {}) do
+        hints[#hints + 1] = h.pos .. h.letter
+    end
+    table.sort(hints)
+    parts[#parts + 1] = table.concat(hints, ",")
+    return "board:" .. table.concat(parts, "|")
+end
+
+--- 渲染棋盘并返回图片 URL；失败返回 nil
+render_board = function(game)
+    if not jn.t2i.is_active() then return nil end
+    local key = board_cache_key(game)
+    local cached = jn.cache.get(key)
+    if cached and cached.url then return cached.url end
+    local template = get_template()
+    if not template then return nil end
+    local html = template
+        :gsub("__FONT_B64__", function() return get_font_b64() end)
+        :gsub("__LEN__", function() return tostring(game.length) end)
+        :gsub("__ROWS__", function() return tostring(game.max_attempts) end)
+        :gsub("__ROWS_HTML__", function() return build_rows_html(game) end)
+    local url, err = jn.t2i.generate_url(html)
+    if not url then
+        jn.log.error("[caidanci_grade] 棋盘渲染失败: " .. (err or "unknown"))
+        return nil
+    end
+    jn.cache.set(key, { url = url }, BOARD_CACHE_TTL)
+    return url
+end
+
+-- ====================================================================
+-- 帮助菜单
+-- ====================================================================
+
+local HELP_MENU = table.concat({
+    "- /猜 — 提交猜单词的猜测",
+    "- /猜单词 — 玩一局猜单词游戏（Wordle）",
+    "- /猜单词 <难度> — 指定难度高考/四级/六级/考研/雅思/托福/GRE",
+    "- /猜单词 <长度> — 指定单词长度",
+}, "\n")
+
+local function is_help_arg(arg)
+    local a = tostring(arg):lower()
+    return a == "help" or a == "帮助" or a == "菜单"
+end
+
+local function has_help_arg(args)
+    for _, arg in ipairs(args) do
+        if is_help_arg(arg) then return true end
+    end
+    return false
+end
+
+--- 解析开局参数，返回 {diff=key, len=n}；非法返回错误信息字符串
+local function parse_start_args(args)
+    local diff, len
+    for _, arg in ipairs(args) do
+        local a = tostring(arg):lower()
+        local n = tonumber(a)
+        if n then
+            if n ~= math.floor(n) then return nil, "单词长度必须是整数" end
+            if len then return nil, "长度参数重复指定了" end
+            len = n
+        else
+            local k = ALIASES[a]
+            if k then
+                if diff then return nil, "难度参数重复指定了" end
+                diff = k
+            else
+                return nil, "无法识别的参数：" .. arg
+            end
+        end
+    end
+    return { diff = diff, len = len }
+end
+
+--- 选择提示位置：最近一次猜测中猜错且未揭示的位置里随机；
+--- 若全部猜对/已揭示，则在未揭示位置中随机
+local function pick_hint_position(game)
+    local n = game.length
+    local hinted = {}
+    for _, h in ipairs(game.hints or {}) do
+        hinted[h.pos] = true
+    end
+    local candidates = {}
+    local att = game.attempts[#game.attempts]
+    if att then
+        for i = 1, n do
+            if not hinted[i] and string.sub(att.guess, i, i) ~= string.sub(game.word, i, i) then
+                candidates[#candidates + 1] = i
+            end
+        end
+    end
+    if #candidates == 0 then
+        for i = 1, n do
+            if not hinted[i] then candidates[#candidates + 1] = i end
+        end
+    end
+    if #candidates == 0 then return nil end
+    return candidates[math.random(#candidates)]
 end
 
 -- ====================================================================
@@ -271,6 +463,12 @@ jn.command.register("猜单词", function(args, event)
         reply(event, "猜单词游戏仅在群聊中可用哦～")
         return true
     end
+
+    if has_help_arg(args) then
+        reply(event, HELP_MENU)
+        return true
+    end
+
     local group_id = event.group_id
 
     -- 检查是否已有进行中的游戏
@@ -280,54 +478,53 @@ jn.command.register("猜单词", function(args, event)
         return true
     end
 
-    -- 解析参数
-    local word_length = DEFAULT_LENGTH
-    for i, arg in ipairs(args) do
-        if (arg == "-l" or arg == "--length") and args[i + 1] then
-            local n = tonumber(args[i + 1])
-            if n and n >= 4 and n <= 6 then
-                word_length = n
-            else
-                reply(event, "单词长度只支持 4、5、6，默认使用 5")
-                return true
-            end
-        end
+    -- 解析参数（难度/长度顺序任意）
+    local parsed, err = parse_start_args(args)
+    if not parsed then
+        reply(event, err)
+        return true
+    end
+
+    local diff = parsed.diff or DEFAULT_DIFF
+    local length = parsed.len
+    if not length then
+        length = math.random(DEFAULT_LEN_MIN, DEFAULT_LEN_MAX)
+    elseif length < MIN_LENGTH or length > MAX_LENGTH then
+        reply(event, "单词长度只支持 " .. MIN_LENGTH .. "～" .. MAX_LENGTH .. "，未指定时默认 " .. DEFAULT_LEN_MIN .. "-" .. DEFAULT_LEN_MAX .. " 随机")
+        return true
     end
 
     -- 选词
-    local word_entry = pick_word(word_length)
-    if not word_entry then
-        reply(event, "抱歉，单词库中暂时没有 " .. word_length .. " 字母的单词，请用默认长度试试～")
+    local word = pick_word(diff, length)
+    if not word then
+        reply(event, "该难度词库中暂时没有 " .. length .. " 字母的单词，换个长度试试～")
         return true
     end
 
     -- 创建游戏状态
     local game = {
-        word = word_entry.word,
-        word_info = word_entry,
-        length = word_length,
+        word = word,
+        difficulty = diff,
+        difficulty_name = diff_name(diff),
+        length = length,
         max_attempts = MAX_ATTEMPTS,
         attempts = {},
-        hints_given = 0,
+        hints = {},
         status = "playing",
     }
     save_game(group_id, game)
 
     local lines = {
         "🎮 猜单词游戏开始！",
-        "单词长度：" .. word_length .. " 个字母 ｜ 最多 " .. MAX_ATTEMPTS .. " 次机会",
+        "难度：" .. game.difficulty_name .. " ｜ 单词长度：" .. length .. " 个字母 ｜ 最多 " .. MAX_ATTEMPTS .. " 次机会",
         "",
     }
     -- 给出字母位置占位符
     local placeholders = {}
-    for _ = 1, word_length do
+    for _ = 1, length do
         placeholders[#placeholders + 1] = "_"
     end
     lines[#lines + 1] = table.concat(placeholders, " ")
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "🟩 字母正确且位置正确"
-    lines[#lines + 1] = "🟨 字母正确但位置不对"
-    lines[#lines + 1] = "⬜ 没有这个字母"
     lines[#lines + 1] = ""
     lines[#lines + 1] = "发送 /提示 获取帮助 ｜ /结束 退出游戏"
 
@@ -335,7 +532,7 @@ jn.command.register("猜单词", function(args, event)
     return true
 end, {
     description = "玩一局猜单词游戏（Wordle）",
-    usage = "/猜单词 [-l 长度]",
+    usage = "/猜单词 [难度] [长度]（顺序任意）\n难度：高考/四级/六级/考研/雅思/托福/GRE（默认四级）\n长度：单词字母数（默认 4-6 随机）",
 })
 
 -- ====================================================================
@@ -354,16 +551,8 @@ jn.command.register("结束", function(args, event)
 
     delete_game(group_id)
 
-    local lines = {"游戏已结束！答案是：" .. game.word}
-    if #game.attempts > 0 then
-        lines[#lines + 1] = ""
-        lines[#lines + 1] = "你的猜测记录："
-        lines[#lines + 1] = format_history(game)
-    end
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "发送 /猜单词 可以再来一局～"
-
-    reply(event, table.concat(lines, "\n"))
+    local text = "游戏已结束！答案是：" .. game.word .. "\n\n发送 /猜单词 可以再来一局～"
+    reply_with_board(event, text, game)
     return true
 end, {
     description = "结束当前猜单词游戏",
@@ -371,7 +560,7 @@ end, {
 })
 
 -- ====================================================================
--- 命令: /提示 —— 获取提示
+-- 命令: /提示 —— 获取提示（揭示一个猜错位置的正确字母）
 -- ====================================================================
 jn.command.register("提示", function(args, event)
     -- 仅群聊可用
@@ -384,16 +573,18 @@ jn.command.register("提示", function(args, event)
         return true
     end
 
-    if game.hints_given >= 4 then
-        reply(event, "提示已经给完了！卷娘相信大家能猜出来的💪\n目前进度：\n" .. format_history(game))
+    local pos = pick_hint_position(game)
+    if not pos then
+        reply(event, "提示已经给完啦！卷娘相信大家能猜出来的💪")
         return true
     end
 
-    game.hints_given = game.hints_given + 1
+    local letter = string.sub(game.word, pos, pos)
+    game.hints[#game.hints + 1] = { pos = pos, letter = letter }
     save_game(group_id, game)
 
-    local hint = format_hint(game)
-    reply(event, hint)
+    local text = "💡 提示：第 " .. pos .. " 位是 " .. string.upper(letter)
+    reply_with_board(event, text, game)
     return true
 end, {
     description = "查看当前猜单词游戏的提示",
@@ -461,6 +652,12 @@ jn.command.register("猜", function(args, event)
         return true
     end
 
+    -- 词典校验：不在全部词库并集中的词
+    if not union_words[guess] then
+        reply(event, "你确定 " .. guess .. " 是一个单词吗")
+        return true
+    end
+
     -- 检查是否已猜过
     for _, att in ipairs(game.attempts) do
         if att.guess == guess then
@@ -469,23 +666,15 @@ jn.command.register("猜", function(args, event)
         end
     end
 
-    local feedback = compare_guess(guess, game.word)
+    local states = compare_guess(guess, game.word)
     local attempt_num = #game.attempts + 1
-    game.attempts[#game.attempts + 1] = { guess = guess, feedback = feedback }
+    game.attempts[#game.attempts + 1] = { guess = guess, states = states }
 
     -- 猜对了
     if guess == game.word then
         game.status = "won"
         save_game(group_id, game)
-
-        local lines = {
-            get_victory_msg(game.word, attempt_num),
-            "",
-            format_history(game),
-            "",
-            "发送 /猜单词 再来一局～",
-        }
-        reply(event, table.concat(lines, "\n"))
+        reply_with_board(event, get_victory_msg(game.word, attempt_num), game)
         return true
     end
 
@@ -493,35 +682,24 @@ jn.command.register("猜", function(args, event)
     if #game.attempts >= game.max_attempts then
         game.status = "lost"
         save_game(group_id, game)
-
-        local lines = {
-            get_defeat_msg(game.word),
-            "",
-            format_history(game),
-            "",
-            "发送 /猜单词 再来一局～",
-        }
-        reply(event, table.concat(lines, "\n"))
+        reply_with_board(event, get_defeat_msg(game.word), game)
         return true
     end
 
     -- 还没结束
     save_game(group_id, game)
 
-    local encouragement = get_encouragement(attempt_num, game.max_attempts, feedback)
+    local encouragement = get_encouragement(attempt_num, game.max_attempts, states)
     local remaining = game.max_attempts - #game.attempts
-    local lines = {
-        "第 " .. attempt_num .. " 次猜测：" .. feedback,
-        encouragement,
-    }
-    if game.hints_given < 4 and remaining <= 3 then
+    local lines = { encouragement }
+    if remaining <= 3 then
         lines[#lines + 1] = "（剩余 " .. remaining .. " 次，发送 /提示 获取帮助）"
     end
-    reply(event, table.concat(lines, "\n"))
+    reply_with_board(event, table.concat(lines, "\n"), game)
     return true
 end, {
     description = "提交猜单词的猜测",
     usage = "/猜 <单词>",
 })
 
-jn.log.info("[redrock_caidanci] 猜单词插件已加载")
+jn.log.info("[redrock_caidanci_grade] 分级猜单词插件已加载")
