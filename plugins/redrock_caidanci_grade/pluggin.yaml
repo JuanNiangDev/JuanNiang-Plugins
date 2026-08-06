@@ -1,5 +1,5 @@
 name: "redrock_caidanci_grade"
-version: "2.0.0"
+version: "2.1.0"
 author: "Redrock"
 description: "红岩网校分级猜单词小游戏（高考/四级/六级/考研/雅思/托福/GRE）"
 entry: "main.lua"

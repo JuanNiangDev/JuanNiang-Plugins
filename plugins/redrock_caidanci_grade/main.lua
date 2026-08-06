@@ -2,24 +2,30 @@
 -- redrock_caidanci_grade
 -- 红岩网校分级猜单词小游戏 (Wordle)
 -- 难度: 高考/四级/六级/考研/雅思/托福/GRE（默认四级）
--- 词库: 插件目录 txt（启动时加载进内存索引）
+-- 词库: words.csv（word,translation,tag，启动时加载进内存索引）
 -- 棋盘: HTML 模板 + T2I 渲染 PNG（本地 PoetsenOne 字体），按棋盘状态缓存
 -- ====================================================================
 
 local jn = require("jn")
 
 -- ====================================================================
--- 词库
+-- 词库（words.csv → 内存索引）
+--
+-- words.csv 由 7 个分级词库合并生成（已去除音标列）：
+--   - word 纯小写字母；tag 为难度标识（gaokao/cet4/cet6/kaoyan/ielts/toefl/gre）
+--   - translation 可能被引号包裹（内含逗号），引号内 "" 为转义引号
+--   - translation 中的字面 "\r\n" / "\n" 序列表示换行，加载时转为真实换行
+-- 只读数据，启动时一次性加载；查询全部为 O(1) 哈希查找，无外部依赖
 -- ====================================================================
 
 local DIFFICULTIES = {
-    { key = "gaokao", name = "高考", file = "gaokao.txt" },
-    { key = "cet4",   name = "四级", file = "CET4.txt" },
-    { key = "cet6",   name = "六级", file = "CET6.txt" },
-    { key = "kaoyan", name = "考研", file = "kaoyan.txt" },
-    { key = "ielts",  name = "雅思", file = "IELTS.txt" },
-    { key = "toefl",  name = "托福", file = "TOEFL.txt" },
-    { key = "gre",    name = "GRE",  file = "GRE.txt" },
+    { key = "gaokao", name = "高考" },
+    { key = "cet4",   name = "四级" },
+    { key = "cet6",   name = "六级" },
+    { key = "kaoyan", name = "考研" },
+    { key = "ielts",  name = "雅思" },
+    { key = "toefl",  name = "托福" },
+    { key = "gre",    name = "GRE" },
 }
 
 -- 难度别名（命令参数，大小写不敏感）
@@ -34,36 +40,80 @@ local ALIASES = {
 }
 
 local words_by_len = {}  -- [diff_key][len] = {word,...}
-local words_set = {}     -- [diff_key][word] = true
 local union_words = {}   -- 全部词库并集（词典校验用）
+local word_trans = {}    -- [word] = 中文释义
 
-local function load_wordlists()
-    for _, d in ipairs(DIFFICULTIES) do
-        local lines, err = jn.file.read_lines(d.file)
-        if not lines then
-            jn.log.error("[caidanci_grade] 词库加载失败 " .. d.file .. ": " .. (err or "unknown"))
+--- 解析一行 CSV（word,translation,tag）
+--- translation 带引号时：先剥离末尾的 ,tag（tag 不含逗号），再去掉首尾引号并还原 ""。
+--- 返回 word, translation, tag；格式非法返回 nil
+local function parse_row(line)
+    local word, rest = line:match("^([^,]*),(.*)$")
+    if not rest then return nil end
+    local trans, tag
+    if rest:sub(1, 1) == '"' then
+        local close = rest:match(",([^,]*)$")
+        local field = close and rest:sub(1, #rest - #close - 1) or rest
+        if field:sub(1, 1) ~= '"' or field:sub(-1) ~= '"' then return nil end
+        trans = field:sub(2, -2):gsub('""', '"')
+        tag = close or ""
+    else
+        local head, tail = rest:match("^(.-),(.*)$")
+        if head then
+            trans, tag = head, tail
         else
-            words_by_len[d.key] = {}
-            words_set[d.key] = {}
-            local count = 0
-            for _, line in ipairs(lines) do
-                local w = line:lower()
-                if w:match("^[a-z]+$") then
-                    count = count + 1
-                    words_set[d.key][w] = true
-                    union_words[w] = true
-                    local L = #w
-                    local bucket = words_by_len[d.key][L]
-                    if not bucket then
-                        bucket = {}
-                        words_by_len[d.key][L] = bucket
-                    end
-                    bucket[#bucket + 1] = w
-                end
-            end
-            jn.log.info(string.format("[caidanci_grade] %s 加载 %d 词", d.file, count))
+            trans, tag = rest, ""
         end
     end
+    -- 字面 "\r\n" / "\n" 序列转为真实换行，便于消息展示
+    if trans:find("\\n", 1, true) then
+        trans = trans:gsub("\\r\\n", "\n"):gsub("\\n", "\n")
+    end
+    return word, trans, tag
+end
+
+--- 从 words.csv 行数组构建内存索引
+---@return number row_count 保留的有效行数
+---@return number word_count 唯一单词数
+local function build_index(lines)
+    local row_count = 0
+    local word_count = 0
+    for _, line in ipairs(lines) do
+        -- 跳过表头（精确匹配，避免误伤词库中真实的 "word" 词条）
+        if line ~= "word,translation,tag" then
+            local word, trans, tag = parse_row(line)
+            if word and tag ~= "" and word:match("^[a-z]+$") then
+                row_count = row_count + 1
+                local bucket = words_by_len[tag]
+                if not bucket then
+                    bucket = {}
+                    words_by_len[tag] = bucket
+                end
+                local L = #word
+                local lenb = bucket[L]
+                if not lenb then
+                    lenb = {}
+                    bucket[L] = lenb
+                end
+                lenb[#lenb + 1] = word
+                union_words[word] = true
+                if word_trans[word] == nil then
+                    word_trans[word] = trans
+                    word_count = word_count + 1
+                end
+            end
+        end
+    end
+    return row_count, word_count
+end
+
+local function load_wordlists()
+    local lines, err = jn.file.read_lines("words.csv")
+    if not lines then
+        jn.log.error("[caidanci_grade] 词库加载失败 words.csv: " .. (err or "unknown"))
+        return
+    end
+    local rows, uniq = build_index(lines)
+    jn.log.info(string.format("[caidanci_grade] 词库加载 %d 行 / %d 个唯一单词", rows, uniq))
 end
 load_wordlists()
 
@@ -207,6 +257,22 @@ local function get_victory_msg(word, attempt_num)
         "👏 不错哦～" .. attempt_num .. " 次就猜出了 " .. word .. "！",
     }
     return msgs[math.random(#msgs)]
+end
+
+--- 单词中文释义（无释义返回 nil）
+local function word_meaning(word)
+    local t = word_trans[word]
+    if t == nil or t == "" then return nil end
+    return t
+end
+
+--- 在文本末尾追加释义行（无释义时原样返回）
+local function append_meaning(text, word)
+    local meaning = word_meaning(word)
+    if meaning then
+        return text .. "\n📖 " .. meaning
+    end
+    return text
 end
 
 --- 失败时的安慰语
@@ -551,7 +617,8 @@ jn.command.register("结束", function(args, event)
 
     delete_game(group_id)
 
-    local text = "游戏已结束！答案是：" .. game.word .. "\n\n发送 /猜单词 可以再来一局～"
+    local text = "游戏已结束！答案是：" .. game.word
+    text = append_meaning(text, game.word) .. "\n\n发送 /猜单词 可以再来一局～"
     reply_with_board(event, text, game)
     return true
 end, {
@@ -674,7 +741,7 @@ jn.command.register("猜", function(args, event)
     if guess == game.word then
         game.status = "won"
         save_game(group_id, game)
-        reply_with_board(event, get_victory_msg(game.word, attempt_num), game)
+        reply_with_board(event, append_meaning(get_victory_msg(game.word, attempt_num), game.word), game)
         return true
     end
 
