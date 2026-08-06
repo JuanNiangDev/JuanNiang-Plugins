@@ -1,0 +1,48 @@
+# ====================================================================
+# redrock_caidanci_grade 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# ====================================================================
+
+configs:
+  - key: default_difficulty
+    type: string
+    label: 默认难度
+    description: 开局默认难度（高考/四级/六级/考研/雅思/托福/GRE，默认四级）
+    default: "四级"
+
+  - key: default_length_min
+    type: string
+    label: 随机长度下限
+    description: 未指定长度时随机单词长度下限（默认 4）
+    default: "4"
+
+  - key: default_length_max
+    type: string
+    label: 随机长度上限
+    description: 未指定长度时随机单词长度上限（默认 6）
+    default: "6"
+
+  - key: max_length
+    type: string
+    label: 最大单词长度
+    description: 允许指定的最大单词长度（默认 12）
+    default: "12"
+
+  - key: max_attempts
+    type: string
+    label: 最大猜测次数
+    description: 每局最多可猜测的次数（默认 6）
+    default: "6"
+
+  - key: enable_trigger
+    type: bool
+    label: 引导触发
+    description: 是否启用"没意思/有啥好玩"等关键词引导开局
+    default: true
