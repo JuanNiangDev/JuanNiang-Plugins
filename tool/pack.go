@@ -7,10 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
+
+// zipEpoch 固定写入 zip 条目的时间戳。
+// 源文件 mtime 随 checkout/编辑而变，直接写入会导致内容未变化时 zip 字节
+// 仍每晚全量不同（CI 强制入库后 .git 持续膨胀）。固定时间戳实现可复现打包：
+// 插件内容不变 → zip 字节不变 → nightly 无 diff 不产生提交。
+var zipEpoch = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 
 var packAll bool
 
@@ -146,7 +153,7 @@ func packOne(name string) error {
 			return nil
 		}
 		h := &zip.FileHeader{Name: rel, Method: zip.Deflate}
-		h.SetModTime(info.ModTime())
+		h.SetModTime(zipEpoch)
 		w, _ := zw.CreateHeader(h)
 		f, _ := os.Open(path)
 		if f != nil {
