@@ -38,3 +38,6 @@ hago
 *.x86_64
 *.hex
 
+
+# tool 目录内编译出的二进制
+/tool/tool
