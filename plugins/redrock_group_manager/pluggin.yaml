@@ -1,10 +1,11 @@
 name: "redrock_group_manager"
-version: "1.0.0"
+version: "1.1.0"
 author: "Redrock"
 description: "红岩群管理工具"
 entry: "main.lua"
 permissions:
   - onebot11
   - database
+  - file
 system: false
 enabled: true

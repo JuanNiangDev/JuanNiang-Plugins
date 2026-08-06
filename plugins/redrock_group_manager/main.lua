@@ -1,10 +1,13 @@
 -- ====================================================================
 -- redrock_group_manager
 -- 红岩群管理工具
--- 图片刷屏 / +1复读 / 政治/广告/色情敏感词 / 数据监控
+-- 图片刷屏 / +1复读 / 广告违规 / 敏感违规 / 数据监控
 -- ====================================================================
 
 local jn = require("jn")
+
+-- 随机话术种子
+math.randomseed(os.time())
 
 -- ====================================================================
 -- 配置（可在 Web 面板配置）
@@ -17,41 +20,69 @@ local IMG_MUTE_DURATION = tonumber(jn.config.get("img_mute_duration")) or 60
 
 -- +1 复读：COPY_THRESHOLD 人连续发相同消息触发
 local COPY_THRESHOLD = tonumber(jn.config.get("copy_threshold")) or 3
+local ENABLE_COPY_CHECK = jn.config.get("enable_copy_check")
 
 -- ====================================================================
--- 敏感词库
+-- 违规词库（全部来自 txt 文件，无脚本内置词条）
+-- 按违规类型分两类，命中均触发三级惩罚：
+--   广告违规   = 广告词库 + QQ 群聊推荐卡片
+--   敏感违规   = 色情 + 政治 + 脏话/通用
+-- 词库文件（相对插件目录，jn.file.read_lines 读取）：
+--   广告: words/all.txt（campus-ad-detection-words）+ words/cn_advertisement.txt
+--   敏感: words/cn_pornographic.txt + words/cn_politics.txt + words/cn_general.txt
+-- 内存策略：启动时一次性读入，跨文件去重，仅保留两份小写词数组
 -- ====================================================================
 
--- 政治敏感
-local POLITICAL_WORDS = {
-    "台湾", "湾湾", "乌克兰",
-    "台独", "港独", "藏独",
-    "两个中国", "简中", "辱华",
-    "资本主义", "社会主义",
-    "女权", "女拳", "田园女权", "小仙女", "xxn",
-    "孙笑川", "男凝",
-    "砍人", "杀人", "爱男", "爱女",
-    "美国大选", "特朗普", "拜登",
+local WORD_FILES = {
+    ad        = { "words/all.txt", "words/cn_advertisement.txt" },
+    sensitive = { "words/cn_pornographic.txt", "words/cn_politics.txt", "words/cn_general.txt" },
 }
 
--- 广告
-local AD_WORDS = {
-    "买校园卡", "买卡",
-    "卖校园卡", "卖卡",
-    "出校园卡", "出卡",
-    "出物", "收物",
-    "买被子", "卖被子", "出被子",
-    "招聘", "兼职", "驾校",
-    "二手交易",
-}
+--- 加载单个词库文件并入目标数组：去空白/去注释 → 小写 → 跨文件去重
+--- 纯 ASCII 且短于 3 字符的 token（如 "av"）丢弃，防止误命中 "have/save" 等正常单词
+local function load_word_file(path, words, seen)
+    local lines, err = jn.file.read_lines(path)
+    if not lines then
+        jn.log.error("[redrock_group_manager] 词库加载失败 " .. path .. ": " .. (err or "unknown"))
+        return 0
+    end
+    local n = 0
+    for _, line in ipairs(lines) do
+        local w = line:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+        if w ~= "" and w:sub(1, 1) ~= "#" and not seen[w] then
+            if not (w:match("^[a-z0-9]+$") and #w < 3) then
+                seen[w] = true
+                n = n + 1
+                words[#words + 1] = w
+            end
+        end
+    end
+    return n
+end
 
--- 色情敏感
-local NSFW_WORDS = {
-    "约炮", "裸聊", "援交", "包养", "嫖娼",
-    "小姐上门", "特殊服务", "一夜情",
-    "色情", "黄色网站", "成人网站",
-    "性爱", "做爱", "操逼", "日逼",
-    "鸡巴", "逼", "屌",
+--- 加载全部分类词库
+local function load_word_lists()
+    local result = {}
+    for category, files in pairs(WORD_FILES) do
+        local words, seen, total = {}, {}, 0
+        for _, path in ipairs(files) do
+            total = total + load_word_file(path, words, seen)
+        end
+        result[category] = words
+        jn.log.info(string.format("[redrock_group_manager] %s 违规词库加载 %d 词", category, total))
+    end
+    return result
+end
+
+local WORDS = load_word_lists()
+
+-- 三级惩罚：第 2 次违规的禁言时长（秒），默认 30 分钟
+local VIOLATION_MUTE = tonumber(jn.config.get("violation_mute_seconds")) or 1800
+
+-- QQ 群聊推荐卡片：OneBot 11 json 消息段 data 中的 app 标识（计入广告违规）
+local QQ_CARD_APPS = {
+    "com.tencent.contact.lua",    -- 推荐联系人
+    "com.tencent.troopsharecard", -- 推荐群聊卡片
 }
 
 -- ====================================================================
@@ -108,9 +139,158 @@ local function incr_kv(key)
     return v
 end
 
-local function del_kv(key)
-    store[key] = nil
-    jn.database.exec(string.format("DELETE FROM pluggin_redrock_group_manager_kv WHERE key = '%s'", key))
+-- ====================================================================
+-- 管理数据：豁免 / 手动管理员 / 违规记录（持久化于 config.yaml）
+-- 与 config.yaml 的 list 配置项双向同步：
+--   面板「配置」页可增删修改（保存后插件自动重载生效）
+--   插件在 /豁免 或违规变更时写回 config.yaml（插件目录内，jn.file）
+-- 违规记录格式: "群号:QQ号:违规次数"（违规人及违规等级，面板可见可改）
+-- ====================================================================
+
+-- 配置 schema（与 config.yaml 保持一致；写回时整体重新生成 config.yaml）
+local CONFIG_SCHEMA = {
+    { key = "img_spam_window",         type = "string", label = "图片刷屏时间窗口(秒)",   description = "在该秒数内发送超过阈值的图片才会被判为刷屏（默认 2）",           def = "2" },
+    { key = "img_spam_threshold",      type = "string", label = "图片刷屏阈值",           description = "时间窗口内触发警告的图片数量（默认 3）",                       def = "3" },
+    { key = "img_mute_duration",       type = "string", label = "刷屏禁言时长(秒)",       description = "重复刷屏被禁言的时长（默认 60）",                             def = "60" },
+    { key = "copy_threshold",          type = "string", label = "复读触发阈值",           description = "多少人连续发送相同消息判定为复读（默认 3）",                     def = "3" },
+    { key = "enable_copy_check",       type = "bool",   label = "启用复读检测",           description = "是否启用 +1 复读检测",                                        def = true },
+    { key = "violation_mute_seconds",  type = "string", label = "违规禁言时长(秒)",       description = "第二次违规时禁言时长，默认 1800（30 分钟）",                     def = "1800" },
+    { key = "exempt_users",            type = "list",   label = "豁免 QQ 列表",           description = "被豁免的 QQ 号不参与任何违规检测（/豁免 可添加，面板可增删）",   def = {} },
+    { key = "admin_users",             type = "list",   label = "手动管理员 QQ 列表",     description = "群角色无法识别时手动指定的管理员账号（面板可增删）",               def = {} },
+    { key = "violations",              type = "list",   label = "违规记录(群号:QQ:次数)", description = "违规人及违规等级，格式 群号:QQ号:次数；删除某行即重置该用户违规", def = {} },
+}
+
+local EXEMPT = {}  -- [qq] = true            豁免账号
+local ADMIN  = {}  -- [qq] = true            手动管理员账号
+local VIOL   = {}  -- ["群号:QQ"] = 次数      违规记录
+
+--- YAML 双引号字符串转义
+local function yaml_str(s)
+    s = tostring(s or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+    return '"' .. s .. '"'
+end
+
+--- 表键排序后返回数组（保证 config.yaml 输出稳定）
+local function sorted_keys(t)
+    local keys = {}
+    for k in pairs(t) do keys[#keys + 1] = k end
+    table.sort(keys)
+    return keys
+end
+
+--- 当前配置值（静态项取模块加载时的值；动态项取内存状态）
+local function config_value(key)
+    if key == "img_spam_window" then return tostring(IMG_SPAM_WINDOW)
+    elseif key == "img_spam_threshold" then return tostring(IMG_SPAM_THRESHOLD)
+    elseif key == "img_mute_duration" then return tostring(IMG_MUTE_DURATION)
+    elseif key == "copy_threshold" then return tostring(COPY_THRESHOLD)
+    elseif key == "enable_copy_check" then return ENABLE_COPY_CHECK
+    elseif key == "violation_mute_seconds" then return tostring(VIOLATION_MUTE)
+    elseif key == "exempt_users" then
+        local out = {}
+        for _, qq in ipairs(sorted_keys(EXEMPT)) do out[#out + 1] = qq end
+        return out
+    elseif key == "admin_users" then
+        local out = {}
+        for _, qq in ipairs(sorted_keys(ADMIN)) do out[#out + 1] = qq end
+        return out
+    elseif key == "violations" then
+        local out = {}
+        for _, k in ipairs(sorted_keys(VIOL)) do out[#out + 1] = k .. ":" .. VIOL[k] end
+        return out
+    end
+    return nil
+end
+
+--- 重新生成 config.yaml（面板 schema + 当前值 + 管理数据）
+local function save_config()
+    local out = {
+        "# ====================================================================",
+        "# redrock_group_manager 插件配置",
+        "# ====================================================================",
+        "# 本文件同时由插件维护（/豁免、违规记录变更时自动写回），",
+        "# 也可在 Web 面板「插件 → 配置」页编辑，保存后自动重载生效。",
+        "# ====================================================================",
+        "",
+        "configs:",
+    }
+    for _, item in ipairs(CONFIG_SCHEMA) do
+        local v = config_value(item.key)
+        out[#out + 1] = "  - key: " .. item.key
+        out[#out + 1] = "    type: " .. item.type
+        out[#out + 1] = "    label: " .. yaml_str(item.label)
+        out[#out + 1] = "    description: " .. yaml_str(item.description)
+        if item.type == "list" then
+            out[#out + 1] = "    default: []"
+        elseif item.type == "bool" then
+            out[#out + 1] = "    default: " .. (item.def and "true" or "false")
+        else
+            out[#out + 1] = "    default: " .. yaml_str(item.def)
+        end
+        if v ~= nil then
+            if type(v) == "table" then
+                if #v == 0 then
+                    out[#out + 1] = "    value: []"
+                else
+                    out[#out + 1] = "    value:"
+                    for _, x in ipairs(v) do
+                        out[#out + 1] = "      - " .. yaml_str(x)
+                    end
+                end
+            elseif type(v) == "boolean" then
+                out[#out + 1] = "    value: " .. (v and "true" or "false")
+            else
+                out[#out + 1] = "    value: " .. yaml_str(v)
+            end
+        end
+    end
+    local ok, err = jn.file.write("config.yaml", table.concat(out, "\n") .. "\n")
+    if not ok then
+        jn.log.error("[redrock_group_manager] 写回 config.yaml 失败: " .. (err or "unknown"))
+    end
+end
+
+--- 迁移旧版 SQLite 违规记录（kv viol: 前缀）到 config.yaml，一次性
+local function migrate_old_violations()
+    if next(VIOL) then return end
+    local rows, err = jn.database.query(
+        "SELECT key, value FROM pluggin_redrock_group_manager_kv WHERE key LIKE '%:viol:%'")
+    if not rows then return end
+    local changed = false
+    for _, r in ipairs(rows) do
+        local g, u = tostring(r.key):match("^(%d+):viol:(%d+)$")
+        if g then
+            VIOL[g .. ":" .. u] = tonumber(r.value) or 1
+            changed = true
+        end
+        store[r.key] = nil
+        jn.database.exec(string.format("DELETE FROM pluggin_redrock_group_manager_kv WHERE key = '%s'", r.key))
+    end
+    if changed then save_config() end
+end
+
+--- 从 config.yaml 载入管理数据（面板编辑保存后插件重载即生效）
+local function load_state()
+    for _, qq in ipairs(jn.config.get("exempt_users") or {}) do
+        EXEMPT[tostring(qq)] = true
+    end
+    for _, qq in ipairs(jn.config.get("admin_users") or {}) do
+        ADMIN[tostring(qq)] = true
+    end
+    for _, entry in ipairs(jn.config.get("violations") or {}) do
+        local g, u, c = tostring(entry):match("^(%d+):(%d+):(%d+)$")
+        if g then
+            VIOL[g .. ":" .. u] = tonumber(c)
+        end
+    end
+    migrate_old_violations()
+end
+
+load_state()
+
+--- 是否被豁免（豁免账号不参与任何检测）
+local function is_exempt(user_id)
+    return EXEMPT[tostring(user_id)] == true
 end
 
 --- 构建 key（带群前缀）
@@ -128,9 +308,9 @@ local function has_image(raw)
         or raw:find("%[表情%]") ~= nil
 end
 
---- 匹配任意敏感词
+--- 匹配任意敏感词（先剥离 CQ 码，避免命中 json 卡片/图片等富文本 payload）
 local function match_any(text, words)
-    local lower = text:lower()
+    local lower = (text or ""):gsub("%[CQ:[^%]]*%]", " "):lower()
     for _, w in ipairs(words) do
         if lower:find(w, 1, true) then
             return w
@@ -139,7 +319,8 @@ local function match_any(text, words)
     return nil
 end
 
---- 判断是否为管理员
+--- 判断是否为管理员：系统管理员（event.admins）或手动管理账号（面板 admin_users）
+--- 不调用群角色 API，可安全用于高频路径
 local function is_admin(event)
     if event.admins then
         for _, qq in ipairs(event.admins) do
@@ -147,6 +328,9 @@ local function is_admin(event)
                 return true
             end
         end
+    end
+    if ADMIN[tostring(event.user_id)] then
+        return true
     end
     return false
 end
@@ -181,6 +365,130 @@ local function reply(event, text, image)
         segments[#segments + 1] = { type = "image", data = { file = image } }
     end
     jn.onebot11.send_group_msg(event.group_id, segments)
+end
+
+--- 检测消息是否包含 QQ 群聊推荐卡片
+--- OneBot 11 json 消息段: [CQ:json,data={"app":"com.tencent.troopsharecard",...}]
+--- 部分实现（如 go-cqhttp）会对 data 做 URL 编码；app 值仅含字母数字与点号，不受编码影响
+local function is_group_recommend_card(raw)
+    if not raw then return false end
+    local lower = raw:lower()
+    local pos = 1
+    while true do
+        local s = lower:find("[cq:json", pos, true)
+        if not s then return false end
+        -- 只在该 CQ 段（到 ']' 为止）内查找，避免命中段外普通文本
+        local e = lower:find("]", s + 1, true) or (#lower + 1)
+        local segment = lower:sub(s, e - 1)
+        for _, app in ipairs(QQ_CARD_APPS) do
+            if segment:find(app, 1, true) then
+                return true
+            end
+        end
+        pos = e + 1
+    end
+    return false
+end
+
+--- 判断是否为管理员/群主（违规处罚、豁免命令使用）：
+--- 系统/手动管理员直接放行；群角色可识别时 owner/admin 放行；
+--- 群角色无法识别时（get_group_member_info 失败）退回手动管理账号判断
+local function is_group_admin(event)
+    if is_admin(event) then return true end
+    local info, _ = jn.onebot11.get_group_member_info(event.group_id, event.user_id)
+    if info and info.role then
+        return info.role == "owner" or info.role == "admin"
+    end
+    return false
+end
+
+-- ====================================================================
+-- 三级惩罚话术（每级多套随机，卷娘语气，参考群内其他插件）
+-- 广告违规固定开头「打广告先交广告费」，敏感违规固定「小鬼不能碰」
+-- ====================================================================
+
+local TIER_TEMPLATES = {
+    ad = {
+        {
+            "打广告先交广告费！卷娘记住本本上了，本次违规予以警告。再犯的话可就要禁言 30 分钟啦～",
+            "打广告先交广告费！卷娘记住本本上了，本次违规予以警告。下次再发广告就是禁言 30 分钟起步哦",
+            "打广告先交广告费！卷娘记住本本上了，本次违规予以警告。广告费什么时候交呀～",
+        },
+        {
+            "打广告先交广告费！卷娘记住本本上了，本次违规予以禁言 30 分钟。再犯的话就只能请你出去啦～",
+            "打广告先交广告费！卷娘记住本本上了，本次违规予以禁言 30 分钟。事不过三，第三次就走人了哦",
+            "打广告先交广告费！卷娘记住本本上了，本次违规予以禁言 30 分钟。歇会儿冷静一下吧～",
+        },
+        {
+            "打广告先交广告费！卷娘记住本本上了，本次违规予以踢出群聊。广告费没交，江湖再见啦～",
+            "打广告先交广告费！卷娘记住本本上了，本次违规予以踢出群聊。想回来记得先把广告费交了哦～",
+            "打广告先交广告费！卷娘记住本本上了，本次违规予以踢出群聊。三次广告，本本都写满了～",
+        },
+    },
+    sensitive = {
+        {
+            "小鬼不能碰这个话题哦。卷娘记住本本上了，本次违规予以警告。再犯的话可就要禁言 30 分钟啦～",
+            "小鬼不能碰这个话题哦。卷娘记住本本上了，本次违规予以警告。下次再聊就是禁言 30 分钟起步",
+            "小鬼不能碰这个话题哦。卷娘记住本本上了，本次违规予以警告。这个话题就当没看见吧～",
+        },
+        {
+            "小鬼不能碰这个话题哦。卷娘记住本本上了，本次违规予以禁言 30 分钟。再犯的话就只能请你出去啦～",
+            "小鬼不能碰这个话题哦。卷娘记住本本上了，本次违规予以禁言 30 分钟。事不过三哦",
+            "小鬼不能碰这个话题哦。卷娘记住本本上了，本次违规予以禁言 30 分钟。冷静一下哦～",
+        },
+        {
+            "小鬼不能碰这个话题哦。卷娘记住本本上了，本次违规予以踢出群聊。江湖再见啦～",
+            "小鬼不能碰这个话题哦。卷娘记住本本上了，本次违规予以踢出群聊。换个群好好说话哦～",
+            "小鬼不能碰这个话题哦。卷娘记住本本上了，本次违规予以踢出群聊。三次了还聊，本本都写满了～",
+        },
+    },
+}
+
+--- 三级惩罚：命中词库 / 发送 QQ 推荐卡片的统一处理
+--- 第 1 次：撤回 + 警告
+--- 第 2 次：撤回 + 禁言 30 分钟
+--- 第 3 次：撤回 + 踢出群聊，并重置该用户违规次数
+local function handle_violation(event, reason, category)
+    local group_id = event.group_id
+    local user_id = event.user_id
+
+    -- 管理员/群主豁免
+    if is_group_admin(event) then return end
+
+    -- 违规次数按 群:用户 记录（config.yaml 持久化，面板可见可改）
+    local vkey = tostring(group_id) .. ":" .. tostring(user_id)
+    local count = (VIOL[vkey] or 0) + 1
+    VIOL[vkey] = count
+    save_config()
+
+    -- 三级惩罚：1 警告 / 2 禁言30分钟 / 3 踢出群聊（踢出后重置次数）
+    local action
+    if count == 1 then
+        action = "撤回并警告"
+        delete_msg(event)
+    elseif count == 2 then
+        action = "撤回并禁言30分钟"
+        delete_msg(event)
+        jn.onebot11.ban_group_member(group_id, user_id, VIOLATION_MUTE)
+        incr_kv(gkey(group_id, "stats:mute"))
+    else
+        action = "撤回并踢出群聊"
+        delete_msg(event)
+        jn.onebot11.kick_group_member(group_id, user_id, false)
+        VIOL[vkey] = nil -- 踢出后重置违规次数
+        save_config()
+        incr_kv(gkey(group_id, "stats:kick"))
+    end
+    incr_kv(gkey(group_id, "stats:" .. category))
+
+    -- 卡片计入广告违规话术
+    local msg_cat = category == "card" and "ad" or category
+    local templates = TIER_TEMPLATES[msg_cat] or TIER_TEMPLATES.ad
+    local bucket = templates[count] or templates[3]
+    reply(event, bucket[math.random(#bucket)])
+
+    notify_admins(event, string.format("%d %s（第 %d 次）-> %s", user_id, reason, count, action))
+    jn.log.info(string.format("[group_mgr] %d %s（第 %d 次）群 %d -> %s", user_id, reason, count, group_id, action))
 end
 
 -- ====================================================================
@@ -262,8 +570,8 @@ local function check_copy_spam(event)
     local count_key = gkey(group_id, "cp:count")
     local users_key = gkey(group_id, "cp:users")
 
-    -- 复读检测开关
-    if jn.config.get("enable_copy_check") == false then return false end
+    -- 复读检测开关（面板修改后保存会重载插件，重新生效）
+    if ENABLE_COPY_CHECK == false then return false end
 
     local last_msg = get_kv(last_key) or ""
 
@@ -310,40 +618,27 @@ end
 -- ====================================================================
 local function check_sensitive(event)
     local raw = event.raw_message or ""
-    local user_id = event.user_id
-    local group_id = event.group_id
 
     -- 管理员豁免
     if is_admin(event) then return false end
 
-    -- 政治敏感
-    local pw = match_any(raw, POLITICAL_WORDS)
-    if pw then
-        delete_msg(event)
-        reply(event, "小鬼，别碰这个话题")
-        incr_kv(gkey(group_id, "stats:political"))
-        jn.log.info(string.format("[group_mgr] %d 触发政治敏感词: %s", user_id, pw))
+    -- 广告违规：QQ 群聊推荐卡片
+    if is_group_recommend_card(raw) then
+        handle_violation(event, "广告违规：推荐群聊卡片", "card")
         return true
     end
 
-    -- 广告
-    local aw = match_any(raw, AD_WORDS)
+    -- 广告违规：广告词库
+    local aw = match_any(raw, WORDS.ad)
     if aw then
-        delete_msg(event)
-        reply(event, "打广告先交200宣传费")
-        incr_kv(gkey(group_id, "stats:ad"))
-        jn.log.info(string.format("[group_mgr] %d 触发广告词: %s", user_id, aw))
-        notify_admins(event, tostring(user_id) .. " 发送广告被撤回\n关键词: " .. aw)
+        handle_violation(event, "广告违规：" .. aw, "ad")
         return true
     end
 
-    -- 色情
-    local nw = match_any(raw, NSFW_WORDS)
-    if nw then
-        delete_msg(event)
-        incr_kv(gkey(group_id, "stats:nsfw"))
-        jn.log.info(string.format("[group_mgr] %d 触发色情敏感词: %s", user_id, nw))
-        notify_admins(event, tostring(user_id) .. " 发送色情敏感内容被撤回\n关键词: " .. nw)
+    -- 敏感违规：色情 / 政治 / 脏话词库
+    local sw = match_any(raw, WORDS.sensitive)
+    if sw then
+        handle_violation(event, "敏感违规：" .. sw, "sensitive")
         return true
     end
 
@@ -356,7 +651,10 @@ end
 function on_message(event)
     if event.message_type ~= "group" then return false, nil end
 
-    -- 敏感内容检测（优先级最高）
+    -- 豁免账号不参与任何检测
+    if is_exempt(event.user_id) then return false, nil end
+
+    -- 违规检测（广告/敏感，优先级最高）
     if check_sensitive(event) then return true end
 
     -- 图片刷屏
@@ -393,10 +691,11 @@ jn.command.register("groupstats", function(args, event)
     local joins = tonumber(get_kv(gkey(group_id, "stats:join:" .. date)) or "0")
     local warns = tonumber(get_kv(gkey(group_id, "stats:warn")) or "0")
     local mutes = tonumber(get_kv(gkey(group_id, "stats:mute")) or "0")
-    local political = tonumber(get_kv(gkey(group_id, "stats:political")) or "0")
-    local ad = tonumber(get_kv(gkey(group_id, "stats:ad")) or "0")
-    local nsfw = tonumber(get_kv(gkey(group_id, "stats:nsfw")) or "0")
     local copy_warn = tonumber(get_kv(gkey(group_id, "stats:copy_warn")) or "0")
+    local ad = tonumber(get_kv(gkey(group_id, "stats:ad")) or "0")
+    local card = tonumber(get_kv(gkey(group_id, "stats:card")) or "0")
+    local sensitive = tonumber(get_kv(gkey(group_id, "stats:sensitive")) or "0")
+    local kicks = tonumber(get_kv(gkey(group_id, "stats:kick")) or "0")
 
     local text = string.format([[
 📊 群管理统计 (%s)
@@ -405,16 +704,97 @@ jn.command.register("groupstats", function(args, event)
 刷屏警告: %d 次
 刷屏禁言: %d 次
 复读警告: %d 次
-政治撤回: %d 次
-广告撤回: %d 次
-色情撤回: %d 次]],
-        date, joins, warns, mutes, copy_warn, political, ad, nsfw)
+广告违规: %d 次
+敏感违规: %d 次
+踢出群聊: %d 次]],
+        date, joins, warns, mutes, copy_warn, ad + card, sensitive, kicks)
 
     reply(event, text)
     return true
 end, {
     description = "查看群管理统计数据（管理员）",
     usage = "/groupstats",
+})
+
+-- ====================================================================
+-- 命令: /豁免 —— 管理员豁免某用户（不再检测，清除其违规记录）
+-- ====================================================================
+
+-- 豁免话术（多套随机）
+local EXEMPT_TEMPLATES = {
+    ok = {
+        "好啦，%d 已经被卷娘记到豁免小本本上啦，违规记录也清空咯～",
+        "收到！%d 以后可以放心发言，卷娘不会管 TA 啦，违规记录已清空～",
+        "%d 获得免死金牌一枚！卷娘已豁免 TA，并清空了违规记录哦～",
+    },
+    denied = {
+        "只有管理员才能用豁免哦～",
+        "豁免是管理员的专属技能啦，你不行哦～",
+    },
+    usage = {
+        "用法：/豁免 QQ号 或 /豁免 @某人 哦～",
+    },
+    already = {
+        "%d 早就在卷娘的豁免名单里啦～",
+    },
+}
+
+--- 随机取一条话术（可选 string.format 参数）
+local function pick(msgs, fmt)
+    local m = msgs[math.random(#msgs)]
+    if fmt then m = string.format(m, fmt) end
+    return m
+end
+
+--- 解析 /豁免 参数：QQ 号 或 @某人（[CQ:at,qq=...]）
+local function parse_target_q(args)
+    if not args or #args == 0 then return nil end
+    local raw = tostring(args[1])
+    local qq = raw:match("%[CQ:at,qq=(%d+)")
+    if not qq then
+        qq = raw:match("^(%d+)$")
+    end
+    if not qq then return nil end
+    return tonumber(qq)
+end
+
+jn.command.register("豁免", function(args, event)
+    if event.message_type ~= "group" then
+        reply(event, "该命令仅限群聊使用哦～")
+        return true
+    end
+    if not is_group_admin(event) then
+        reply(event, pick(EXEMPT_TEMPLATES.denied))
+        return true
+    end
+    local qq = parse_target_q(args)
+    if not qq then
+        reply(event, pick(EXEMPT_TEMPLATES.usage))
+        return true
+    end
+    if EXEMPT[tostring(qq)] then
+        reply(event, pick(EXEMPT_TEMPLATES.already, qq))
+        return true
+    end
+
+    EXEMPT[tostring(qq)] = true
+    -- 清除该账号全部群的违规记录
+    local cleared = 0
+    local suffix = ":" .. tostring(qq)
+    for k in pairs(VIOL) do
+        if k:sub(-#suffix) == suffix then
+            VIOL[k] = nil
+            cleared = cleared + 1
+        end
+    end
+    save_config()
+
+    reply(event, pick(EXEMPT_TEMPLATES.ok, qq))
+    jn.log.info(string.format("[group_mgr] %d 豁免了 %d（清除违规 %d 条）", event.user_id, qq, cleared))
+    return true
+end, {
+    description = "豁免某用户：不再检测并清除其违规记录（管理员）",
+    usage = "/豁免 QQ号 或 /豁免 @某人",
 })
 
 jn.log.info("[redrock_group_manager] 群管理插件已加载")
