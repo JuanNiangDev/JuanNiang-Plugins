@@ -1,5 +1,5 @@
 # ====================================================================
-# redrock_caidanci 插件配置
+# redrock_caidanci_grade 插件配置
 # ====================================================================
 # 每个配置项由 key / type / label / description / default 声明。
 # type 支持三种：
@@ -11,11 +11,29 @@
 # ====================================================================
 
 configs:
-  - key: default_length
+  - key: default_difficulty
     type: string
-    label: 默认单词长度
-    description: 开局时默认的单词长度（支持 4、5、6，默认 5）
-    default: "5"
+    label: 默认难度
+    description: 开局默认难度（高考/四级/六级/考研/雅思/托福/GRE，默认四级）
+    default: "四级"
+
+  - key: default_length_min
+    type: string
+    label: 随机长度下限
+    description: 未指定长度时随机单词长度下限（默认 4）
+    default: "4"
+
+  - key: default_length_max
+    type: string
+    label: 随机长度上限
+    description: 未指定长度时随机单词长度上限（默认 6）
+    default: "6"
+
+  - key: max_length
+    type: string
+    label: 最大单词长度
+    description: 允许指定的最大单词长度（默认 12）
+    default: "12"
 
   - key: max_attempts
     type: string
