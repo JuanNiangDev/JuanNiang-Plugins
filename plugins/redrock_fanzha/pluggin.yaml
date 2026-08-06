@@ -1,5 +1,5 @@
 name: "redrock_fanzha"
-version: "1.2.0"
+version: "1.2.1"
 author: "Redrock"
 description: "开学季反诈提醒：发送 /反诈提醒 获取完整反诈指南"
 entry: "main.lua"
