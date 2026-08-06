@@ -123,23 +123,23 @@ local QUERIES = {
 local MENU = [[【红岩网校查询】发送 /redrock <关键词> 查询对应信息～
 
 📋 可查询内容：
-- 网校介绍     /redrock 网校
-- 部门介绍     /redrock 部门
-- 前端         /redrock 前端
-- 后端         /redrock 后端
-- 产品         /redrock 产品
-- 视觉         /redrock 视觉
-- 移动/安卓/ios /redrock 移动 | 安卓 | ios
-- 运维         /redrock 运维
-- AI           /redrock ai
-- 如何加入     /redrock 加入
-- 网校位置     /redrock 位置
-- 能学到什么   /redrock 学习
-- 招新活动     /redrock 招新
-- 网校成果     /redrock 成果
-- 新生导航     /redrock 新生导航
-- 趣味功能     /redrock 趣味功能
-- 3G 科普      /redrock 3g]]
+- 网校介绍
+- 部门介绍
+- 前端
+- 后端
+- 产品
+- 视觉
+- 移动/安卓/ios
+- 运维
+- AI
+- 如何加入
+- 网校位置
+- 能学到什么
+- 招新活动
+- 网校成果
+- 新生导航
+- 趣味功能
+- 3G 科普]]
 
 -- ====================================================================
 -- 辅助函数
