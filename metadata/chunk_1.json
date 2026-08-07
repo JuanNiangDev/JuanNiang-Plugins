@@ -51,7 +51,7 @@
   },
   {
     "name": "redrock_code",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "author": "Redrock",
     "description": "基于 Judge0 的在线代码运行插件",
     "path": "redrock_code",
@@ -151,7 +151,7 @@
   },
   {
     "name": "t2i-example",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "author": "JuanNiang",
     "description": "T2I 文生图示例插件",
     "path": "t2i-example",

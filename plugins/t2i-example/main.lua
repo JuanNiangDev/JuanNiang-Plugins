@@ -12,8 +12,25 @@
 
 local jn = require("jn")
 
+-- 异步回调回复目标（不持有 event，用调用现场 ctx）
+local function target_of(event)
+    if event.message_type == "group" then
+        return { kind = "group", id = event.group_id }
+    end
+    return { kind = "private", id = event.user_id }
+end
+
+local function reply_to(ctx, text)
+    if not ctx or not ctx.target then return end
+    if ctx.target.kind == "group" then
+        jn.onebot11.send_group_msg(ctx.target.id, text)
+    else
+        jn.onebot11.send_private_msg(ctx.target.id, text)
+    end
+end
+
 -- ====================================================================
--- /t2i —— 生成图片并打印 URL 到日志
+-- /t2i —— 生成图片并返回 URL（异步，不阻塞事件循环）
 -- ====================================================================
 jn.command.register("t2i", function(args, event)
     if not jn.t2i.is_active() then
@@ -30,26 +47,21 @@ jn.command.register("t2i", function(args, event)
 
     -- args 是空格分隔的数组，原样拼接为 HTML
     local html = table.concat(args, " ")
-
     jn.log.info("[t2i-example] 正在生成图片...")
 
-    local url, err = jn.t2i.generate_url(html)
-    if not url then
-        jn.log.error("[t2i-example] 生成失败: " .. (err or "unknown"))
-        reply(event, "生成图片失败: " .. (err or "unknown"))
-        return true
+    local ctx = { action = "url", target = target_of(event) }
+    local rid = jn.t2i.generate_url_async(html, nil, ctx)
+    if rid == 0 then
+        reply(event, "生成提交失败，请确认 T2I 服务已启用～")
     end
-
-    jn.log.info("[t2i-example] 图片 URL: " .. url)
-    reply(event, (jn.config.get("success_prefix") or "✅ 图片生成成功\nURL: ") .. url)
     return true
 end, {
-    description = "生成图片（T2I），返回 URL",
+    description = "生成图片（T2I，异步），返回 URL",
     usage = "/t2i <HTML>",
 })
 
 -- ====================================================================
--- /t2i_url —— 生成图片并发送到群
+-- /t2i_url —— 生成图片并发送到群（异步）
 -- ====================================================================
 jn.command.register("t2i_url", function(args, event)
     if not jn.t2i.is_active() then
@@ -63,30 +75,39 @@ jn.command.register("t2i_url", function(args, event)
     end
 
     local html = table.concat(args, " ")
-
-    local url, err = jn.t2i.generate_url(html)
-    if not url then
-        reply(event, "生成失败: " .. (err or "unknown"))
-        return true
-    end
-
-    jn.log.info("[t2i-example] 图片 URL: " .. url)
-
-    -- 用图片 URL 发到群里
-    if event.message_type == "group" then
-        jn.onebot11.send_group_msg(event.group_id, {
-            { type = "image", data = { file = url } },
-        })
-    else
-        jn.onebot11.send_private_msg(event.user_id, {
-            { type = "image", data = { file = url } },
-        })
+    local ctx = { action = "send", target = target_of(event) }
+    local rid = jn.t2i.generate_url_async(html, nil, ctx)
+    if rid == 0 then
+        reply(event, "生成提交失败，请确认 T2I 服务已启用～")
     end
     return true
 end, {
-    description = "生成图片并直接发送",
+    description = "生成图片并直接发送（异步）",
     usage = "/t2i_url <HTML>",
 })
+
+-- ====================================================================
+-- 异步完成回调：on_t2i_response(req_id, ctx, result, err)
+--   result = 图片 URL；err 非 nil 表示失败
+-- ====================================================================
+function on_t2i_response(req_id, ctx, result, err)
+    if not ctx or not ctx.target then return end
+    if err then
+        reply_to(ctx, "生成图片失败: " .. tostring(err))
+        return
+    end
+    jn.log.info("[t2i-example] 图片 URL: " .. result)
+    if ctx.action == "url" then
+        reply_to(ctx, (jn.config.get("success_prefix") or "✅ 图片生成成功\nURL: ") .. result)
+    elseif ctx.action == "send" then
+        local msg = { { type = "image", data = { file = result } } }
+        if ctx.target.kind == "group" then
+            jn.onebot11.send_group_msg(ctx.target.id, msg)
+        else
+            jn.onebot11.send_private_msg(ctx.target.id, msg)
+        end
+    end
+end
 
 -- ====================================================================
 -- /t2i_state —— 查看 T2I 服务状态
