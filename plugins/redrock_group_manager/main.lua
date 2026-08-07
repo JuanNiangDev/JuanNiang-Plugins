@@ -900,6 +900,23 @@ local function parse_target_q(args)
     return tonumber(qq)
 end
 
+--- 豁免时自动解除禁言：查询群成员禁言到期时间（shut_up_timestamp），
+--- 仍在禁言中则调用 ban_group_member(duration=0) 解除
+local function unmute_if_banned(group_id, user_id)
+    local info, err = jn.onebot11.get_group_member_info(group_id, user_id)
+    if not info then
+        jn.log.warn(string.format("[group_mgr] 查询成员信息失败 user=%d err=%s", user_id, tostring(err)))
+        return false
+    end
+    local until_ts = tonumber(info.shut_up_timestamp or 0) or 0
+    if until_ts > os.time() then
+        jn.onebot11.ban_group_member(group_id, user_id, 0) -- duration 0 = 解除禁言
+        jn.log.info(string.format("[group_mgr] 豁免 %d 时自动解除禁言（群 %d）", user_id, group_id))
+        return true
+    end
+    return false
+end
+
 jn.command.register("豁免", function(args, event)
     if event.message_type ~= "group" then
         reply(event, "该命令仅限群聊使用哦～")
@@ -931,12 +948,70 @@ jn.command.register("豁免", function(args, event)
     end
     save_config()
 
-    reply(event, pick(EXEMPT_TEMPLATES.ok, qq))
-    jn.log.info(string.format("[group_mgr] %d 豁免了 %d（清除违规 %d 条）", event.user_id, qq, cleared))
+    -- 豁免时若用户处于禁言状态自动解除禁言
+    local unmuted = unmute_if_banned(event.group_id, qq)
+
+    local msg = pick(EXEMPT_TEMPLATES.ok, qq)
+    if unmuted then
+        msg = msg .. "另外 TA 之前被禁言，已顺手解除咯～"
+    end
+    reply(event, msg)
+    jn.log.info(string.format("[group_mgr] %d 豁免了 %d（清除违规 %d 条，解除禁言 %s）", event.user_id, qq, cleared, tostring(unmuted)))
     return true
 end, {
-    description = "豁免某用户：不再检测并清除其违规记录（管理员）",
+    description = "豁免某用户：不再检测、清除违规记录，若被禁言自动解除（管理员）",
     usage = "/豁免 QQ号 或 /豁免 @某人",
 })
+
+-- ====================================================================
+-- 命令: /解除豁免（/取消豁免）—— 管理员从豁免清单移除某用户，恢复检测
+-- ====================================================================
+
+local UNEXEMPT_TEMPLATES = {
+    ok = {
+        "好啦，%d 的豁免已解除，回归正常检测咯～",
+        "收到！%d 已从豁免清单移除，之后会正常检测啦～",
+        "免死金牌收回！%d 解除豁免，卷娘继续盯着 TA 哦～",
+    },
+    not_found = {
+        "%d 本来就不在豁免清单里啦～",
+    },
+    usage = {
+        "用法：/解除豁免 QQ号 或 /解除豁免 @某人 哦～",
+    },
+}
+
+local function register_unexempt(path)
+    jn.command.register(path, function(args, event)
+        if event.message_type ~= "group" then
+            reply(event, "该命令仅限群聊使用哦～")
+            return true
+        end
+        if not is_group_admin(event) then
+            reply(event, pick(EXEMPT_TEMPLATES.denied))
+            return true
+        end
+        local qq = parse_target_q(args)
+        if not qq then
+            reply(event, pick(UNEXEMPT_TEMPLATES.usage))
+            return true
+        end
+        if EXEMPT[tostring(qq)] then
+            EXEMPT[tostring(qq)] = nil
+            save_config()
+            reply(event, pick(UNEXEMPT_TEMPLATES.ok, qq))
+            jn.log.info(string.format("[group_mgr] %d 解除了 %d 的豁免", event.user_id, qq))
+        else
+            reply(event, pick(UNEXEMPT_TEMPLATES.not_found, qq))
+        end
+        return true
+    end, {
+        description = "解除豁免某用户：从豁免清单移除，恢复检测（管理员）",
+        usage = "/解除豁免 QQ号 或 /解除豁免 @某人",
+    })
+end
+
+register_unexempt("解除豁免")
+register_unexempt("取消豁免")
 
 jn.log.info("[redrock_group_manager] 群管理插件已加载")
