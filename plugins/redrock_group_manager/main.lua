@@ -1,7 +1,7 @@
 -- ====================================================================
 -- redrock_group_manager
 -- 红岩群管理工具
--- 图片刷屏 / +1复读 / 广告违规 / 敏感违规 / 数据监控
+-- 图片刷屏 / +1复读 / 黑色地带直接处罚 / 灰色地带LLM审查 / 敏感违规 / 数据监控
 -- ====================================================================
 
 local jn = require("jn")
@@ -24,17 +24,22 @@ local ENABLE_COPY_CHECK = jn.config.get("enable_copy_check")
 
 -- ====================================================================
 -- 违规词库（全部来自 txt 文件，无脚本内置词条）
--- 按违规类型分两类，命中均触发三级惩罚：
---   广告违规   = 广告词库 + QQ 群聊推荐卡片
---   敏感违规   = 色情 + 政治 + 脏话/通用
+-- 按命中方式分三类：
+--   黑色地带（words/black.txt + words/cn_advertisement.txt）
+--                    = 无歧义广告词（含样本提取话术） → 直接三级惩罚
+--   灰色地带（words/all.txt）   = 语义模糊（校园卡/考研/群名片/加群等）
+--                    → 命中后异步送 LLM 审查，按返回 JSON 裁决处罚
+--   敏感    （色情/政治/脏话）  → 直接三级惩罚
 -- 词库文件（相对插件目录，jn.file.read_lines 读取）：
---   广告: words/all.txt（campus-ad-detection-words）+ words/cn_advertisement.txt
+--   黑色: words/black.txt（来源 campus-ad-detection-words/样本.md）+ words/cn_advertisement.txt
+--   灰色: words/all.txt（campus-ad-detection-words，校园卡/考研/群名片等灰色词）
 --   敏感: words/cn_pornographic.txt + words/cn_politics.txt + words/cn_general.txt
--- 内存策略：启动时一次性读入，跨文件去重，仅保留两份小写词数组
+-- 内存策略：启动时一次性读入，跨文件去重，小写化；黑色词条从灰色集合剔除（黑色优先）
 -- ====================================================================
 
 local WORD_FILES = {
-    ad        = { "words/all.txt", "words/cn_advertisement.txt" },
+    black     = { "words/black.txt", "words/cn_advertisement.txt" },
+    gray      = { "words/all.txt" },
     sensitive = { "words/cn_pornographic.txt", "words/cn_politics.txt", "words/cn_general.txt" },
 }
 
@@ -76,8 +81,56 @@ end
 
 local WORDS = load_word_lists()
 
+-- 黑色词条从灰色集合剔除（命中黑色直接处罚，不进入 LLM 审查）
+local function subtract_black()
+    local black = {}
+    for _, w in ipairs(WORDS.black) do black[w] = true end
+    local gray = {}
+    for _, w in ipairs(WORDS.gray) do
+        if not black[w] then gray[#gray + 1] = w end
+    end
+    WORDS.gray = gray
+    jn.log.info(string.format("[redrock_group_manager] 灰色词库剔除黑色重叠后剩 %d 词", #gray))
+end
+subtract_black()
+
 -- 三级惩罚：第 2 次违规的禁言时长（秒），默认 30 分钟
 local VIOLATION_MUTE = tonumber(jn.config.get("violation_mute_seconds")) or 1800
+
+-- ====================================================================
+-- 灰色地带 LLM 审查（复用 Bot 自身 LLM Provider 配置，jn.llm 接口）
+-- 命中灰色词（校园卡/考研/群名片/加群等）→ llm.chat_async 异步审查，
+-- 不阻塞事件循环与其它插件；LLM 返回 JSON
+--   {"violation": "ad"|"sensitive"|"none", "reason": "..."}
+-- violation != none 时按三级惩罚处理，否则放行。
+-- ====================================================================
+local LLM_REVIEW_ENABLED = jn.config.get("llm_review_enabled")
+if LLM_REVIEW_ENABLED == nil then LLM_REVIEW_ENABLED = true end
+local LLM_TIMEOUT = 60          -- 单次审查超时（秒），与 Bot Provider 默认一致
+local LLM_MAX_TEXT = 600        -- 送入 LLM 的消息最大长度（字符）
+local LLM_DEDUP_WINDOW = 600    -- 同一条消息 10 分钟内不重复审查（秒）
+
+local llm_pending = {}          -- ["群号:QQ"] = true 该用户已有在途审查
+local llm_reviewed = {}         -- [message_id] = ts  消息去重
+local llm_ctx = {}              -- [req_id] = {group_id, user_id, message_id, word, pk} 异步结果上下文
+
+-- LLM 审查系统提示词：只输出 JSON
+local LLM_SYSTEM_PROMPT = [[
+你是一个 QQ 大学新生群（迎新群）的广告与敏感内容审查员。群内存在大量伪装成学校通知、勤工俭学、校园卡办理、学习资料分享的营销广告，需要你判断消息是否构成广告或敏感违规。
+
+判断标准：
+1. 广告违规（ad）：包含明确的营销、引流、变现意图，例如推销办卡/套餐/流量卡、贷款/提额/套现、兼职/刷单/修图结算、寄宿自习室/考研考公机构、0元购/1折/送福利、以"学校通知/勤工实践/资料分享"为幌子拉人进群、留下微信号/QQ群号/二维码引流等。
+2. 敏感违规（sensitive）：色情、政治敏感、暴力、赌博、代孕/器官买卖等违法违禁内容。
+3. 正常交流（none）：同学之间正常讨论学习、生活、社团、考试等，不含上述意图。
+
+判定原则：
+- 只看消息本身是否构成违规。不要因为提及"校园卡""考研""兼职""加群"等灰色词就判违规，需结合上下文判断是否存在营销/引流意图。
+- 群名片、联系方式等中性信息单独出现不算违规。
+- 拿不准时倾向 none（宁放过，勿误杀），但明显的广告话术必须判 ad。
+
+只输出 JSON，不要输出任何其它文字，格式：
+{"violation":"ad|sensitive|none","reason":"一句话说明判定理由"}
+]]
 
 -- QQ 群聊推荐卡片：OneBot 11 json 消息段 data 中的 app 标识（计入广告违规）
 local QQ_CARD_APPS = {
@@ -155,6 +208,7 @@ local CONFIG_SCHEMA = {
     { key = "copy_threshold",          type = "string", label = "复读触发阈值",           description = "多少人连续发送相同消息判定为复读（默认 3）",                     def = "3" },
     { key = "enable_copy_check",       type = "bool",   label = "启用复读检测",           description = "是否启用 +1 复读检测",                                        def = true },
     { key = "violation_mute_seconds",  type = "string", label = "违规禁言时长(秒)",       description = "第二次违规时禁言时长，默认 1800（30 分钟）",                     def = "1800" },
+    { key = "llm_review_enabled",      type = "bool",   label = "灰色地带LLM审查",       description = "命中灰色词（校园卡/考研/群名片/加群等）时送 LLM 审查；关闭则灰色词直接放行", def = true },
     { key = "exempt_users",            type = "list",   label = "豁免 QQ 列表",           description = "被豁免的 QQ 号不参与任何违规检测（/豁免 可添加，面板可增删）",   def = {} },
     { key = "admin_users",             type = "list",   label = "手动管理员 QQ 列表",     description = "群角色无法识别时手动指定的管理员账号（面板可增删）",               def = {} },
     { key = "violations",              type = "list",   label = "违规记录(群号:QQ:次数)", description = "违规人及违规等级，格式 群号:QQ号:次数；删除某行即重置该用户违规", def = {} },
@@ -186,6 +240,7 @@ local function config_value(key)
     elseif key == "copy_threshold" then return tostring(COPY_THRESHOLD)
     elseif key == "enable_copy_check" then return ENABLE_COPY_CHECK
     elseif key == "violation_mute_seconds" then return tostring(VIOLATION_MUTE)
+    elseif key == "llm_review_enabled" then return LLM_REVIEW_ENABLED
     elseif key == "exempt_users" then
         local out = {}
         for _, qq in ipairs(sorted_keys(EXEMPT)) do out[#out + 1] = qq end
@@ -614,7 +669,87 @@ local function check_copy_spam(event)
 end
 
 -- ====================================================================
--- 3. 敏感内容检测
+-- 3.5 灰色地带 LLM 审查（异步，不阻塞）
+-- 命中灰色词 → jn.llm.chat_async 提交审查并立即返回 req_id；LLM 返回 JSON
+-- {violation, reason} 后由引擎派发到插件入口 on_chat_response(req_id, content, err)，
+-- 插件按 req_id 取回上下文，再按三级惩罚处理。审查耗时期间不阻塞
+-- 消息流程，也不消费消息（先放行，违规再追罚）。
+-- ====================================================================
+local function llm_review_message(event, word)
+    if not LLM_REVIEW_ENABLED then
+        jn.log.info(string.format("[group_mgr] LLM 审查未启用，灰色词放行: user=%d 群=%d 词=%s", event.user_id, event.group_id, word))
+        return
+    end
+    if not jn.llm or not jn.llm.available() then
+        jn.log.warn(string.format("[group_mgr] 无可用 LLM Provider，灰色词放行: user=%d 群=%d 词=%s", event.user_id, event.group_id, word))
+        return
+    end
+
+    -- 同一用户同一时刻只保留一个在途审查，避免刷屏打爆 LLM
+    local pk = tostring(event.group_id) .. ":" .. tostring(event.user_id)
+    if llm_pending[pk] then return end
+
+    -- 同一条消息不重复审查（内存去重 + 顺带清理过期条目）
+    local mid = tostring(event.message_id or "")
+    local now = now_ts()
+    if mid ~= "" and llm_reviewed[mid] and now - llm_reviewed[mid] < LLM_DEDUP_WINDOW then return end
+    llm_pending[pk] = true
+    if mid ~= "" then llm_reviewed[mid] = now end
+    local expired = {}
+    for k, ts in pairs(llm_reviewed) do
+        if now - ts >= LLM_DEDUP_WINDOW then expired[#expired + 1] = k end
+    end
+    for _, k in ipairs(expired) do llm_reviewed[k] = nil end
+
+    -- 剥离 CQ 码后截断送入 LLM
+    local text = (event.raw_message or ""):gsub("%[CQ:[^%]]*%]", " "):gsub("%s+", " "):sub(1, LLM_MAX_TEXT)
+    local messages = {
+        { role = "system", content = LLM_SYSTEM_PROMPT },
+        { role = "user", content = "待审查群消息（命中灰色词：<" .. word .. ">）：\n" .. text },
+    }
+    local rid = jn.llm.chat_async(messages, { timeout = LLM_TIMEOUT })
+    if not rid or rid == 0 then
+        llm_pending[pk] = nil
+        jn.log.warn("[group_mgr] llm.chat_async 提交失败，灰色词放行")
+        return
+    end
+    -- 记录上下文，on_chat_response 收到结果后按 req_id 取回
+    llm_ctx[rid] = { group_id = event.group_id, user_id = event.user_id, message_id = mid, word = word, pk = pk }
+end
+
+-- 异步 LLM 审查结果入口（引擎异步注册表 kind "chat" 派发）：
+-- on_chat_response(req_id, content, err)，err 为 nil 表示成功。
+function on_chat_response(req_id, content, err)
+    local ctx = llm_ctx[req_id]
+    if not ctx then return end
+    llm_ctx[req_id] = nil
+    llm_pending[ctx.pk] = nil
+    if err and err ~= "" then
+        jn.log.warn(string.format("[group_mgr] LLM 审查失败: %s", tostring(err)))
+        return
+    end
+    local verdict = jn.json.decode(content or "")
+    if type(verdict) ~= "table" then
+        jn.log.warn("[group_mgr] LLM 审查返回非 JSON，放行: " .. tostring(content))
+        return
+    end
+    local violation = verdict.violation
+    local reason = verdict.reason or ctx.word
+    if violation == "ad" or violation == "sensitive" then
+        -- 审查耗时期间可能已被豁免/成为管理员，复查后再处罚
+        local event = { group_id = ctx.group_id, user_id = ctx.user_id, message_type = "group" }
+        if ctx.message_id ~= "" then event.message_id = ctx.message_id end
+        if is_exempt(ctx.user_id) or is_group_admin(event) then return end
+        local category = violation == "sensitive" and "sensitive" or "ad"
+        handle_violation(event, "LLM审查(" .. category .. ")：" .. tostring(reason), category)
+    else
+        jn.log.info(string.format("[group_mgr] LLM 审查放行: user=%d 群=%d 词=%s", ctx.user_id, ctx.group_id, ctx.word))
+    end
+end
+
+-- ====================================================================
+-- 3. 敏感/广告内容检测
+-- 顺序：推荐卡片 → 敏感词库 → 黑色地带 → 灰色地带(LLM审查)
 -- ====================================================================
 local function check_sensitive(event)
     local raw = event.raw_message or ""
@@ -628,18 +763,25 @@ local function check_sensitive(event)
         return true
     end
 
-    -- 广告违规：广告词库
-    local aw = match_any(raw, WORDS.ad)
-    if aw then
-        handle_violation(event, "广告违规：" .. aw, "ad")
-        return true
-    end
-
     -- 敏感违规：色情 / 政治 / 脏话词库
     local sw = match_any(raw, WORDS.sensitive)
     if sw then
         handle_violation(event, "敏感违规：" .. sw, "sensitive")
         return true
+    end
+
+    -- 黑色地带：无歧义广告词（样本提取 + cn_advertisement）→ 直接三级惩罚
+    local bw = match_any(raw, WORDS.black)
+    if bw then
+        handle_violation(event, "广告违规(黑名单)：" .. bw, "ad")
+        return true
+    end
+
+    -- 灰色地带：语义模糊（校园卡/考研/群名片/加群等）→ 异步 LLM 审查，
+    -- 不立即处罚、不消费消息；LLM 判定违规后由回调追罚
+    local gw = match_any(raw, WORDS.gray)
+    if gw then
+        llm_review_message(event, gw)
     end
 
     return false

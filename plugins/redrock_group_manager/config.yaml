@@ -47,6 +47,12 @@ configs:
     description: 第二次违规时禁言时长，默认 1800（30 分钟）
     default: "1800"
 
+  - key: llm_review_enabled
+    type: bool
+    label: 灰色地带LLM审查
+    description: 命中灰色词（校园卡/考研/群名片/加群等）时送 LLM 审查；关闭则灰色词直接放行
+    default: true
+
   - key: exempt_users
     type: list
     label: 豁免 QQ 列表
