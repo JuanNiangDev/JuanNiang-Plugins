@@ -122,7 +122,7 @@ load_wordlists()
 -- ====================================================================
 local DEFAULT_DIFF = ALIASES[tostring(jn.config.get("default_difficulty") or "四级"):lower()] or "cet4"
 local MIN_LENGTH = 4
-local MAX_LENGTH = tonumber(jn.config.get("max_length")) or 12
+local MAX_LENGTH = tonumber(jn.config.get("max_length")) or 10
 local DEFAULT_LEN_MIN = tonumber(jn.config.get("default_length_min")) or 4
 local DEFAULT_LEN_MAX = tonumber(jn.config.get("default_length_max")) or 6
 local MAX_ATTEMPTS = tonumber(jn.config.get("max_attempts")) or 6
@@ -136,6 +136,25 @@ end
 if DEFAULT_LEN_MIN < MIN_LENGTH then DEFAULT_LEN_MIN = MIN_LENGTH end
 if DEFAULT_LEN_MAX > MAX_LENGTH then DEFAULT_LEN_MAX = MAX_LENGTH end
 if DEFAULT_LEN_MIN > DEFAULT_LEN_MAX then DEFAULT_LEN_MIN = DEFAULT_LEN_MAX end
+
+-- ====================================================================
+-- 棋盘渲染尺寸预设
+-- ====================================================================
+-- 与 board_template.html 的 tile/gap/padding 严格对应；按单词长度与最大
+-- 猜测次数算出精确画布尺寸，随 T2I options 下发（viewport + full_page=false），
+-- 使每个长度都渲染成恰好容纳棋盘的图片，避免出现大面积空白。
+local TILE_SIZE = 52 -- 单格边长 (px)
+local TILE_GAP = 7   -- 格间距 (px)
+local BOARD_PAD = 16 -- 棋盘外边距 (px)
+
+--- 计算某长度棋盘的精确画布尺寸
+---@return number width 画布宽 (px)
+---@return number height 画布高 (px)
+local function board_size(length, rows)
+    local w = length * TILE_SIZE + (length - 1) * TILE_GAP + BOARD_PAD * 2
+    local h = rows * TILE_SIZE + (rows - 1) * TILE_GAP + BOARD_PAD * 2
+    return w, h
+end
 
 -- ====================================================================
 -- 辅助函数
@@ -393,18 +412,26 @@ local function build_rows_html(game)
     if hint_row == 0 and game.hints and #game.hints > 0 then
         hint_row = 1
     end
+    -- 当前轮次：最近一次输入的那一行（开局尚无输入时高亮第 1 行）
+    local current_row = #game.attempts
+    if current_row == 0 then current_row = 1 end
     for r = 1, game.max_attempts do
         local row = {}
         local att = game.attempts[r]
         for i = 1, n do
+            local cls
+            local content = ""
             if r == hint_row and hint_positions[i] then
-                row[#row + 1] = '<div class="tile hint">' .. string.upper(hint_positions[i]) .. "</div>"
+                cls = "tile hint"
+                content = string.upper(hint_positions[i])
             elseif att then
-                local letter = string.upper(string.sub(att.guess, i, i))
-                row[#row + 1] = '<div class="tile ' .. tile_class(string.sub(att.states, i, i)) .. '">' .. letter .. "</div>"
+                cls = "tile " .. tile_class(string.sub(att.states, i, i))
+                content = string.upper(string.sub(att.guess, i, i))
             else
-                row[#row + 1] = '<div class="tile empty"></div>'
+                cls = "tile empty"
             end
+            if r == current_row then cls = cls .. " current" end
+            row[#row + 1] = '<div class="' .. cls .. '">' .. content .. "</div>"
         end
         parts[#parts + 1] = table.concat(row, "")
     end
@@ -434,12 +461,18 @@ render_board = function(game)
     if cached and cached.url then return cached.url end
     local template = get_template()
     if not template then return nil end
+    local w, h = board_size(game.length, game.max_attempts)
     local html = template
         :gsub("__FONT_B64__", function() return get_font_b64() end)
         :gsub("__LEN__", function() return tostring(game.length) end)
         :gsub("__ROWS__", function() return tostring(game.max_attempts) end)
+        :gsub("__WIDTH__", tostring(w))
         :gsub("__ROWS_HTML__", function() return build_rows_html(game) end)
-    local url, err = jn.t2i.generate_url(html)
+    local url, err = jn.t2i.generate_url(html, {
+        viewport_width = w,
+        viewport_height = h,
+        full_page = false,
+    })
     if not url then
         jn.log.error("[caidanci_grade] 棋盘渲染失败: " .. (err or "unknown"))
         return nil
@@ -585,16 +618,30 @@ jn.command.register("猜单词", function(args, event)
         "难度：" .. game.difficulty_name .. " ｜ 单词长度：" .. length .. " 个字母 ｜ 最多 " .. MAX_ATTEMPTS .. " 次机会",
         "",
     }
-    -- 给出字母位置占位符
-    local placeholders = {}
-    for _ = 1, length do
-        placeholders[#placeholders + 1] = "_"
+    -- 开局给出一张空白棋盘（全部为空表格）；T2I 不可用/渲染失败时降级为下划线占位
+    local board_url = nil
+    if jn.t2i.is_active() then
+        board_url = render_board(game)
     end
-    lines[#lines + 1] = table.concat(placeholders, " ")
-    lines[#lines + 1] = ""
+    if not board_url then
+        local placeholders = {}
+        for _ = 1, length do
+            placeholders[#placeholders + 1] = "_"
+        end
+        lines[#lines + 1] = table.concat(placeholders, " ")
+        lines[#lines + 1] = ""
+    end
     lines[#lines + 1] = "发送 /提示 获取帮助 ｜ /结束 退出游戏"
 
-    reply(event, table.concat(lines, "\n"))
+    local segments = { { type = "text", data = { text = table.concat(lines, "\n") } } }
+    if board_url then
+        segments[#segments + 1] = { type = "image", data = { file = board_url } }
+    end
+    if event.message_type == "group" then
+        jn.onebot11.send_group_msg(event.group_id, segments)
+    else
+        jn.onebot11.send_private_msg(event.user_id, segments)
+    end
     return true
 end, {
     description = "玩一局猜单词游戏（Wordle）",

@@ -32,8 +32,8 @@ configs:
   - key: max_length
     type: string
     label: 最大单词长度
-    description: 允许指定的最大单词长度（默认 12）
-    default: "12"
+    description: 允许指定的最大单词长度（默认 10）
+    default: "10"
 
   - key: max_attempts
     type: string

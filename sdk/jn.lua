@@ -145,9 +145,21 @@ M.cache = cache
 -- t2i 文生图 (需要 t2i 权限)
 -- ====================================================================
 
+--- generate / generate_url 的可选 options 表（键名与 T2I 服务 GenerateOptions 的 JSON 字段一致）：
+---   type                      string   图片格式 "jpeg" | "png"（默认 png）
+---   quality                   number   压缩质量（仅 jpeg 有效）
+---   omit_background           boolean  透明背景（png）
+---   full_page                 boolean  整页截图（默认 true；false 时按 viewport 尺寸截图）
+---   viewport_width            number   视口宽度（px）
+---   viewport_height           number   视口高度（px）
+---   scale                     string   "css" | "device"
+---   animations                string   "allow" | "disabled"
+---   caret                     string   "hide" | "initial"
+---   device_scale_factor_level string   "normal" | "high" | "ultra"
+---   timeout                   number   渲染超时（秒）
 ---@class jn.T2I
----@field generate fun(html: string): string, string? 生成图片，返回图片 ID
----@field generate_url fun(html: string): string, string? 生成图片，返回 URL
+---@field generate fun(html: string, options?: table): string, string? 生成图片，返回图片 ID
+---@field generate_url fun(html: string, options?: table): string, string? 生成图片，返回 URL
 ---@field toggle fun(active: boolean): boolean, string? 启用/停用 T2I 服务
 ---@field is_active fun(): boolean
 ---@field get_config fun(): table, string?
@@ -218,6 +230,21 @@ M.sandbox = sandbox
 ---@field get_current_chat_area fun(): jn.ChatArea
 ---@field compact_memory fun(): string, string?
 M.agent = agent
+
+-- ====================================================================
+-- llm LLM 调用 (需要 llm 权限)
+-- ====================================================================
+-- 通过 Bot 自身启用的文本模型 Provider 调用 LLM：模型 / 采样参数 / 密钥
+-- 全部复用 Bot 配置，插件不接触任何密钥。适合内容审查等二次判断场景。
+-- 高频路径请使用 chat_async（异步，不阻塞事件循环与其它插件）。
+
+---@class jn.LLM
+---@field available fun(): boolean 当前是否有可用的文本模型 Provider
+---@field chat fun(messages: string|table, opts?: table): string?, string? 同步调用，返回 (content, err)；适合命令等低频路径
+---@field chat_async fun(messages: string|table, opts?: table, callback?: fun(content: string, err: string?)): boolean 异步调用，立即返回；完成后回调 (content, err)，err 为 nil 表示成功
+---@field messages table 消息参数：单字符串（role=user）或数组，元素为字符串（role=user）或 {role="system|user|assistant", content="..."}
+---@field opts table 选项：{temperature=?, max_tokens=?, timeout=?秒}，缺省回退 Bot Provider 配置（默认超时 60s）
+M.llm = llm
 
 -- ====================================================================
 -- config 动态配置 (无需权限，默认注入)

@@ -87,8 +87,8 @@ M.json = json
 ---@field send_group_msg fun(group_id: number, message: string|table): boolean, string? 异步发送群消息，不阻塞
 ---@field send_private_msg_sync fun(user_id: number, message: string|table): boolean, string? 同步发送私聊消息，等待结果
 ---@field send_group_msg_sync fun(group_id: number, message: string|table): boolean, string? 同步发送群消息，等待结果
----@field delete_msg fun(message_id: number): boolean, string?
----@field get_msg fun(message_id: number): table, string? 根据消息 ID 获取消息完整内容
+---@field delete_msg fun(message_id: number|string): boolean, string? 撤回消息（事件表的 message_id 为字符串）
+---@field get_msg fun(message_id: number|string): table, string? 根据消息 ID 获取消息完整内容
 ---@field get_group_info fun(group_id: number): table, string?
 ---@field get_group_member_list fun(group_id: number): table[], string?
 ---@field get_group_member_info fun(group_id: number, user_id: number): table, string?
@@ -145,9 +145,21 @@ M.cache = cache
 -- t2i 文生图 (需要 t2i 权限)
 -- ====================================================================
 
+--- generate / generate_url 的可选 options 表（键名与 T2I 服务 GenerateOptions 的 JSON 字段一致）：
+---   type                      string   图片格式 "jpeg" | "png"（默认 png）
+---   quality                   number   压缩质量（仅 jpeg 有效）
+---   omit_background           boolean  透明背景（png）
+---   full_page                 boolean  整页截图（默认 true；false 时按 viewport 尺寸截图）
+---   viewport_width            number   视口宽度（px）
+---   viewport_height           number   视口高度（px）
+---   scale                     string   "css" | "device"
+---   animations                string   "allow" | "disabled"
+---   caret                     string   "hide" | "initial"
+---   device_scale_factor_level string   "normal" | "high" | "ultra"
+---   timeout                   number   渲染超时（秒）
 ---@class jn.T2I
----@field generate fun(html: string): string, string? 生成图片，返回图片 ID
----@field generate_url fun(html: string): string, string? 生成图片，返回 URL
+---@field generate fun(html: string, options?: table): string, string? 生成图片，返回图片 ID
+---@field generate_url fun(html: string, options?: table): string, string? 生成图片，返回 URL
 ---@field toggle fun(active: boolean): boolean, string? 启用/停用 T2I 服务
 ---@field is_active fun(): boolean
 ---@field get_config fun(): table, string?
@@ -218,6 +230,64 @@ M.sandbox = sandbox
 ---@field get_current_chat_area fun(): jn.ChatArea
 ---@field compact_memory fun(): string, string?
 M.agent = agent
+
+-- ====================================================================
+-- llm LLM 调用 (需要 llm 权限)
+-- ====================================================================
+-- 通过 Bot 自身启用的文本模型 Provider 调用 LLM：模型 / 采样参数 / 密钥
+-- 全部复用 Bot 配置，插件不接触任何密钥。适合内容审查等二次判断场景。
+-- 高频路径请使用 chat_async（异步，不阻塞事件循环与其它插件）。
+
+---@class jn.LLM
+---@field available fun(): boolean 当前是否有可用的文本模型 Provider
+---@field chat fun(messages: string|table, opts?: table): string?, string? 同步调用，返回 (content, err)；适合命令等低频路径
+---@field chat_async fun(messages: string|table, opts?: table): number 异步提交，立即返回 req_id（失败返回 0）；完成后引擎调用插件入口 on_chat_response(req_id, content, err)
+---@field messages table 消息参数：单字符串（role=user）或数组，元素为字符串（role=user）或 {role="system|user|assistant", content="..."}
+---@field opts table 选项：{temperature=?, max_tokens=?, timeout=?秒}，缺省回退 Bot Provider 配置（默认超时 60s）
+---
+--- 异步回调约定（引擎级异步注册表，kind "chat"）：
+--- 插件定义全局函数 on_chat_response(req_id, content, err)，引擎在 LLM 返回后
+--- 串行调用（与事件派发互斥）。err 为 nil 表示成功；req_id 与 chat_async 的
+--- 返回值一致，可用于关联请求上下文（如查表取回本次审查的事件/关键词）。
+M.llm = llm
+
+-- ====================================================================
+-- config 动态配置 (无需权限，默认注入)
+-- ====================================================================
+
+---@class jn.ConfigItem
+---@field key string 配置键
+---@field type string "bool" | "string" | "list"
+---@field label string 展示名
+---@field description string? 说明
+---@field default any 默认值
+---@field value any 当前值
+
+---@class jn.Config
+---@field get fun(key: string): any 读取配置值（value 优先，回退 default）
+---@field all fun(): table<string, any> 读取全部配置键值
+---@field schema fun(): jn.ConfigItem[] 读取完整 schema
+M.config = config
+
+-- ====================================================================
+-- file 插件目录内文本文件读写 (需要 file 权限)
+-- ====================================================================
+-- 所有路径均相对于插件自身目录 (data/pluggins/<插件名>/)，禁止绝对路径
+-- 与 .. 越权访问。适用于 txt/json/log/csv 等文本文件。
+-- 行号均为 1 起；read_line 越界返回 nil（非错误，可用于循环读取）。
+
+---@class jn.File
+---@field read fun(path: string): string?, string? 读取整个文件内容
+---@field read_lines fun(path: string): string[]?, string? 读取全部行（自动去除行尾换行符）
+---@field read_line fun(path: string, line: number): string?, string? 读取第 N 行；越界返回 nil
+---@field write fun(path: string, content: string): boolean, string? 覆盖写入整个文件（自动创建目录）
+---@field write_lines fun(path: string, lines: string[]): boolean, string? 覆盖写入多行（每行自动补 \n）
+---@field write_line fun(path: string, line: number, content: string): boolean, string? 改写第 N 行（不足补空行）
+---@field append fun(path: string, content: string): boolean, string? 追加内容到文件末尾（不自动补换行）
+---@field append_line fun(path: string, content: string): boolean, string? 追加一行（末尾无换行时自动补）
+---@field exists fun(path: string): boolean 判断文件是否存在
+---@field remove fun(path: string): boolean, string? 删除文件
+M.file = file
 
 -- ====================================================================
 -- command 多级命令注册

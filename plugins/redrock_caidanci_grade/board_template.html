@@ -18,6 +18,8 @@
     }
     .wrap {
       display: inline-block;
+      width: __WIDTH__px;
+      box-sizing: border-box;
       padding: 16px;
       background-color: #ffffff;
     }
@@ -38,13 +40,31 @@
       box-sizing: border-box;
       user-select: none;
     }
-    .grey { background-color: #787878; }
-    .green { background-color: #85a068; }
-    .yellow { background-color: #c7b057; }
-    .hint { background-color: #00BFFF; }
+    /* 已猜格与空格一致的灰色边框；不再虚化 */
+    .grey {
+      background-color: #787878;
+      border: 2px solid #787878;
+    }
+    .green {
+      background-color: #85a068;
+      border: 2px solid #787878;
+    }
+    .yellow {
+      background-color: #c7b057;
+      border: 2px solid #787878;
+    }
+    .hint {
+      background-color: #00BFFF;
+      border: 2px solid #787878;
+    }
     .empty {
       border: 2px solid #787878;
       background-color: transparent;
+    }
+    /* 当前轮次（最近一次输入的那一行）：柔和边缘发光（低饱和钢蓝，不刺眼） */
+    .current {
+      border-color: rgba(105, 142, 184, 0.85);
+      box-shadow: 0 0 7px rgba(105, 142, 184, 0.4), inset 0 0 3px rgba(105, 142, 184, 0.18);
     }
   </style>
 </head>
