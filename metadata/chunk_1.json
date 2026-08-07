@@ -1,7 +1,7 @@
 [
   {
     "name": "checkin",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "JuanNiang-Neo",
     "description": "签到插件，提供 /qd 签到 和 /rank 排名功能",
     "path": "checkin",
@@ -11,7 +11,7 @@
   },
   {
     "name": "Cron 示例插件",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "JuanNiang",
     "description": "示例插件：通过 CronJob 定时触发，向 Payload 中指定的 QQ 号发送消息",
     "path": "cron-example",
@@ -21,7 +21,7 @@
   },
   {
     "name": "ping",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "author": "JuanNiang",
     "description": "Ping 插件示例，使用 jn SDK 注册 /ping 命令",
     "path": "ping",
@@ -41,7 +41,7 @@
   },
   {
     "name": "redrock_caidanci_grade",
-    "version": "2.1.0",
+    "version": "2.2.1",
     "author": "Redrock",
     "description": "红岩网校分级猜单词小游戏（高考/四级/六级/考研/雅思/托福/GRE）",
     "path": "redrock_caidanci_grade",
@@ -61,7 +61,7 @@
   },
   {
     "name": "redrock_cron_msg",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "Redrock",
     "description": "定时发送消息到指定群",
     "path": "redrock_cron_msg",
@@ -91,7 +91,7 @@
   },
   {
     "name": "redrock_group_manager",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "author": "Redrock",
     "description": "红岩群管理工具",
     "path": "redrock_group_manager",
@@ -191,7 +191,7 @@
   },
   {
     "name": "戳一戳回复",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "author": "JuanNiang",
     "description": "监听戳一戳事件，回复消息",
     "path": "poke-reply",

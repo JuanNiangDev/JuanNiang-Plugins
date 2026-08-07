@@ -15,19 +15,14 @@
 
 ## 1. 创建插件目录
 
-每个插件是 `data/pluggins/<plugin-name>/` 下的一个独立目录，采用**新格式 5 件套**：
+每个插件是 `data/pluggins/<plugin-name>/` 下的一个独立目录，至少含 `pluggin.yaml`（清单）和 Lua 入口（默认 `main.lua`）。
 
 ```
 data/pluggins/
 └── my-hello/
-    ├── main.lua       # 插件入口
-    ├── pluggin.yaml   # 元数据
-    ├── config.yaml    # 动态配置声明（可选）
-    ├── README.md      # 说明文档（商店详情页渲染）
-    └── avatar.png     # 图标（商店网格卡片展示）
+    ├── pluggin.yaml
+    └── main.lua
 ```
-
-其中 `pluggin.yaml` + `main.lua` 为必需，`config.yaml` / `README.md` / `avatar.png` 为商店展示与动态配置所需（缺失时插件仍可运行，但商店会标记缺项）。
 
 ## 2. 编写 manifest — `pluggin.yaml`
 
@@ -55,54 +50,6 @@ permissions:
 | `system` | bool | 系统插件（undeletable / unstoppable），仅内置 `system` 用 |
 | `enabled` | bool | 是否在 `LoadAll` 时加载 |
 
-## 2.5 动态配置 — `config.yaml`
-
-`config.yaml` 声明插件的可配置项，Web 面板据此动态渲染表单，插件通过 `jn.config` 读取。
-
-```yaml
-configs:
-  - key: admin_qq
-    type: string
-    label: 管理员QQ
-    description: 可操作本插件的管理员
-    default: ""
-  - key: auto_reply
-    type: bool
-    label: 自动回复
-    default: true
-  - key: trigger_words
-    type: list
-    label: 触发关键词
-    default: ["你好", "在吗"]
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `key` | string | 配置键（唯一） |
-| `type` | string | `bool`\|`string`\|`list`，决定 Web 控件 |
-| `label` | string | Web 面板展示名 |
-| `description` | string | 说明（可选） |
-| `default` | any | 默认值 |
-| `value` | any | 用户当前值（可选，缺省回退 default） |
-
-**type → Web 控件映射：**
-
-- `bool` → 开关（v-switch）
-- `string` → 单行输入框（v-text-field）
-- `list` → 可增删的多项输入框
-
-插件内读取配置（无需权限，默认注入）：
-
-```lua
-local jn = require("jn")
-
-local admin = jn.config.get("admin_qq")   -- 单值：value 优先，回退 default
-local all   = jn.config.all()              -- 全部配置 {key=value}
-local schema= jn.config.schema()           -- 完整 schema（含 label/type/...）
-```
-
-保存配置后插件会自动重载使新值生效。
-
 ## 3. 编写入口 — `main.lua`
 
 ```lua
@@ -113,12 +60,14 @@ jn.command.register("hello", function(args, event)
     return true, "你好，" .. (event.user_id or "陌生人") .. "！"
 end, { description = "打招呼", usage = "/hello" })
 
--- 消息事件回调
+-- 消息事件回调（返回 consumed, skip_reply）
+-- consumed=true → 消息不进 Agent（不短路，其余插件仍会执行）
+-- skip_reply=true → 跳过回复策略检查，强制进入 Agent
 function on_message(event)
     if event.raw_message == "ping" then
-        return true, "pong"
+        return true, false  -- 消费：不进 Agent
     end
-    return false, nil
+    return false, false
 end
 
 -- webhook 事件回调（需在 permissions 申请 webhook）
@@ -157,6 +106,7 @@ SDK 仅是 Go 注入全局表的再导出（`jn.log = log` 等），不引入额
 | `jn.t2i` | `t2i` | 文生图 |
 | `jn.sandbox` | `sandbox` | 代码沙箱 |
 | `jn.agent` | `agent` | Agent 操作接口 |
+| `jn.llm` | `llm` | LLM 调用（复用 Bot Provider 配置） |
 | `jn.file` | `file` | 插件目录内文本文件读写 |
 | `jn.command` | — | 命令注册 |
 
@@ -370,13 +320,22 @@ local info, err = jn.onebot11.get_group_info(987654321)
 
 | 函数 | 返回 | 说明 |
 |------|------|------|
-| `http.get(url) → table` | `{status=number, body=string}` | GET |
+| `http.get(url) → table` | `{status=number, body=string}` | GET，30s 超时 |
 | `http.post(url [, content_type, body]) → table` | `{status, body}` | POST，30s 超时 |
+| `http.get_async(url [, ctx]) → number` | `req_id` | GET 异步版：立即返回，完成回调 `on_http_response`（不阻塞事件循环） |
+| `http.post_async(url [, content_type, body, ctx]) → number` | `req_id` | POST 异步版 |
 
 ```lua
 local r, err = jn.http.get("https://api.github.com/repos/x/y")
 local r, err = jn.http.post("https://httpbin.org/post", "application/json",
                             '{"k":"v"}')
+
+-- 异步：立即返回 req_id，完成回调 on_http_response
+local rid = jn.http.get_async("https://api.github.com/repos/x/y")
+function on_http_response(req_id, ctx, result, err)
+    if err then jn.log.warn("HTTP 请求失败: " .. err) return end
+    jn.log.info("status=" .. result.status .. " body=" .. result.body)
+end
 ```
 
 ## 全局表: `database`
@@ -428,6 +387,8 @@ if jn.cache.exists("last_seen") then ... end
 |------|------|------|
 | `t2i.generate(html) → string [, err]` | 图片 ID | HTML→图片 |
 | `t2i.generate_url(html) → string [, err]` | 公开 URL | |
+| `t2i.generate_async(html [, opts, ctx]) → number` | `req_id` | 异步版：立即返回，完成回调 `on_t2i_response`（不阻塞事件循环） |
+| `t2i.generate_url_async(html [, opts, ctx]) → number` | `req_id` | 异步版，回调返回 URL |
 | `t2i.toggle(active) → bool [, err]` | bool | 启用/停用，委托 `SetT2IActive`（同步 DB + 重建客户端） |
 | `t2i.is_active() → bool` | bool | 从 DB 读配置；`dao` 不可用时 false |
 | `t2i.get_config() → table [, err]` | base_url/timeout/is_active 等 | |
@@ -438,6 +399,15 @@ local url = jn.t2i.generate_url(...)
 jn.onebot11.send_group_msg(987654321, "[CQ:image,file=" .. url .. "]")
 local active = jn.t2i.is_active()
 local cfg = jn.t2i.get_config()
+
+-- 异步：立即返回 req_id，完成回调 on_t2i_response（渲染较慢，适合异步）
+local rid = jn.t2i.generate_async("<h1>卷娘</h1>", nil, { group_id = 987654321 })
+function on_t2i_response(req_id, ctx, result, err)
+    if err then jn.log.warn("T2I 渲染失败: " .. err) return end
+    if ctx and ctx.group_id then
+        jn.onebot11.send_group_msg(ctx.group_id, "[CQ:image,file=" .. result .. "]")
+    end
+end
 ```
 
 ## 全局表: `sandbox`
@@ -449,6 +419,9 @@ local cfg = jn.t2i.get_config()
 | `sandbox.create() → table [, err]` | `{sandbox_id, status}` | 新沙箱 |
 | `sandbox.exec_shell(sandbox_id, command) → (output, exit_code) \| (nil, err)` | | |
 | `sandbox.exec_python(sandbox_id, code) → (output, error) \| (nil, err)` | | |
+| `sandbox.create_async([ctx]) → number` | `req_id` | 异步版：立即返回，完成回调 `on_sandbox_response`（不阻塞事件循环） |
+| `sandbox.exec_shell_async(sandbox_id, command [, ctx]) → number` | `req_id` | 异步执行 shell（默认超时 120s），回调 result=`{output, exit_code}` |
+| `sandbox.exec_python_async(sandbox_id, code [, ctx]) → number` | `req_id` | 异步执行 python，回调 result=`{output, error}` |
 | `sandbox.toggle(active) → bool [, err]` | 启停：`SetSandboxActive` |
 | `sandbox.is_active() → bool` | 从 DB 读配置 |
 | `sandbox.get_config() → table [, err]` | base_url/api_key/timeout/is_active 等 |
@@ -461,11 +434,18 @@ local sid = sb.sandbox_id
 local out, exit = jn.sandbox.exec_shell(sid, "ls -la /")
 local out, e = jn.sandbox.exec_python(sid, "print(1+1)")
 jn.sandbox.delete(sid)
+
+-- 异步（执行代码可能很慢，建议异步）：完成回调 on_sandbox_response
+local rid = jn.sandbox.exec_shell_async(sid, "ls -la /", { sid = sid })
+function on_sandbox_response(req_id, ctx, result, err)
+    if err then jn.log.warn("沙箱执行失败: " .. err) return end
+    jn.log.info("exit=" .. result.exit_code .. " output=" .. result.output)
+end
 ```
 
 ## 全局表: `agent`
 
-权限：`agent`。提供 Agent 配置查询与运行时管理（共 16 个函数）。
+权限：`agent`。提供 Agent 配置查询与运行时管理（共 17 个函数）。
 
 ### 配置查询（从 DB 读取）
 
@@ -527,7 +507,66 @@ jn.agent.set_provider_active("uuid", true)   -- 启用
 | 函数 | 返回 | 说明 |
 |------|------|------|
 | `agent.get_current_chat_area() → table` | `{post_type, message_type, user_id, group_id, chat_area_id}` | 当前正在处理的消息所属 ChatArea |
-| `agent.compact_memory() → string [, err]` | | Compact 当前 ChatArea 短期记忆：LLM 压缩为摘要，写入长期记忆并清空窗口（需 Text LLM Provider） |
+| `agent.compact_memory() → string [, err]` | | Compact 当前 ChatArea 短期记忆：LLM 压缩为摘要写入长期记忆，随后窗口清理为只保留最近 10 条消息（需 Text LLM Provider） |
+
+## SDK 模块: `jn.llm`
+
+权限：`llm`。通过 **Bot 自身启用的文本模型 Provider** 调用 LLM——模型、采样参数、密钥全部复用 Bot 配置，插件不接触任何密钥。适合内容审查、二次判断等场景。
+
+```lua
+local jn = require("jn")
+
+-- 同步调用（适合命令等低频路径）
+local content, err = jn.llm.chat("你好", { timeout = 30 })
+
+-- 异步调用（高频路径必须用异步：不阻塞事件循环与其它插件）
+local rid = jn.llm.chat_async(
+    { { role = "system", content = "你是审查员" }, { role = "user", content = "待审查消息" } },
+    { timeout = 60 }
+)  -- 立即返回 req_id（失败返回 0）
+
+-- 完成后引擎调用插件入口函数（引擎级异步注册表派发）：
+function on_chat_response(req_id, content, err)
+    if err then
+        log.warn("LLM 调用失败: " .. err)
+        return
+    end
+    log.info("LLM 返回: " .. content)
+end
+```
+
+| 函数 | 说明 |
+|------|------|
+| `llm.available() → bool` | 当前是否有可用的文本模型 Provider |
+| `llm.chat(messages, opts?) → string?, string?` | 同步调用，返回 `(content, err)`；err 为 nil 表示成功 |
+| `llm.chat_async(messages, opts?) → number` | 异步提交，立即返回 `req_id`（失败返回 `0`）；完成后引擎派发到插件入口 `on_chat_response(req_id, content, err)` |
+
+参数：
+
+- `messages`：单字符串（role=`user`）或数组。数组元素可为字符串（role=`user`）或 `{role="system|user|assistant", content="..."}`。
+- `opts`：`{temperature=?, max_tokens=?, timeout=?秒}`；**缺省采样参数回退 Bot Provider 配置**，`timeout` 缺省 60s。
+- `on_chat_response` 的 `req_id` 与 `chat_async` 返回值一致，用于关联请求上下文（例如维护 `req_id → 消息/关键词` 映射表，回调时取回）。
+
+### 异步 API 注册表
+
+`xxx_async` 由引擎级**异步注册表**驱动（`PluginEngine.RegisterAsyncAPI`）：
+
+- 提交后立即返回 `req_id`，阻塞操作（HTTP 调用 / T2I 渲染 / LLM）在独立 goroutine 完成，**不阻塞事件循环**；
+- 完成后引擎串行派发到插件 Lua 入口函数 `on_xxx_response`（与事件派发互斥，保证 LState 安全）；
+- 插件卸载后未派发的任务自动丢弃。
+
+**异步 API 一览**（`xxx_async(...) → req_id`，完成后引擎调用对应回调）：
+
+| kind | 异步函数 | 回调入口 | 回调参数 |
+|------|---------|---------|---------|
+| `chat` | `llm.chat_async(messages, opts?)` | `on_chat_response` | `(req_id, content, err)` |
+| `t2i` | `t2i.generate_async` / `t2i.generate_url_async` | `on_t2i_response` | `(req_id, ctx, result, err)` |
+| `http` | `http.get_async` / `http.post_async` | `on_http_response` | `(req_id, ctx, result, err)` |
+| `sandbox` | `sandbox.create_async` / `exec_shell_async` / `exec_python_async` | `on_sandbox_response` | `(req_id, ctx, result, err)` |
+
+> **调用现场保存（ctx）**：`t2i` / `http` 异步回调带 `ctx` 参数——调用时把要保留的变量打包成一张表作为最后一个参数传入（如 `generate_async(html, opts, ctx)`），引擎按 `req_id` 关联保存，回调时**原样带回**（不序列化，可含函数）。用于延续调用前的业务状态（待处理消息、群号、临时标记等）；不传则为 `nil`。`llm.chat_async` 不带 `ctx`（回调签名保持 `(req_id, content, err)`，兼容现有插件）。
+>
+> **顺序语义**：多个异步任务并发提交时，回调按**完成顺序**派发（FIFO），不保证与提交顺序一致，插件勿依赖提交顺序。
 
 ## SDK 模块: `jn.command`
 
@@ -577,7 +616,7 @@ end, { description = "多级命令", usage = "/myplugin subcmd1 subcmd2 [args...
 ## 回调: `on_message`
 
 ```lua
-function on_message(event) → (consumed, reply)
+function on_message(event) → (consumed, skip_reply)
 ```
 
 | event 字段 | 类型 | 说明 |
@@ -591,7 +630,11 @@ function on_message(event) → (consumed, reply)
 | `sender` | table | 发送者信息 `{user_id, nickname, sex, age, card}` |
 | `admins` | []string | admin QQ 列表（透传 OB AdminQQNumbers） |
 
-`consumed=true` → 跳过 Agent 处理与后续插件。
+**返回值：**
+- `consumed` (bool): `true` → 消息**不进 Agent**。注意：**不短路**——即使某个插件返回 `true`，其余插件的 `on_message` 仍会全部执行完（适合"多个监听插件都要看到消息"的场景）。
+- `skip_reply` (bool): `true` → 跳过回复策略检查（`at_only` / `never` / relevance 过滤），**强制进入 Agent 处理**；当 `consumed=true` 时以 `consumed` 为准（消息不进 Agent）。
+
+> **已移除**：`modified_event`（修改事件）不再支持——插件不得中途改写事件内容（防止上下文失真）。需要拦截/处理消息时，在 `on_message` 中直接调用 `jn.onebot11` API 产生副作用（如 `delete_msg` 撤回、`ban_group_member` 禁言）。
 
 > **命令优先**：`/` 开头的 RawMessage 会**先**进 `commands.Dispatch`，命中命令后直接 sendReply 并短路，`on_message` 不会被调用。插件应优先用 `jn.command.register` 注册命令式交互，将 `on_message` 用于纯事件监听。
 
@@ -609,37 +652,47 @@ function on_webhook(event) → (consumed, reply)
 
 Webhook 事件永远不走 LLM Agent，是给插件做外部集成（如 GitHub push 通知）。
 
+**两种路由模式：**
+- **定向模式** (`/webhook/{plugin_name}`)：请求按插件名称精确路由，只有同名插件收到事件
+- **广播模式** (`/webhook` 或 `/`)：无插件名时，广播给所有有 `webhook` 权限的插件
+
+**返回值：**
+- `consumed` (bool): 是否已消费事件。广播模式下返回 `true` 会停止遍历后续插件
+- `reply` (string, 可选): 定向模式下，reply 会作为 HTTP 响应的 `metadata` 返回给调用方
+
 ```lua
 function on_webhook(event)
     local p = event.webhook and event.webhook.payload or {}
     if p.action == "opened" then
         jn.onebot11.send_group_msg(987654321, "新 PR: " .. (p.title or "?"))
+        return true, "PR opened notification sent"
     end
-    return false
+    return false, "unhandled action"
 end
 ```
 
-## 回调: `on_timer_call`
+## 回调: `on_cronjob`
 
-定时任务回调，由 CronJob 的 Plugin 分发模式触发。
+定时任务回调，由 CronJob 通过统一事件循环 → `Plugin.Dispatch` 分发触发。
 
 ```lua
-function on_timer_call(event)  -- 无返回值
+function on_cronjob(event)  -- 无返回值
 ```
 
 | event 字段 | 类型 | 说明 |
 |----------|------|------|
-| `post_type` | string | `"timer"` |
+| `post_type` | string | `"cronjob"` |
 | `payload` | table | CronJob 配置的 Payload JSON 对象 |
 | `admins` | []string | admin QQ 列表 |
 
-- 只有定义了 `on_timer_call` 全局函数且已加载的插件才会被 CronJob 调用
-- 前端多选下拉框自动过滤 `supports_timer=true` 的已启用插件
-- 新增/修改 `on_timer_call` 后需通过前端"重载全部"或 `POST /api/v1/plugins/reload` 热重载
+- CronJob 事件**不**经过 Agent，仅通过 `Plugin.Dispatch` 分发到插件
+- 只有定义了 `on_cronjob` 全局函数且已加载的插件才会被 CronJob 调用
+- 前端多选下拉框自动过滤 `supports_cronjob=true` 的已启用插件
+- 新增/修改 `on_cronjob` 后需通过前端"重载全部"或 `POST /api/v1/plugins/reload` 热重载
 
 ```lua
 -- 示例：向 Payload 指定的 QQ 发定时消息
-function on_timer_call(event)
+function on_cronjob(event)
     local p = event.payload or {}
     if p.target_qq and p.message then
         jn.onebot11.send_private_msg(p.target_qq, p.message)
@@ -647,7 +700,7 @@ function on_timer_call(event)
 end
 ```
 
-完整示例见 `data/pluggins/cron-example/`。
+完整示例见 `data/pluggins/webhook-cron/`（on_cronjob + on_webhook）。
 
 ## 回调: `on_notice`
 
@@ -680,7 +733,7 @@ function on_notice(event)
 end
 ```
 
-完整示例见 `data/pluggins/welcome/` 和 `data/pluggins/poke-reply/`。
+完整示例见 `data/pluggins/group-manager/`（on_notice + on_request + 群管理）。
 
 ## 回调: `on_request`
 
@@ -710,6 +763,45 @@ function on_request(event)
 end
 ```
 
+## 回调: `on_xxx_response`（异步 API 完成回调）
+
+`xxx_async` 提交的阻塞操作完成后，引擎派发到插件入口回调（与事件派发互斥，保证 LState 安全）。`req_id` 与 `xxx_async` 返回值一致；`ctx` 为调用时保存的现场表（原样带回，未传则 `nil`）。
+
+```lua
+function on_t2i_response(req_id, ctx, result, err)
+    -- result: 图片 ID（generate_async）或公开 URL（generate_url_async）；err 非 nil 表示失败
+end
+
+function on_http_response(req_id, ctx, result, err)
+    -- result: {status=number, body=string}；err 非 nil 表示失败
+end
+
+function on_sandbox_response(req_id, ctx, result, err)
+    -- result: create→{sandbox_id, status}、exec_shell→{output, exit_code}、
+    --         exec_python→{output, error}；err 非 nil 表示失败
+end
+```
+
+| 回调 | req_id 来源 | ctx | result |
+|------|-----------|-----|--------|
+| `on_t2i_response(req_id, ctx, result, err)` | `t2i.generate_async` / `t2i.generate_url_async` | 调用现场表（原样带回） | 图片 ID / URL |
+| `on_http_response(req_id, ctx, result, err)` | `http.get_async` / `http.post_async` | 同上 | `{status, body}` |
+| `on_sandbox_response(req_id, ctx, result, err)` | `sandbox.create_async` / `exec_shell_async` / `exec_python_async` | 同上 | 见上注释 |
+
+```lua
+-- 示例：http 异步 + 现场保存（url 与回调目标一起带到回调）
+function on_message(event)
+    local ctx = { url = "https://api.github.com/repos/x/y", group_id = event.group_id }
+    local rid = jn.http.get_async(ctx.url, ctx)
+    return false, false
+end
+
+function on_http_response(req_id, ctx, result, err)
+    if err or not ctx then return end
+    jn.onebot11.send_group_msg(ctx.group_id, "仓库信息: " .. result.body)
+end
+```
+
 ## 权限速查
 
 | 权限 | 暴露的全局表 |
@@ -723,7 +815,7 @@ end
 | `sandbox` | `sandbox.*` |
 | `agent` | `agent.*` |
 | (webhook 调用层过滤) | `on_webhook` 会被调用 |
-| (timer 调用层过滤) | `on_timer_call` 会被调用 |
+| (cronjob 调用层过滤) | `on_cronjob` 会被调用 |
 
 ---
 
@@ -779,13 +871,13 @@ type Manifest struct {
 var jnSDKSource string
 ```
 
-`ensureEmbeddedAssets`（`pluggin.go:1554`）每次启动强制覆盖落盘：`<basePath>/sdk/jn.lua` 与 `system/{pluggin.yaml,main.lua}`，确保 Docker 镜像在不同 bind-mount 上一致。`injectSDK` 把 `<basePath>/sdk/?.lua` 追加到 `package.path`，使 `require("jn")` 可用。
+`ensureEmbeddedAssets`（`pluggin.go:2200`）每次启动强制覆盖落盘：`<basePath>/sdk/jn.lua` 与 `system/{pluggin.yaml,main.lua}`，确保 Docker 镜像在不同 bind-mount 上一致。`injectSDK` 把 `<basePath>/sdk/?.lua` 追加到 `package.path`，使 `require("jn")` 可用。
 
 ### 3. 按 permissions gate 注入全局表（`injectBaseAPI`）
 
 ```go
-// pluggin.go:503-568
-func (pe *PluginEngine) injectBaseAPI(L *lua.LState, plugin *LoadedPlugin) {
+// pluggin.go:973
+func (pe *PluginEngine) injectBaseAPI(L *lua.LState, pluginName string, permissions []string) {
     // log / json 始终
     if plugin.HasPermission("onebot11") { ... }
     if plugin.HasPermission("http")    { ... }
@@ -797,12 +889,12 @@ func (pe *PluginEngine) injectBaseAPI(L *lua.LState, plugin *LoadedPlugin) {
 }
 ```
 
-`HasPermission(perm)`（`pluggin.go:490`）支持精确匹配或 `"*"` 通配。多余申请不会注入，日志会有提示。
+`HasPermission(perm)`（`pluggin.go:960`）支持精确匹配或 `"*"` 通配。多余申请不会注入，日志会有提示。
 
 ### 4. 命令 API（`injectCommandAPI`）
 
 ```go
-// pluggin.go:585-668
+// pluggin.go:1055
 __jn_internal.register_command(path, handlerFn, opts)
    ├─ path 转 CommandNode 路径，逐级创建
    ├─ handler 注册到全局 key __jn_cmd_handler_<plugin>_<path> 保活（防 GC）
@@ -814,7 +906,7 @@ SDK `jn.command.register` 是它的薄包装。
 ### 5. t2i / sandbox 客户端运行时获取
 
 ```go
-// pluggin.go:979 (t2i)
+// pluggin.go:1587 (t2i)
 getCurrentClient := func() *t2icaller.Client {
     if agentOp != nil {
         if c := genT2IClient(); c != nil { return c }
@@ -841,14 +933,14 @@ Dispatch(raw, event):
 | 层 | 位置 | 作用 |
 |----|------|------|
 | Manifest.System | `pluggin.yaml` `system: true` | 标记 |
-| `PluginEngine.IsSystem(name)` | `pluggin.go:185` | 引擎层 Unload 拒绝 |
+| `PluginEngine.IsSystem(name)` | `pluggin.go:187` | 引擎层 Unload 拒绝 |
 | Service Toggle/Delete | `internal/api/service` | API 层拒绝（返回 40028 PluginIsSystem） |
 
 确保 `system` 插件不可删/停，但**可启用**（支持 idempotent 场景）。
 
 ### 8. 事件回调的 PCall 安全
 
-`OnMessage`/`OnWebhook` 用 `L.PCall` 保护调用，handler 抛错只 `slog.Error` 不影响后续插件或 Agent。
+`OnMessage`/`OnWebhook`/`OnCronjob` 用 `L.PCall` 保护调用，handler 抛错只记录日志不影响后续插件或 Agent。
 
 ---
 
@@ -862,5 +954,5 @@ Dispatch(raw, event):
 6. **系统插件目录 `system/` 每次启动被二进制覆盖** — 不要用它存自定义命令，自建插件目录
 7. **`database` 权限声称有命名空间隔离，但 `prefixSQL` 是桩未生效** — 任意 SQL，请重度谨慎
 8. **改 Lua 文件不 reload 看不到效果**：`PUT /plugins/:id/toggle` 先停再启才会重新 `DoFile`
-9. **handler 返回值约定** `(consumedBool, replyString)`：consumed=true 短路（不调 Agent）；reply 非 nil 自动回复
-10. **Webhook 不走 LLM**：仅喂插件，是外部集成的钩子。若要让 Agent 处理外部输入，应该用 CronJob 或插件内 `onebot11.send_*_msg` 自己转发
+9. **handler 返回值约定** `(consumed, modified_event, skip_reply)`：consumed=true 短路（不调 Agent）；skip_reply=true 跳过回复策略
+10. **Webhook 与 CronJob 都不走 LLM**：仅喂插件，是外部集成与定时任务的钩子。若要让 Agent 处理外部输入，插件内 `onebot11.send_*_msg` 自己转发

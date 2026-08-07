@@ -33,9 +33,9 @@ function on_message(event)
         else
             jn.onebot11.send_private_msg(event.user_id, reply_text)
         end
-        return true, event
+        return true, false  -- consumed, skip_reply
     end
-    return false, event
+    return false, false  -- consumed, skip_reply
 end
 
 log.info("ping 插件已加载（SDK 模式）")

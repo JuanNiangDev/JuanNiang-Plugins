@@ -87,8 +87,8 @@ M.json = json
 ---@field send_group_msg fun(group_id: number, message: string|table): boolean, string? 异步发送群消息，不阻塞
 ---@field send_private_msg_sync fun(user_id: number, message: string|table): boolean, string? 同步发送私聊消息，等待结果
 ---@field send_group_msg_sync fun(group_id: number, message: string|table): boolean, string? 同步发送群消息，等待结果
----@field delete_msg fun(message_id: number): boolean, string?
----@field get_msg fun(message_id: number): table, string? 根据消息 ID 获取消息完整内容
+---@field delete_msg fun(message_id: number|string): boolean, string? 撤回消息（事件表的 message_id 为字符串）
+---@field get_msg fun(message_id: number|string): table, string? 根据消息 ID 获取消息完整内容
 ---@field get_group_info fun(group_id: number): table, string?
 ---@field get_group_member_list fun(group_id: number): table[], string?
 ---@field get_group_member_info fun(group_id: number, user_id: number): table, string?
@@ -119,7 +119,14 @@ M.onebot11 = onebot11
 ---@class jn.HTTP
 ---@field get fun(url: string): jn.HTTPResponse, string?
 ---@field post fun(url: string, content_type?: string, body?: string): jn.HTTPResponse, string?
+---@field get_async fun(url: string, ctx?: table): number 异步 GET，立即返回 req_id；完成后引擎调用插件入口 on_http_response(req_id, ctx, result, err)
+---@field post_async fun(url: string, content_type?: string, body?: string, ctx?: table): number 异步 POST（最后一个 table 参数视为 ctx）
 M.http = http
+
+-- 异步回调约定（引擎级异步注册表，kind "http"）：
+-- 插件定义全局函数 on_http_response(req_id, ctx, result, err)，引擎在请求完成后
+-- 串行调用（与事件派发互斥）。result={status, body}；err 为 nil 表示成功。
+-- ctx 为调用时传入的现场表（原样带回，未传则 nil），用于延续调用前的业务状态。
 
 -- ====================================================================
 -- database 数据库访问 (需要 database 权限，表名自动加 pluggin_<name>_ 前缀)
@@ -160,10 +167,17 @@ M.cache = cache
 ---@class jn.T2I
 ---@field generate fun(html: string, options?: table): string, string? 生成图片，返回图片 ID
 ---@field generate_url fun(html: string, options?: table): string, string? 生成图片，返回 URL
----@field toggle fun(active: boolean): boolean, string? 启用/停用 T2I 服务
+---@field generate_async fun(html: string, options?: table, ctx?: table): number 异步生成（默认超时 120s，opts.timeout 可覆盖），立即返回 req_id；完成后引擎调用插件入口 on_t2i_response(req_id, ctx, result, err)
+---@field generate_url_async fun(html: string, options?: table, ctx?: table): number 异步生成 URL
+---@field toggle fun(active: boolean): boolean, string?
 ---@field is_active fun(): boolean
 ---@field get_config fun(): table, string?
 M.t2i = t2i
+
+-- 异步回调约定（引擎级异步注册表，kind "t2i"）：
+-- 插件定义全局函数 on_t2i_response(req_id, ctx, result, err)，引擎在渲染完成后
+-- 串行调用（与事件派发互斥）。result 为图片 ID 或公开 URL；err 为 nil 表示成功。
+-- ctx 为调用时传入的现场表（原样带回，未传则 nil）。
 
 -- ====================================================================
 -- sandbox 代码沙箱 (需要 sandbox 权限)
@@ -173,12 +187,21 @@ M.t2i = t2i
 ---@field create fun(): table, string? 返回 {sandbox_id=string, status=string}
 ---@field exec_shell fun(sandbox_id: string, command: string): string, number|string  返回 (output, exit_code|err)
 ---@field exec_python fun(sandbox_id: string, code: string): string, string 返回 (output, error_str)
+---@field create_async fun(ctx?: table): number 异步创建，立即返回 req_id；完成后引擎调用插件入口 on_sandbox_response(req_id, ctx, result, err)
+---@field exec_shell_async fun(sandbox_id: string, command: string, ctx?: table): number 异步执行 shell（默认超时 120s）
+---@field exec_python_async fun(sandbox_id: string, code: string, ctx?: table): number 异步执行 python
 ---@field list fun(): table[], string? 列出已有沙箱实例
 ---@field delete fun(sandbox_id: string): boolean, string? 删除指定沙箱
 ---@field toggle fun(active: boolean): boolean, string? 启用/停用 Sandbox 服务
 ---@field is_active fun(): boolean
 ---@field get_config fun(): table, string?
 M.sandbox = sandbox
+
+-- 异步回调约定（引擎级异步注册表，kind "sandbox"）：
+-- 插件定义全局函数 on_sandbox_response(req_id, ctx, result, err)，引擎在执行完成后
+-- 串行调用（与事件派发互斥）。result 按调用方法不同：create→{sandbox_id,status}、
+-- exec_shell→{output,exit_code}、exec_python→{output,error}；err 为 nil 表示成功。
+-- ctx 为调用时传入的现场表（原样带回，未传则 nil）。
 
 -- ====================================================================
 -- agent Agent 操作接口 (需要 agent 权限)
@@ -230,6 +253,26 @@ M.sandbox = sandbox
 ---@field get_current_chat_area fun(): jn.ChatArea
 ---@field compact_memory fun(): string, string?
 M.agent = agent
+
+-- ====================================================================
+-- llm LLM 调用 (需要 llm 权限)
+-- ====================================================================
+-- 通过 Bot 自身启用的文本模型 Provider 调用 LLM：模型 / 采样参数 / 密钥
+-- 全部复用 Bot 配置，插件不接触任何密钥。适合内容审查等二次判断场景。
+-- 高频路径请使用 chat_async（异步，不阻塞事件循环与其它插件）。
+
+---@class jn.LLM
+---@field available fun(): boolean 当前是否有可用的文本模型 Provider
+---@field chat fun(messages: string|table, opts?: table): string?, string? 同步调用，返回 (content, err)；适合命令等低频路径
+---@field chat_async fun(messages: string|table, opts?: table): number 异步提交，立即返回 req_id（失败返回 0）；完成后引擎调用插件入口 on_chat_response(req_id, content, err)
+---@field messages table 消息参数：单字符串（role=user）或数组，元素为字符串（role=user）或 {role="system|user|assistant", content="..."}
+---@field opts table 选项：{temperature=?, max_tokens=?, timeout=?秒}，缺省回退 Bot Provider 配置（默认超时 60s）
+---
+--- 异步回调约定（引擎级异步注册表，kind "chat"）：
+--- 插件定义全局函数 on_chat_response(req_id, content, err)，引擎在 LLM 返回后
+--- 串行调用（与事件派发互斥）。err 为 nil 表示成功；req_id 与 chat_async 的
+--- 返回值一致，可用于关联请求上下文（如查表取回本次审查的事件/关键词）。
+M.llm = llm
 
 -- ====================================================================
 -- config 动态配置 (无需权限，默认注入)

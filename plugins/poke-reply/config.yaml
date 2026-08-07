@@ -33,3 +33,9 @@ configs:
     label: 启用戳一戳回复
     description: 是否启用本插件的戳一戳自动回复
     default: true
+
+  - key: bot_qq
+    type: string
+    label: 机器人QQ号
+    description: 仅当戳一戳的目标是本QQ时才回复；留空则自动通过 get_login_info 获取（一般无需手动填写）
+    default: ""

@@ -251,7 +251,7 @@ end, {
 -- on_message 兜底
 -- --------------------------------------------------------------------
 function on_message(event)
-    return false, event
+    return false, false  -- consumed, skip_reply
 end
 
 -- 初始化

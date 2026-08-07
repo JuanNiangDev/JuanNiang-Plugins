@@ -15,6 +15,29 @@ local REPLIES = {
     "你戳我一下，我回你一下 🤏",
 }
 
+-- 机器人自身 QQ（惰性获取并缓存；配置 bot_qq 优先，否则 get_login_info）
+local self_qq = nil
+local self_qq_warned = false
+
+local function get_self_qq()
+    if self_qq then return self_qq end
+    local cfg_qq = jn.config.get("bot_qq")
+    if cfg_qq and tostring(cfg_qq) ~= "" then
+        self_qq = tonumber(cfg_qq)
+        return self_qq
+    end
+    local info, _ = jn.onebot11.get_login_info()
+    if info and info.user_id then
+        self_qq = tonumber(info.user_id)
+        return self_qq
+    end
+    if not self_qq_warned then
+        self_qq_warned = true
+        jn.log.warn("[poke-reply] 获取机器人QQ失败，戳一戳回复暂时停用，可在配置中指定 bot_qq")
+    end
+    return nil
+end
+
 ---@param event jn.Event
 function on_notice(event)
     -- 戳一戳事件：notice_type = "notify", sub_type = "poke"
@@ -27,9 +50,16 @@ function on_notice(event)
         return
     end
 
-    -- target_id 是被戳的人，user_id 是戳的人
+    -- 只响应"被戳对象是机器人自己"的戳一戳：
+    -- OneBot11 poke 事件中 user_id=戳人者，target_id=被戳者。
+    -- target_id 缺失（=0）或不是机器人自己时直接忽略，避免误回戳别人的戳一戳。
+    local bot_qq = get_self_qq()
+    if not bot_qq then return end
+    local target = tonumber(event.target_id)
+    if not target or target ~= bot_qq then return end
+
     local from_qq = event.user_id       -- 发起戳一戳的人
-    local to_qq = event.target_id       -- 被戳的人（可能是机器人自己）
+    local to_qq = event.target_id       -- 被戳的人（机器人自己）
     local group_id = event.group_id
 
     if group_id == 0 then
