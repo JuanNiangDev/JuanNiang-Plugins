@@ -918,21 +918,18 @@ local function parse_target_q(args)
     return tonumber(qq)
 end
 
---- 豁免时自动解除禁言：查询群成员禁言到期时间（shut_up_timestamp），
---- 仍在禁言中则调用 ban_group_member(duration=0) 解除
+--- 豁免时自动解除禁言：直接调用 ban_group_member(duration=0) 解除。
+--- 不依赖 get_group_member_info 的 shut_up_timestamp 判断——部分 OneBot
+--- 实现（如 NapCat 群成员缓存）该字段可能缺失/失效，导致漏判不调解禁。
+--- duration=0 为 OneBot11 规范解禁语义（0 表示取消禁言），对未禁言成员是无害 no-op。
 local function unmute_if_banned(group_id, user_id)
-    local info, err = jn.onebot11.get_group_member_info(group_id, user_id)
-    if not info then
-        jn.log.warn(string.format("[group_mgr] 查询成员信息失败 user=%d err=%s", user_id, tostring(err)))
+    local ok, err = jn.onebot11.ban_group_member(group_id, user_id, 0)
+    if not ok then
+        jn.log.warn(string.format("[group_mgr] 豁免 %d 自动解禁失败（群 %d）: %s", user_id, group_id, tostring(err)))
         return false
     end
-    local until_ts = tonumber(info.shut_up_timestamp or 0) or 0
-    if until_ts > os.time() then
-        jn.onebot11.ban_group_member(group_id, user_id, 0) -- duration 0 = 解除禁言
-        jn.log.info(string.format("[group_mgr] 豁免 %d 时自动解除禁言（群 %d）", user_id, group_id))
-        return true
-    end
-    return false
+    jn.log.info(string.format("[group_mgr] 豁免 %d 时自动解除禁言（群 %d）", user_id, group_id))
+    return true
 end
 
 jn.command.register("豁免", function(args, event)
