@@ -490,6 +490,7 @@ local HELP_MENU = table.concat({
     "- /猜单词 — 玩一局猜单词游戏（Wordle）",
     "- /猜单词 <难度> — 指定难度高考/四级/六级/考研/雅思/托福/GRE",
     "- /猜单词 <长度> — 指定单词长度",
+    "- /怎么猜单词 — 查看玩法与指定难度/长度的方法",
 }, "\n")
 
 local function is_help_arg(arg)
@@ -615,7 +616,10 @@ jn.command.register("猜单词", function(args, event)
 
     local lines = {
         "🎮 猜单词游戏开始！",
-        "难度：" .. game.difficulty_name .. " ｜ 单词长度：" .. length .. " 个字母 ｜ 最多 " .. MAX_ATTEMPTS .. " 次机会",
+        "难度：" .. game.difficulty_name,
+        "单词长度：" .. length .. " 个字母",
+        "最多 " .. MAX_ATTEMPTS .. " 次机会",
+        "本局只能提示一次，请谨慎使用～",
         "",
     }
     -- 开局给出一张空白棋盘（全部为空表格）；T2I 不可用/渲染失败时降级为下划线占位
@@ -646,6 +650,35 @@ jn.command.register("猜单词", function(args, event)
 end, {
     description = "玩一局猜单词游戏（Wordle）",
     usage = "/猜单词 [难度] [长度]（顺序任意）\n难度：高考/四级/六级/考研/雅思/托福/GRE（默认四级）\n长度：单词字母数（默认 4-6 随机）",
+})
+
+-- ====================================================================
+-- 命令: /怎么猜单词 —— 玩法与指定难度/长度的方法
+-- ====================================================================
+local HOW_TO_PLAY = table.concat({
+    "🎮 猜单词（Wordle）玩法：",
+    "每局随机一个英文单词，最多 " .. MAX_ATTEMPTS .. " 次机会猜出来。",
+    "发送 /猜 <单词> 提交猜测，格子颜色表示：",
+    "🟩 位置和字母都对；🟨 字母对但位置不对；⬜ 单词里没有这个字母",
+    "",
+    "开始一局：/猜单词（默认四级，长度 " .. DEFAULT_LEN_MIN .. "-" .. DEFAULT_LEN_MAX .. " 随机）",
+    "指定难度：/猜单词 六级（高考/四级/六级/考研/雅思/托福/GRE）",
+    "指定长度：/猜单词 6（4～" .. MAX_LENGTH .. " 个字母）",
+    "同时指定：/猜单词 六级 6（顺序任意）",
+    "",
+    "/提示 每局仅一次揭示正确字母，/结束 查看答案。",
+}, "\n")
+
+jn.command.register("怎么猜单词", function(args, event)
+    if event.message_type ~= "group" then
+        reply(event, "猜单词游戏仅在群聊中可用哦～")
+        return true
+    end
+    reply(event, HOW_TO_PLAY)
+    return true
+end, {
+    description = "查看猜单词玩法与指定难度/长度的方法",
+    usage = "/怎么猜单词",
 })
 
 -- ====================================================================
@@ -684,6 +717,12 @@ jn.command.register("提示", function(args, event)
     local game = get_game(group_id)
     if not game or game.status ~= "playing" then
         reply(event, "本群还没有进行中的游戏哦～发送 /猜单词 来一局吧！")
+        return true
+    end
+
+    -- 每局只能提示一次
+    if game.hints and #game.hints >= 1 then
+        reply(event, "本局只能提示一次哦～提示已经用掉啦，卷娘相信大家能猜出来的💪")
         return true
     end
 
