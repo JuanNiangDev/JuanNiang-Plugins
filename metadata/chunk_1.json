@@ -31,7 +31,7 @@
   },
   {
     "name": "redrock_caidanci",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "Redrock",
     "description": "红岩网校猜单词小游戏",
     "path": "redrock_caidanci",
@@ -41,7 +41,7 @@
   },
   {
     "name": "redrock_caidanci_grade",
-    "version": "2.2.1",
+    "version": "2.2.2",
     "author": "Redrock",
     "description": "红岩网校分级猜单词小游戏（高考/四级/六级/考研/雅思/托福/GRE）",
     "path": "redrock_caidanci_grade",
@@ -81,7 +81,7 @@
   },
   {
     "name": "redrock_faq",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "author": "Redrock",
     "description": "红岩网校 FAQ 查询插件（/redrock \u003c关键词\u003e 命令式查询）",
     "path": "redrock_faq",
@@ -91,7 +91,7 @@
   },
   {
     "name": "redrock_group_manager",
-    "version": "1.2.0",
+    "version": "1.2.2",
     "author": "Redrock",
     "description": "红岩群管理工具",
     "path": "redrock_group_manager",
@@ -101,7 +101,7 @@
   },
   {
     "name": "redrock_poke",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "author": "Redrock",
     "description": "卷娘戳一戳回复插件",
     "path": "redrock_poke",
@@ -111,7 +111,7 @@
   },
   {
     "name": "redrock_quiz",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "Redrock",
     "description": "红岩知识快问快答小游戏",
     "path": "redrock_quiz",
@@ -121,7 +121,7 @@
   },
   {
     "name": "redrock_special",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "Redrock",
     "description": "彩蛋关键词",
     "path": "redrock_special",
@@ -131,7 +131,7 @@
   },
   {
     "name": "redrock_welcome",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "Redrock",
     "description": "红岩网校招新群欢迎插件",
     "path": "redrock_welcome",
