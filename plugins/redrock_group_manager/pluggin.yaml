@@ -1,5 +1,5 @@
 name: "redrock_group_manager"
-version: "1.2.3"
+version: "1.2.4"
 author: "Redrock"
 description: "红岩群管理工具"
 entry: "main.lua"
