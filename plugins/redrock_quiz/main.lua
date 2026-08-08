@@ -117,7 +117,7 @@ local function get_game(key)
     local v = store[key]
     if v ~= nil then return v end
     local rows, err = jn.database.query(
-        string.format("SELECT value FROM pluggin_redrock_quiz_games WHERE key = '%s'", key))
+        string.format("SELECT value FROM pluggin_redrock_quiz_games WHERE key = '%s'", jn.sql.escape(key)))
     if rows and #rows > 0 and rows[1].value then
         local ok, decoded = pcall(jn.json.decode, rows[1].value)
         if ok and decoded then
@@ -135,13 +135,13 @@ local function save_game(key, game)
         jn.database.exec(string.format(
             "INSERT INTO pluggin_redrock_quiz_games (key, value) VALUES ('%s', '%s') " ..
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            key, encoded))
+            jn.sql.escape(key), jn.sql.escape(encoded)))
     end
 end
 
 local function delete_game(key)
     store[key] = nil
-    jn.database.exec(string.format("DELETE FROM pluggin_redrock_quiz_games WHERE key = '%s'", key))
+    jn.database.exec(string.format("DELETE FROM pluggin_redrock_quiz_games WHERE key = '%s'", jn.sql.escape(key)))
 end
 
 -- ====================================================================

@@ -122,7 +122,7 @@ local function do_checkin(user_id, group_id, user_name)
     local date = today()
     local sql = string.format(
         "INSERT INTO pluggin_checkin_records (user_id, group_id, user_name, score, check_date, created_at) VALUES (%d, %d, '%s', %d, '%s', '%s')",
-        user_id, group_id, user_name, score, date, os.date("%Y-%m-%d %H:%M:%S")
+        user_id, group_id, jn.sql.escape(user_name), score, date, os.date("%Y-%m-%d %H:%M:%S")
     )
     local _, err = jn.database.exec(sql)
     if err then
