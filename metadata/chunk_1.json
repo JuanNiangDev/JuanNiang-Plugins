@@ -1,7 +1,7 @@
 [
   {
     "name": "checkin",
-    "version": "1.0.2",
+    "version": "1.0.1",
     "author": "JuanNiang-Neo",
     "description": "签到插件，提供 /qd 签到 和 /rank 排名功能",
     "path": "checkin",
@@ -91,11 +91,7 @@
   },
   {
     "name": "redrock_group_manager",
-<<<<<<< HEAD
     "version": "1.2.5",
-=======
-    "version": "1.2.2",
->>>>>>> 171e51cca408599e5f8df17f5b27ba3f507ab749
     "author": "Redrock",
     "description": "红岩群管理工具",
     "path": "redrock_group_manager",
@@ -115,11 +111,7 @@
   },
   {
     "name": "redrock_quiz",
-<<<<<<< HEAD
     "version": "1.0.2",
-=======
-    "version": "1.0.1",
->>>>>>> 171e51cca408599e5f8df17f5b27ba3f507ab749
     "author": "Redrock",
     "description": "红岩知识快问快答小游戏",
     "path": "redrock_quiz",
