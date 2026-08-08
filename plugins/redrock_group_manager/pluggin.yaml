@@ -1,13 +1,5 @@
 name: "redrock_group_manager"
-<<<<<<< HEAD
-<<<<<<< HEAD
 version: "1.2.5"
-=======
-version: "1.2.4"
->>>>>>> 171e51cca408599e5f8df17f5b27ba3f507ab749
-=======
-version: "1.2.1"
->>>>>>> parent of 7918b40 (✨ 更新插件版本号)
 author: "Redrock"
 description: "红岩群管理工具"
 entry: "main.lua"
