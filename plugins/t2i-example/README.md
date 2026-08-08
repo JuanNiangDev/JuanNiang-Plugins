@@ -5,11 +5,11 @@ T2I 文生图示例插件，通过 HTML 生成图片。
 ## 简介
 
 - **作者**: JuanNiang
-- **版本**: 1.0.0
+- **版本**: 1.1.0
 
 ## 功能
 
-- `/t2i <html>` 生成图片并返回 URL
+- `/t2i <html>` 生成图片并返回 URL（**异步** `t2i.generate_url_async`，不阻塞事件循环，完成回调 `on_t2i_response`）
 - `/t2i_url <html>` 生成图片并直接发送到会话
 - `/t2i_state` 查看 T2I 服务状态
 

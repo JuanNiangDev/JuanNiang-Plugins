@@ -11,7 +11,8 @@
 
 local jn = require("jn")
 
-function on_timer_call(event)
+-- 定时任务回调（引擎派发 on_cronjob，非 on_timer_call）
+function on_cronjob(event)
     local payload = event.payload or {}
     local groups = payload.groups
     local message = payload.message

@@ -1,5 +1,5 @@
 name: "redrock_faq"
-version: "1.1.0"
+version: "1.1.1"
 author: "Redrock"
 description: "红岩网校 FAQ 查询插件（/redrock <关键词> 命令式查询）"
 entry: "main.lua"

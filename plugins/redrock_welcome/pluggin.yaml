@@ -1,5 +1,5 @@
 name: "redrock_welcome"
-version: "1.0.0"
+version: "1.0.1"
 author: "Redrock"
 description: "红岩网校招新群欢迎插件"
 entry: "main.lua"

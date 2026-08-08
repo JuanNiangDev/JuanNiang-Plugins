@@ -1,7 +1,7 @@
 -- ====================================================================
 -- Cron 示例插件
 -- ====================================================================
--- 当 CronJob 触发此插件时，on_timer_call(event) 被调用。
+-- 当 CronJob 触发此插件时，on_cronjob(event) 被调用。
 -- event.payload 即 CronJob 配置的 Payload JSON 对象。
 --
 -- 示例 Payload:
@@ -20,9 +20,9 @@
 
 local jn = require("jn")
 
--- 定时任务回调
+-- 定时任务回调（引擎派发 on_cronjob，非 on_timer_call）
 ---@param event jn.Event
-function on_timer_call(event)
+function on_cronjob(event)
     local payload = event.payload or {}
     local target_qq = payload.target_qq
     local message = payload.message or jn.config.get("default_message")

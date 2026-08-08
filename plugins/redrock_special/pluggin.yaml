@@ -1,5 +1,5 @@
 name: "redrock_special"
-version: "1.0.0"
+version: "1.0.1"
 author: "Redrock"
 description: "彩蛋关键词"
 entry: "main.lua"

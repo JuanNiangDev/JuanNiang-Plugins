@@ -141,6 +141,23 @@ local function reply(event, text)
     end
 end
 
+-- 异步回调回复目标（不持有 event，用调用现场 ctx）
+local function target_of(event)
+    if event.message_type == "group" then
+        return { kind = "group", id = event.group_id }
+    end
+    return { kind = "private", id = event.user_id }
+end
+
+local function reply_to(ctx, text)
+    if not ctx or not ctx.target then return end
+    if ctx.target.kind == "group" then
+        jn.onebot11.send_group_msg(ctx.target.id, text)
+    else
+        jn.onebot11.send_private_msg(ctx.target.id, text)
+    end
+end
+
 --- 截断过长的输出
 local MAX_OUTPUT_LEN = tonumber(jn.config.get("max_output_len")) or 1500
 local function truncate(str, max_len)
@@ -151,38 +168,11 @@ local function truncate(str, max_len)
     return str
 end
 
---- 发送代码到 Judge0 并获取结果
----@return table { ok=boolean, output=string, time=number, memory=number }
-local function run_code(lang_id, code, stdin)
-    local url = JUDGE0_BASE_URL .. "/submissions?base64_encoded=false&wait=true"
-
-    local body = jn.json.encode({
-        source_code = code,
-        language_id = lang_id,
-        stdin = stdin or "",
-    })
-
-    jn.log.info("[code] 提交代码: lang=" .. lang_id .. " len=" .. #code)
-
-    local resp, err = jn.http.post(url, "application/json", body)
-    if not resp then
-        return { ok = false, output = "请求 Judge0 失败: " .. (err or "unknown") }
-    end
-
-    if resp.status < 200 or resp.status >= 300 then
-        return { ok = false, output = "Judge0 返回错误状态: " .. resp.status }
-    end
-
-    local data = jn.json.decode(resp.body)
-    if not data then
-        return { ok = false, output = "解析 Judge0 响应失败" }
-    end
-
-    -- 拼接输出
+--- 格式化 Judge0 响应为输出文本（compile_output / stderr / stdout / status）
+local function format_output(data)
     local output = ""
     local has_content = false
 
-    -- 编译错误/运行时错误
     if data.compile_output and data.compile_output ~= "" then
         output = output .. data.compile_output
         has_content = true
@@ -194,25 +184,36 @@ local function run_code(lang_id, code, stdin)
         has_content = true
     end
 
-    -- 标准输出
     if data.stdout and data.stdout ~= "" then
         if has_content then output = output .. "\n" end
         output = output .. data.stdout
         has_content = true
     end
 
-    -- 超时等状态信息
     if not has_content and data.status then
-        local desc = data.status.description or "未知状态"
-        output = desc
+        output = data.status.description or "未知状态"
     end
 
-    return {
-        ok = true,
-        output = output,
-        time = data.time,
-        memory = data.memory,
-    }
+    return output
+end
+
+--- 拼接执行耗时/内存元信息
+local function format_meta(data)
+    local parts = {}
+    local t = tonumber(data.time)
+    if t then
+        parts[#parts + 1] = string.format("%.2fs", t)
+    end
+    local m = tonumber(data.memory)
+    if m and m > 0 then
+        if m >= 1024 then
+            parts[#parts + 1] = string.format("%.0fKB", m / 1024)
+        else
+            parts[#parts + 1] = string.format("%dB", m)
+        end
+    end
+    if #parts == 0 then return "" end
+    return " | " .. table.concat(parts, " ")
 end
 
 -- ====================================================================
@@ -267,47 +268,52 @@ jn.command.register("code", function(args, event)
         return true
     end
 
-    -- 执行
-    local result = run_code(lang_id, code, stdin)
-
-    -- 格式化输出
-    local header = "🔧 " .. lang_name
-
-    if not result.ok then
-        header = header .. "\n\n" .. truncate(result.output)
-        reply(event, header)
-        return true
+    -- 提交到 Judge0（异步：wait=true 是长轮询，同步会阻塞事件循环数秒~数十秒）
+    local url = JUDGE0_BASE_URL .. "/submissions?base64_encoded=false&wait=true"
+    local body = jn.json.encode({
+        source_code = code,
+        language_id = lang_id,
+        stdin = stdin or "",
+    })
+    jn.log.info("[code] 提交代码: lang=" .. lang_id .. " len=" .. #code)
+    local ctx = { lang_name = lang_name, target = target_of(event) }
+    local rid = jn.http.post_async(url, "application/json", body, ctx)
+    if rid == 0 then
+        reply(event, "代码提交失败，请稍后再试～")
     end
-
-    local output = truncate(result.output)
-    if output == "" then output = "(无输出)" end
-
-    -- 耗时和内存
-    local meta_parts = {}
-    local t = tonumber(result.time)
-    if t then
-        meta_parts[#meta_parts + 1] = string.format("%.2fs", t)
-    end
-    local m = tonumber(result.memory)
-    if m and m > 0 then
-        if m >= 1024 then
-            meta_parts[#meta_parts + 1] = string.format("%.0fKB", m / 1024)
-        else
-            meta_parts[#meta_parts + 1] = string.format("%dB", m)
-        end
-    end
-
-    local meta = ""
-    if #meta_parts > 0 then
-        meta = " | " .. table.concat(meta_parts, " ")
-    end
-
-    reply(event, header .. meta .. "\n\n" .. output)
     return true
 end, {
-    description = "运行代码（基于 Judge0）",
+    description = "运行代码（基于 Judge0，异步）",
     usage = "/code <语言> [输入...]\n代码",
 })
+
+-- ====================================================================
+-- 异步完成回调：on_http_response(req_id, ctx, result, err)
+--   result = {status=number, body=string}；err 非 nil 表示失败
+-- ====================================================================
+function on_http_response(req_id, ctx, result, err)
+    if not ctx or not ctx.target then return end
+
+    local header = "🔧 " .. (ctx.lang_name or "")
+    if err then
+        reply_to(ctx, header .. "\n\n请求 Judge0 失败: " .. tostring(err))
+        return
+    end
+    if result.status < 200 or result.status >= 300 then
+        reply_to(ctx, header .. "\n\nJudge0 返回错误状态: " .. result.status)
+        return
+    end
+
+    local data = jn.json.decode(result.body)
+    if not data then
+        reply_to(ctx, header .. "\n\n解析 Judge0 响应失败")
+        return
+    end
+
+    local output = truncate(format_output(data))
+    if output == "" then output = "(无输出)" end
+    reply_to(ctx, header .. format_meta(data) .. "\n\n" .. output)
+end
 
 -- 当命令未被匹配时，不做任何事
 function on_message(event)
