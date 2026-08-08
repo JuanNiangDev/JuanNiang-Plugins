@@ -294,6 +294,37 @@ local function append_meaning(text, word)
     return text
 end
 
+--- 词性缩写 → 中文词性名
+local POS_NAMES = {
+    n = "名词", v = "动词", vt = "及物动词", vi = "不及物动词",
+    a = "形容词", adj = "形容词", ad = "副词", adv = "副词",
+    prep = "介词", pron = "代词", conj = "连词", interj = "感叹词",
+    num = "数词", art = "冠词", aux = "助动词", modal = "情态动词",
+    abbr = "缩写",
+}
+
+--- 从释义中随机取一个「词性 + 单个中文意思」；无可用词性行返回 nil
+local function pick_pos_meaning(word)
+    local t = word_trans[word]
+    if not t or t == "" then return nil end
+    local pos_lines = {}
+    for line in (t .. "\n"):gmatch("(.-)\n") do
+        local pos, rest = line:match("^([a-z]+)%.%s*(.+)$")
+        if pos and rest ~= "" then
+            pos_lines[#pos_lines + 1] = { pos = pos, rest = rest }
+        end
+    end
+    if #pos_lines == 0 then return nil end
+    local pick = pos_lines[math.random(#pos_lines)]
+    local meaning = pick.rest:match("^[^,;，；]+")
+    if meaning then
+        meaning = meaning:gsub("^%s+", ""):gsub("%s+$", "")
+    else
+        meaning = pick.rest
+    end
+    return POS_NAMES[pick.pos] or pick.pos, meaning
+end
+
 --- 失败时的安慰语
 local function get_defeat_msg(word)
     local msgs = {
@@ -666,7 +697,7 @@ local HOW_TO_PLAY = table.concat({
     "指定长度：/猜单词 6（4～" .. MAX_LENGTH .. " 个字母）",
     "同时指定：/猜单词 六级 6（顺序任意）",
     "",
-    "/提示 每局仅一次揭示正确字母，/结束 查看答案。",
+    "/提示 每局仅一次：揭示一个字母或给出词性与中文意思，/结束 查看答案。",
 }, "\n")
 
 jn.command.register("怎么猜单词", function(args, event)
@@ -721,9 +752,20 @@ jn.command.register("提示", function(args, event)
     end
 
     -- 每局只能提示一次
-    if game.hints and #game.hints >= 1 then
+    if game.hint_used or (game.hints and #game.hints >= 1) then
         reply(event, "本局只能提示一次哦～提示已经用掉啦，卷娘相信大家能猜出来的💪")
         return true
+    end
+
+    -- 30% 概率给出词性与一个中文意思，否则在棋盘上揭示一个正确字母
+    if math.random() < 0.3 then
+        local pos_name, meaning = pick_pos_meaning(game.word)
+        if pos_name then
+            game.hint_used = true
+            save_game(group_id, game)
+            reply(event, "💡 提示：词性是" .. pos_name .. "，一个意思是「" .. meaning .. "」")
+            return true
+        end
     end
 
     local pos = pick_hint_position(game)
