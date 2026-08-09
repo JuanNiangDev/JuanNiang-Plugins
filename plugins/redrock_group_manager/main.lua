@@ -186,7 +186,7 @@ local function get_kv(key)
     local v = store[key]
     if v ~= nil then return v end
     local rows, err = jn.database.query(
-        string.format("SELECT value FROM pluggin_redrock_group_manager_kv WHERE key = '%s'", key))
+        "SELECT value FROM pluggin_redrock_group_manager_kv WHERE key = ?", { key })
     if rows and #rows > 0 then
         v = rows[1].value
         if v then store[key] = v end
@@ -197,10 +197,10 @@ end
 local function set_kv(key, val)
     store[key] = val
     local v = type(val) == "string" and val or tostring(val)
-    jn.database.exec(string.format(
-        "INSERT INTO pluggin_redrock_group_manager_kv (key, value) VALUES ('%s', '%s') " ..
+    jn.database.exec(
+        "INSERT INTO pluggin_redrock_group_manager_kv (key, value) VALUES (?, ?) " ..
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-        key, v))
+        { key, v })
 end
 
 local function incr_kv(key)
@@ -337,7 +337,7 @@ local function migrate_old_violations()
             changed = true
         end
         store[r.key] = nil
-        jn.database.exec(string.format("DELETE FROM pluggin_redrock_group_manager_kv WHERE key = '%s'", r.key))
+        jn.database.exec("DELETE FROM pluggin_redrock_group_manager_kv WHERE key = ?", { r.key })
     end
     if changed then save_config() end
 end

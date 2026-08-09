@@ -101,11 +101,12 @@ end
 -- 检查今日是否已签到
 -- --------------------------------------------------------------------
 local function has_checked_in(user_id, group_id)
-    local sql = string.format(
-        "SELECT id FROM pluggin_checkin_records WHERE user_id = %d AND group_id = %d AND check_date = '%s' LIMIT 1",
-        user_id, group_id, today()
-    )
-    local rows, err = jn.database.query(sql)
+    local sql = [[
+        SELECT id FROM pluggin_checkin_records
+        WHERE user_id = ? AND group_id = ? AND check_date = ?
+        LIMIT 1
+    ]]
+    local rows, err = jn.database.query(sql, { user_id, group_id, today() })
     if err then
         jn.log.error("签到插件：查询签到记录失败: " .. err)
         return nil
@@ -120,11 +121,11 @@ local function do_checkin(user_id, group_id, user_name)
     local min, max = parse_range(jn.config.get("score_range"), 1, 10)
     local score = math.random(min, max)
     local date = today()
-    local sql = string.format(
-        "INSERT INTO pluggin_checkin_records (user_id, group_id, user_name, score, check_date, created_at) VALUES (%d, %d, '%s', %d, '%s', '%s')",
-        user_id, group_id, user_name, score, date, os.date("%Y-%m-%d %H:%M:%S")
-    )
-    local _, err = jn.database.exec(sql)
+    local sql = [[
+        INSERT INTO pluggin_checkin_records (user_id, group_id, user_name, score, check_date, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ]]
+    local _, err = jn.database.exec(sql, { user_id, group_id, user_name, score, date, os.date("%Y-%m-%d %H:%M:%S") })
     if err then
         jn.log.error("签到插件：签到失败: " .. err)
         return nil, err
@@ -136,11 +137,11 @@ end
 -- 获取用户总积分
 -- --------------------------------------------------------------------
 local function get_user_score(user_id, group_id)
-    local sql = string.format(
-        "SELECT COALESCE(SUM(score), 0) AS total FROM pluggin_checkin_records WHERE user_id = %d AND group_id = %d",
-        user_id, group_id
-    )
-    local rows, err = jn.database.query(sql)
+    local sql = [[
+        SELECT COALESCE(SUM(score), 0) AS total FROM pluggin_checkin_records
+        WHERE user_id = ? AND group_id = ?
+    ]]
+    local rows, err = jn.database.query(sql, { user_id, group_id })
     if err then
         jn.log.error("签到插件：查询积分失败: " .. err)
         return 0
@@ -209,16 +210,15 @@ jn.command.register("rank", function(args, event)
     local group_id = event.group_id or 0
 
     local rank_limit = tonumber(jn.config.get("rank_limit")) or 10
-    local sql = string.format(
-        [[SELECT user_id, user_name, COALESCE(SUM(score), 0) AS total, COUNT(*) AS check_days
-          FROM pluggin_checkin_records
-          WHERE group_id = %d
-          GROUP BY user_id, user_name
-          ORDER BY total DESC
-          LIMIT %d]],
-        group_id, rank_limit
-    )
-    local rows, err = jn.database.query(sql)
+    local sql = [[
+        SELECT user_id, user_name, COALESCE(SUM(score), 0) AS total, COUNT(*) AS check_days
+        FROM pluggin_checkin_records
+        WHERE group_id = ?
+        GROUP BY user_id, user_name
+        ORDER BY total DESC
+        LIMIT ?
+    ]]
+    local rows, err = jn.database.query(sql, { group_id, rank_limit })
     if err then
         jn.log.error("签到插件：查询排名失败: " .. err)
         reply(event, "查询排名失败，请稍后再试~")
