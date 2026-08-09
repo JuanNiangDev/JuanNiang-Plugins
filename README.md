@@ -2,6 +2,14 @@
 
 JuanNiang-Neo 的官方插件仓库。
 
+## 贡献规则（分支保护）
+
+本仓库对主分支（`main`）启用了分支保护，**禁止直接向主分支提交代码**：
+
+- **仓库内贡献者（读写权限）**：所有代码修改必须在**新建的分支**（如 `feature/xxx`、`fix/xxx`）上进行，然后通过 **Pull Request** 合并到主分支；直接 push 到 `main` 会被拒绝。
+- **Fork 贡献者**：请在自 fork 的仓库中**新建分支**开发，再向本仓库发起 Pull Request；**禁止从 fork 仓库的主分支（`main`/`master`）直接发起 PR**，此类 PR 将被拒绝。
+- 主分支的合并只能通过 Pull Request 完成。详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## 目录结构
 
 ```
