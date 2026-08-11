@@ -55,8 +55,8 @@ configs:
 
   - key: exempt_users
     type: list
-    label: 豁免 QQ 列表
-    description: 被豁免的 QQ 号不参与任何违规检测（/豁免 可添加，面板可增删）
+    label: 白名单 QQ 列表
+    description: 加入白名单的 QQ 号不参与任何违规检测（/白名单 可添加，面板可增删）
     default: []
 
   - key: admin_users

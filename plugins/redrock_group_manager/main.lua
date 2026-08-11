@@ -211,10 +211,10 @@ local function incr_kv(key)
 end
 
 -- ====================================================================
--- 管理数据：豁免 / 手动管理员 / 违规记录（持久化于 config.yaml）
+-- 管理数据：白名单 / 手动管理员 / 违规记录（持久化于 config.yaml）
 -- 与 config.yaml 的 list 配置项双向同步：
 --   面板「配置」页可增删修改（保存后插件自动重载生效）
---   插件在 /豁免 或违规变更时写回 config.yaml（插件目录内，jn.file）
+--   插件在 /豁免 /白名单 或违规变更时写回 config.yaml（插件目录内，jn.file）
 -- 违规记录格式: "群号:QQ号:违规次数"（违规人及违规等级，面板可见可改）
 -- ====================================================================
 
@@ -227,12 +227,12 @@ local CONFIG_SCHEMA = {
     { key = "enable_copy_check",       type = "bool",   label = "启用复读检测",           description = "是否启用 +1 复读检测",                                        def = true },
     { key = "violation_mute_seconds",  type = "string", label = "违规禁言时长(秒)",       description = "第二次违规时禁言时长，默认 1800（30 分钟）",                     def = "1800" },
     { key = "llm_review_enabled",      type = "bool",   label = "灰色地带LLM审查",       description = "命中灰色词（校园卡/考研/群名片/加群等）时送 LLM 审查；关闭则灰色词直接放行", def = true },
-    { key = "exempt_users",            type = "list",   label = "豁免 QQ 列表",           description = "被豁免的 QQ 号不参与任何违规检测（/豁免 可添加，面板可增删）",   def = {} },
+    { key = "exempt_users",            type = "list",   label = "白名单 QQ 列表",           description = "加入白名单的 QQ 号不参与任何违规检测（/白名单 可添加，面板可增删）", def = {} },
     { key = "admin_users",             type = "list",   label = "手动管理员 QQ 列表",     description = "群角色无法识别时手动指定的管理员账号（面板可增删）",               def = {} },
     { key = "violations",              type = "list",   label = "违规记录(群号:QQ:次数)", description = "违规人及违规等级，格式 群号:QQ号:次数；删除某行即重置该用户违规", def = {} },
 }
 
-local EXEMPT = {}  -- [qq] = true            豁免账号
+local EXEMPT = {}  -- [qq] = true            白名单账号（不参与任何检测）
 local ADMIN  = {}  -- [qq] = true            手动管理员账号
 local VIOL   = {}  -- ["群号:QQ"] = 次数      违规记录
 
@@ -281,7 +281,7 @@ local function save_config()
         "# ====================================================================",
         "# redrock_group_manager 插件配置",
         "# ====================================================================",
-        "# 本文件同时由插件维护（/豁免、违规记录变更时自动写回），",
+        "# 本文件同时由插件维护（/豁免、/白名单、违规记录变更时自动写回），",
         "# 也可在 Web 面板「插件 → 配置」页编辑，保存后自动重载生效。",
         "# ====================================================================",
         "",
@@ -361,7 +361,7 @@ end
 
 load_state()
 
---- 是否被豁免（豁免账号不参与任何检测）
+--- 是否在白名单（白名单账号不参与任何检测）
 local function is_exempt(user_id)
     return EXEMPT[tostring(user_id)] == true
 end
@@ -463,7 +463,7 @@ local function is_group_recommend_card(raw)
     return false
 end
 
---- 判断是否为管理员/群主（违规处罚、豁免命令使用）：
+--- 判断是否为管理员/群主（违规处罚、白名单命令使用）：
 --- 系统/手动管理员直接放行；群角色可识别时 owner/admin 放行；
 --- 群角色无法识别时（get_group_member_info 失败）退回手动管理账号判断
 local function is_group_admin(event)
@@ -754,7 +754,7 @@ function on_chat_response(req_id, content, err)
     local violation = verdict.violation
     local reason = verdict.reason or ctx.word
     if violation == "ad" or violation == "sensitive" then
-        -- 审查耗时期间可能已被豁免/成为管理员，复查后再处罚
+        -- 审查耗时期间可能已被加入白名单/成为管理员，复查后再处罚
         local event = { group_id = ctx.group_id, user_id = ctx.user_id, message_type = "group" }
         if ctx.message_id ~= "" then event.message_id = ctx.message_id end
         if is_exempt(ctx.user_id) or is_group_admin(event) then return end
@@ -811,7 +811,7 @@ end
 function on_message(event)
     if event.message_type ~= "group" then return false, nil end
 
-    -- 豁免账号不参与任何检测
+    -- 白名单账号不参与任何检测
     if is_exempt(event.user_id) then return false, nil end
 
     -- 违规检测（广告/敏感，优先级最高）
@@ -877,15 +877,19 @@ end, {
 })
 
 -- ====================================================================
--- 命令: /豁免 —— 管理员豁免某用户（不再检测，清除其违规记录）
+-- 命令: /豁免 —— 管理员对某用户执行一次豁免：解除禁言 + 清除违规记录
+-- （不加入白名单，该用户仍参与正常违规检测；需要长期免检请用 /白名单）
 -- ====================================================================
 
--- 豁免话术（多套随机）
-local EXEMPT_TEMPLATES = {
+-- /豁免 话术（多套随机）
+local PARDON_TEMPLATES = {
     ok = {
-        "好啦，%d 已经被卷娘记到豁免小本本上啦，违规记录也清空咯～",
-        "收到！%d 以后可以放心发言，卷娘不会管 TA 啦，违规记录已清空～",
-        "%d 获得免死金牌一枚！卷娘已豁免 TA，并清空了违规记录哦～",
+        "好啦，%d 的禁言已解除，违规记录也清空咯～不过 TA 还在正常检测范围内哦～",
+        "收到！%d 解禁 + 违规清零完成，卷娘会继续盯着 TA 的～",
+        "%d 这次先放过：解除禁言、清空违规记录～下次再犯可就要按规矩来咯～",
+    },
+    whitelisted = {
+        "%d 本来就在白名单里，不用豁免啦～卷娘顺手帮 TA 解了禁言、清了记录～",
     },
     denied = {
         "只有管理员才能用豁免哦～",
@@ -893,9 +897,6 @@ local EXEMPT_TEMPLATES = {
     },
     usage = {
         "用法：/豁免 QQ号 或 /豁免 @某人 哦～",
-    },
-    already = {
-        "%d 早就在卷娘的豁免名单里啦～",
     },
 }
 
@@ -906,7 +907,7 @@ local function pick(msgs, fmt)
     return m
 end
 
---- 解析 /豁免 参数：QQ 号 或 @某人（[CQ:at,qq=...]）
+--- 解析 /豁免 /白名单 参数：QQ 号 或 @某人（[CQ:at,qq=...]）
 local function parse_target_q(args)
     if not args or #args == 0 then return nil end
     local raw = tostring(args[1])
@@ -918,41 +919,22 @@ local function parse_target_q(args)
     return tonumber(qq)
 end
 
---- 豁免时自动解除禁言：直接调用 ban_group_member(duration=0) 解除。
+--- 解除禁言：直接调用 ban_group_member(duration=0) 解除。
 --- 不依赖 get_group_member_info 的 shut_up_timestamp 判断——部分 OneBot
 --- 实现（如 NapCat 群成员缓存）该字段可能缺失/失效，导致漏判不调解禁。
 --- duration=0 为 OneBot11 规范解禁语义（0 表示取消禁言），对未禁言成员是无害 no-op。
 local function unmute_if_banned(group_id, user_id)
     local ok, err = jn.onebot11.ban_group_member(group_id, user_id, 0)
     if not ok then
-        jn.log.warn(string.format("[group_mgr] 豁免 %d 自动解禁失败（群 %d）: %s", user_id, group_id, tostring(err)))
+        jn.log.warn(string.format("[group_mgr] 解除 %d 禁言失败（群 %d）: %s", user_id, group_id, tostring(err)))
         return false
     end
-    jn.log.info(string.format("[group_mgr] 豁免 %d 时自动解除禁言（群 %d）", user_id, group_id))
+    jn.log.info(string.format("[group_mgr] 已解除 %d 禁言（群 %d）", user_id, group_id))
     return true
 end
 
-jn.command.register("豁免", function(args, event)
-    if event.message_type ~= "group" then
-        reply(event, "该命令仅限群聊使用哦～")
-        return true
-    end
-    if not is_group_admin(event) then
-        reply(event, pick(EXEMPT_TEMPLATES.denied))
-        return true
-    end
-    local qq = parse_target_q(args)
-    if not qq then
-        reply(event, pick(EXEMPT_TEMPLATES.usage))
-        return true
-    end
-    if EXEMPT[tostring(qq)] then
-        reply(event, pick(EXEMPT_TEMPLATES.already, qq))
-        return true
-    end
-
-    EXEMPT[tostring(qq)] = true
-    -- 清除该账号全部群的违规记录
+--- 清除指定 QQ 号全部群的违规记录，返回清除条数
+local function clear_violations(qq)
     local cleared = 0
     local suffix = ":" .. tostring(qq)
     for k in pairs(VIOL) do
@@ -961,35 +943,111 @@ jn.command.register("豁免", function(args, event)
             cleared = cleared + 1
         end
     end
+    return cleared
+end
+
+--- 解除禁言 + 清空违规记录并回复（/豁免 与 /白名单 共用）
+local function unmute_and_clear(event, qq, msg)
+    local cleared = clear_violations(qq)
     save_config()
 
-    -- 豁免时若用户处于禁言状态自动解除禁言
     local unmuted = unmute_if_banned(event.group_id, qq)
-
-    local msg = pick(EXEMPT_TEMPLATES.ok, qq)
     if unmuted then
         msg = msg .. "另外 TA 之前被禁言，已顺手解除咯～"
     end
     reply(event, msg)
-    jn.log.info(string.format("[group_mgr] %d 豁免了 %d（清除违规 %d 条，解除禁言 %s）", event.user_id, qq, cleared, tostring(unmuted)))
+    return cleared, unmuted
+end
+
+jn.command.register("豁免", function(args, event)
+    if event.message_type ~= "group" then
+        reply(event, "该命令仅限群聊使用哦～")
+        return true
+    end
+    if not is_group_admin(event) then
+        reply(event, pick(PARDON_TEMPLATES.denied))
+        return true
+    end
+    local qq = parse_target_q(args)
+    if not qq then
+        reply(event, pick(PARDON_TEMPLATES.usage))
+        return true
+    end
+
+    local tpl = PARDON_TEMPLATES.ok
+    if is_exempt(qq) then tpl = PARDON_TEMPLATES.whitelisted end
+    local cleared, unmuted = unmute_and_clear(event, qq, pick(tpl, qq))
+    jn.log.info(string.format("[group_mgr] %d 豁免了 %d（清除违规 %d 条，解除禁言 %s，未加入白名单）", event.user_id, qq, cleared, tostring(unmuted)))
     return true
 end, {
-    description = "豁免某用户：不再检测、清除违规记录，若被禁言自动解除（管理员）",
+    description = "豁免某用户：解除禁言并清空违规记录（不加入白名单，管理员）",
     usage = "/豁免 QQ号 或 /豁免 @某人",
 })
 
 -- ====================================================================
--- 命令: /解除豁免（/取消豁免）—— 管理员从豁免清单移除某用户，恢复检测
+-- 命令: /白名单 —— 管理员将某用户加入白名单（不再检测），
+-- 同时解除禁言、清除违规记录
+-- ====================================================================
+
+-- /白名单 话术（多套随机）
+local WHITELIST_TEMPLATES = {
+    ok = {
+        "好啦，%d 已经被卷娘记到白名单小本本上啦，违规记录也清空咯～",
+        "收到！%d 已加入白名单，以后可以放心发言，卷娘不会管 TA 啦，违规记录已清空～",
+        "%d 获得免死金牌一枚！卷娘已将 TA 加入白名单，并清空了违规记录哦～",
+    },
+    denied = {
+        "只有管理员才能用白名单哦～",
+        "白名单是管理员的专属技能啦，你不行哦～",
+    },
+    usage = {
+        "用法：/白名单 QQ号 或 /白名单 @某人 哦～",
+    },
+    already = {
+        "%d 早就在卷娘的白名单里啦～",
+    },
+}
+
+jn.command.register("白名单", function(args, event)
+    if event.message_type ~= "group" then
+        reply(event, "该命令仅限群聊使用哦～")
+        return true
+    end
+    if not is_group_admin(event) then
+        reply(event, pick(WHITELIST_TEMPLATES.denied))
+        return true
+    end
+    local qq = parse_target_q(args)
+    if not qq then
+        reply(event, pick(WHITELIST_TEMPLATES.usage))
+        return true
+    end
+    if EXEMPT[tostring(qq)] then
+        reply(event, pick(WHITELIST_TEMPLATES.already, qq))
+        return true
+    end
+
+    EXEMPT[tostring(qq)] = true
+    local cleared, unmuted = unmute_and_clear(event, qq, pick(WHITELIST_TEMPLATES.ok, qq))
+    jn.log.info(string.format("[group_mgr] %d 将 %d 加入白名单（清除违规 %d 条，解除禁言 %s）", event.user_id, qq, cleared, tostring(unmuted)))
+    return true
+end, {
+    description = "将某用户加入白名单：不再检测、清除违规记录，若被禁言自动解除（管理员）",
+    usage = "/白名单 QQ号 或 /白名单 @某人",
+})
+
+-- ====================================================================
+-- 命令: /解除豁免（/取消豁免）—— 管理员从白名单移除某用户，恢复检测
 -- ====================================================================
 
 local UNEXEMPT_TEMPLATES = {
     ok = {
-        "好啦，%d 的豁免已解除，回归正常检测咯～",
-        "收到！%d 已从豁免清单移除，之后会正常检测啦～",
-        "免死金牌收回！%d 解除豁免，卷娘继续盯着 TA 哦～",
+        "好啦，%d 已移出白名单，回归正常检测咯～",
+        "收到！%d 已从白名单移除，之后会正常检测啦～",
+        "免死金牌收回！%d 移出白名单，卷娘继续盯着 TA 哦～",
     },
     not_found = {
-        "%d 本来就不在豁免清单里啦～",
+        "%d 本来就不在白名单里啦～",
     },
     usage = {
         "用法：/解除豁免 QQ号 或 /解除豁免 @某人 哦～",
@@ -1003,7 +1061,7 @@ local function register_unexempt(path)
             return true
         end
         if not is_group_admin(event) then
-            reply(event, pick(EXEMPT_TEMPLATES.denied))
+            reply(event, pick(PARDON_TEMPLATES.denied))
             return true
         end
         local qq = parse_target_q(args)
@@ -1015,13 +1073,13 @@ local function register_unexempt(path)
             EXEMPT[tostring(qq)] = nil
             save_config()
             reply(event, pick(UNEXEMPT_TEMPLATES.ok, qq))
-            jn.log.info(string.format("[group_mgr] %d 解除了 %d 的豁免", event.user_id, qq))
+            jn.log.info(string.format("[group_mgr] %d 将 %d 移出白名单", event.user_id, qq))
         else
             reply(event, pick(UNEXEMPT_TEMPLATES.not_found, qq))
         end
         return true
     end, {
-        description = "解除豁免某用户：从豁免清单移除，恢复检测（管理员）",
+        description = "解除豁免某用户：从白名单移除，恢复检测（管理员）",
         usage = "/解除豁免 QQ号 或 /解除豁免 @某人",
     })
 end
