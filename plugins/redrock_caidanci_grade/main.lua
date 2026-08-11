@@ -121,7 +121,7 @@ load_wordlists()
 -- 常量（可在 Web 面板配置中调整）
 -- ====================================================================
 local DEFAULT_DIFF = ALIASES[tostring(jn.config.get("default_difficulty") or "四级"):lower()] or "cet4"
-local MIN_LENGTH = 4
+local MIN_LENGTH = 3
 local MAX_LENGTH = tonumber(jn.config.get("max_length")) or 10
 local DEFAULT_LEN_MIN = tonumber(jn.config.get("default_length_min")) or 4
 local DEFAULT_LEN_MAX = tonumber(jn.config.get("default_length_max")) or 6
@@ -237,7 +237,8 @@ local function compare_guess(guess, target)
 end
 
 --- 获取第 N 次猜测的鼓励语
-local function get_encouragement(attempt_num, max_attempts, feedback)
+---@param hint_used boolean 本局提示是否已用（已用则不再引导 /提示）
+local function get_encouragement(attempt_num, max_attempts, feedback, hint_used)
     local green_count = 0
     for _ in string.gmatch(feedback, "G") do
         green_count = green_count + 1
@@ -255,6 +256,9 @@ local function get_encouragement(attempt_num, max_attempts, feedback)
     if remaining <= 1 then
         return "最后一次机会啦！卷娘相信你一定能猜出来✨"
     elseif remaining <= 2 then
+        if hint_used then
+            return "还有" .. remaining .. "次机会，加油～"
+        end
         return "还有" .. remaining .. "次机会，用 /提示 获取帮助哦～"
     else
         local encouragements = {
@@ -303,6 +307,60 @@ local POS_NAMES = {
     abbr = "缩写",
 }
 
+--- 取释义行中的第一个中文意思（按 ASCII / 全角逗号分号切分，字节级扫描）
+---
+--- 注意：不能用 Lua 字符类写 `[^,;，；]+` 来切分——Lua 模式按「字节」匹配，
+--- 全角 `，；` 的 UTF-8 字节（EF BC 8C / EF BC 9B）会混进排除集合，导致任何
+--- 多字节编码中含有 0xBC/0x8C/0x9B/0xEF 的汉字被拦腰截断，产出半个汉字
+--- （如 `伤`=E4 BC A4 含 0xBC，会被切成「悲\xE4」这类非法 UTF-8 乱码）。
+--- 这里改为逐字节扫描，只在真正的分隔符处切断。
+---@param rest string 词性行内容（如 "悲伤的, 痛的, 引起痛苦的"）
+---@return string 首个释义（可能为空串，表示 rest 以分隔符开头）
+local function first_meaning(rest)
+    local len = #rest
+    for i = 1, len do
+        local b = string.byte(rest, i)
+        if b == 0x2C or b == 0x3B then -- ASCII , ;
+            return rest:sub(1, i - 1)
+        end
+        if b == 0xEF and i + 2 <= len then -- 全角 ，(EF BC 8C) / ；(EF BC 9B)
+            local b2 = string.byte(rest, i + 1)
+            local b3 = string.byte(rest, i + 2)
+            if (b2 == 0xBC and (b3 == 0x8C or b3 == 0x9B)) then
+                return rest:sub(1, i - 1)
+            end
+        end
+    end
+    return rest
+end
+
+--- 丢弃字符串尾部不完整的 UTF-8 序列（防御脏词库数据，避免发出半个汉字）。
+--- 完整序列（含 ASCII 结尾）原样保留；只处理「起始字节声明长度超出实际」的截断。
+---@param s string
+---@return string
+local function truncate_tail_utf8(s)
+    local len = #s
+    local cont = 0 -- 从尾部起连续的后续字节数
+    while len > 0 do
+        local b = string.byte(s, len)
+        if b < 0x80 then
+            return s:sub(1, len) -- ASCII 字符收尾，之前序列必然完整
+        elseif b >= 0xC0 then
+            local need -- 该起始字节应携带的后续字节数
+            if b < 0xE0 then need = 1
+            elseif b < 0xF0 then need = 2
+            else need = 3 end
+            if cont >= need then
+                return s:sub(1, len + need) -- 序列完整，保留
+            end
+            return s:sub(1, len - 1) -- 尾部序列不完整，去掉起始字节
+        end
+        cont = cont + 1
+        len = len - 1
+    end
+    return ""
+end
+
 --- 从释义中随机取一个「词性 + 单个中文意思」；无可用词性行返回 nil
 local function pick_pos_meaning(word)
     local t = word_trans[word]
@@ -316,11 +374,11 @@ local function pick_pos_meaning(word)
     end
     if #pos_lines == 0 then return nil end
     local pick = pos_lines[math.random(#pos_lines)]
-    local meaning = pick.rest:match("^[^,;，；]+")
-    if meaning then
-        meaning = meaning:gsub("^%s+", ""):gsub("%s+$", "")
-    else
-        meaning = pick.rest
+    local meaning = truncate_tail_utf8(first_meaning(pick.rest))
+    meaning = meaning:gsub("^%s+", ""):gsub("%s+$", "")
+    if meaning == "" then
+        -- rest 以分隔符开头时回退为整行释义
+        meaning = truncate_tail_utf8(pick.rest):gsub("^%s+", ""):gsub("%s+$", "")
     end
     return POS_NAMES[pick.pos] or pick.pos, meaning
 end
@@ -431,18 +489,10 @@ local function tile_class(state)
 end
 
 --- 生成棋盘逐行 HTML（max_attempts 行 × length 列）
---- 提示只作用于最近一次尝试所在行；尚无尝试时落在第 1 行
+--- 提示（词性/字母）只发文字，不渲染进棋盘
 local function build_rows_html(game)
     local n = game.length
     local parts = {}
-    local hint_row = #game.attempts
-    local hint_positions = {}
-    for _, h in ipairs(game.hints or {}) do
-        hint_positions[h.pos] = h.letter
-    end
-    if hint_row == 0 and game.hints and #game.hints > 0 then
-        hint_row = 1
-    end
     -- 当前轮次：最近一次输入的那一行（开局尚无输入时高亮第 1 行）
     local current_row = #game.attempts
     if current_row == 0 then current_row = 1 end
@@ -452,10 +502,7 @@ local function build_rows_html(game)
         for i = 1, n do
             local cls
             local content = ""
-            if r == hint_row and hint_positions[i] then
-                cls = "tile hint"
-                content = string.upper(hint_positions[i])
-            elseif att then
+            if att then
                 cls = "tile " .. tile_class(string.sub(att.states, i, i))
                 content = string.upper(string.sub(att.guess, i, i))
             else
@@ -469,18 +516,12 @@ local function build_rows_html(game)
     return table.concat(parts, "")
 end
 
---- 棋盘状态缓存 key（与群无关，相同局面共享渲染）
+--- 棋盘状态缓存 key（与群无关，相同局面共享渲染；提示只发文字，不影响棋盘）
 local function board_cache_key(game)
     local parts = { tostring(game.length), tostring(#game.attempts) }
     for _, att in ipairs(game.attempts) do
         parts[#parts + 1] = att.guess .. ":" .. att.states
     end
-    local hints = {}
-    for _, h in ipairs(game.hints or {}) do
-        hints[#hints + 1] = h.pos .. h.letter
-    end
-    table.sort(hints)
-    parts[#parts + 1] = table.concat(hints, ",")
     return "board:" .. table.concat(parts, "|")
 end
 
@@ -651,7 +692,6 @@ jn.command.register("猜单词", function(args, event)
         "单词长度：" .. length .. " 个字母",
         "最多 " .. MAX_ATTEMPTS .. " 次机会",
         "本局只能提示一次，请谨慎使用～",
-        "",
     }
     -- 开局给出一张空白棋盘（全部为空表格）；T2I 不可用/渲染失败时降级为下划线占位
     local board_url = nil
@@ -666,7 +706,9 @@ jn.command.register("猜单词", function(args, event)
         lines[#lines + 1] = table.concat(placeholders, " ")
         lines[#lines + 1] = ""
     end
-    lines[#lines + 1] = "发送 /提示 获取帮助 ｜ /结束 退出游戏"
+    lines[#lines + 1] = "发送 /提示 获取帮助"
+    lines[#lines + 1] = "/结束 退出游戏"
+    lines[#lines + 1] = "发送 /怎么猜单词 了解如何指定难度和长度"
 
     local segments = { { type = "text", data = { text = table.concat(lines, "\n") } } }
     if board_url then
@@ -694,7 +736,7 @@ local HOW_TO_PLAY = table.concat({
     "",
     "开始一局：/猜单词（默认四级，长度 " .. DEFAULT_LEN_MIN .. "-" .. DEFAULT_LEN_MAX .. " 随机）",
     "指定难度：/猜单词 六级（高考/四级/六级/考研/雅思/托福/GRE）",
-    "指定长度：/猜单词 6（4～" .. MAX_LENGTH .. " 个字母）",
+    "指定长度：/猜单词 6（" .. MIN_LENGTH .. "～" .. MAX_LENGTH .. " 个字母）",
     "同时指定：/猜单词 六级 6（顺序任意）",
     "",
     "/提示 每局仅一次：揭示一个字母或给出词性与中文意思，/结束 查看答案。",
@@ -778,8 +820,9 @@ jn.command.register("提示", function(args, event)
     game.hints[#game.hints + 1] = { pos = pos, letter = letter }
     save_game(group_id, game)
 
-    local text = "💡 提示：第 " .. pos .. " 位是 " .. string.upper(letter)
-    reply_with_board(event, text, game)
+    -- 字母提示只发文字：渲染进棋盘会随轮次移动到最近一行，与猜测字母混淆，
+    -- 用户无法判断单词中该字母的真实数量（如两个 T 时只提示出一个 T）
+    reply(event, "💡 提示：第 " .. pos .. " 位是 " .. string.upper(letter))
     return true
 end, {
     description = "查看当前猜单词游戏的提示",
@@ -877,18 +920,24 @@ jn.command.register("猜", function(args, event)
     if #game.attempts >= game.max_attempts then
         game.status = "lost"
         save_game(group_id, game)
-        reply_with_board(event, get_defeat_msg(game.word), game)
+        reply_with_board(event, append_meaning(get_defeat_msg(game.word), game.word), game)
         return true
     end
 
     -- 还没结束
     save_game(group_id, game)
 
-    local encouragement = get_encouragement(attempt_num, game.max_attempts, states)
+    -- 提示已用（词性/意思或字母揭示）后不再引导 /提示
+    local hint_used = game.hint_used or (game.hints and #game.hints >= 1)
+    local encouragement = get_encouragement(attempt_num, game.max_attempts, states, hint_used)
     local remaining = game.max_attempts - #game.attempts
     local lines = { encouragement }
     if remaining <= 3 then
-        lines[#lines + 1] = "（剩余 " .. remaining .. " 次，发送 /提示 获取帮助）"
+        if hint_used then
+            lines[#lines + 1] = "（剩余 " .. remaining .. " 次）"
+        else
+            lines[#lines + 1] = "（剩余 " .. remaining .. " 次，发送 /提示 获取帮助）"
+        end
     end
     reply_with_board(event, table.concat(lines, "\n"), game)
     return true
