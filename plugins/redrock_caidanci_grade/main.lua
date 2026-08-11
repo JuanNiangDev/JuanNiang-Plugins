@@ -121,7 +121,7 @@ load_wordlists()
 -- 常量（可在 Web 面板配置中调整）
 -- ====================================================================
 local DEFAULT_DIFF = ALIASES[tostring(jn.config.get("default_difficulty") or "四级"):lower()] or "cet4"
-local MIN_LENGTH = 4
+local MIN_LENGTH = 3
 local MAX_LENGTH = tonumber(jn.config.get("max_length")) or 10
 local DEFAULT_LEN_MIN = tonumber(jn.config.get("default_length_min")) or 4
 local DEFAULT_LEN_MAX = tonumber(jn.config.get("default_length_max")) or 6
@@ -736,7 +736,7 @@ local HOW_TO_PLAY = table.concat({
     "",
     "开始一局：/猜单词（默认四级，长度 " .. DEFAULT_LEN_MIN .. "-" .. DEFAULT_LEN_MAX .. " 随机）",
     "指定难度：/猜单词 六级（高考/四级/六级/考研/雅思/托福/GRE）",
-    "指定长度：/猜单词 6（4～" .. MAX_LENGTH .. " 个字母）",
+    "指定长度：/猜单词 6（" .. MIN_LENGTH .. "～" .. MAX_LENGTH .. " 个字母）",
     "同时指定：/猜单词 六级 6（顺序任意）",
     "",
     "/提示 每局仅一次：揭示一个字母或给出词性与中文意思，/结束 查看答案。",
