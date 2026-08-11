@@ -8,5 +8,6 @@ permissions:
   - database
   - file
   - llm
+  - timer
 system: false
 enabled: true

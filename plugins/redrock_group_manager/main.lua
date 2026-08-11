@@ -432,7 +432,34 @@ local function is_admin(event)
     return false
 end
 
---- 私聊通知所有管理员
+--- 私聊通知所有管理员（异步入队，逐条随机延迟发送，避免同时群发触发风控）
+--- 用 jn.timer.after 做异步延时（需要 timer 权限），不阻塞事件派发与其它插件；
+--- 到点后引擎回调 on_timer_response，发送下一条并调度再下一条。
+local notify_queue = {}     -- 待发送通知 {qq, msg}
+local notify_running = false
+
+local NOTIFY_DELAY_MIN = 5   -- 相邻两条通知最小间隔（秒）
+local NOTIFY_DELAY_MAX = 30  -- 相邻两条通知最大间隔（秒）
+
+--- 发送队列头部一条；若仍有剩余，安排随机延迟后继续（异步，不阻塞）
+local function notify_pump()
+    if #notify_queue == 0 then
+        notify_running = false
+        return
+    end
+    local item = table.remove(notify_queue, 1)
+    jn.onebot11.send_private_msg(item.qq, item.msg)
+    if #notify_queue > 0 then
+        local delay = math.random(NOTIFY_DELAY_MIN, NOTIFY_DELAY_MAX)
+        -- 提交失败（返回 0 或 jn.timer 不可用）时停止本轮，避免队列空转
+        local ok = (jn.timer and jn.timer.after(delay, { pump = true })) or 0
+        if ok == 0 then notify_running = false end
+    else
+        notify_running = false
+    end
+end
+
+--- 私聊通知所有管理员（异步入队，逐条随机延迟发送）
 local function notify_admins(event, text)
     if not event.admins then return end
     local group_id = event.group_id
@@ -440,8 +467,22 @@ local function notify_admins(event, text)
     local group_name = group_info and group_info.group_name or tostring(group_id)
     local msg = "【群管理通知】\n群: " .. group_name .. "\n" .. text
     for _, qq in ipairs(event.admins) do
-        jn.onebot11.send_private_msg(tonumber(qq), msg)
+        notify_queue[#notify_queue + 1] = { qq = tonumber(qq), msg = msg }
     end
+    if not notify_running then
+        notify_running = true
+        notify_pump()
+    end
+end
+
+-- 引擎异步定时回调：jn.timer.after 到点后派发（异步注册表 kind "timer"）
+function on_timer_response(req_id, ctx, result, err)
+    if not ctx or not ctx.pump then return end
+    if err and err ~= "" then
+        notify_running = false
+        return
+    end
+    notify_pump()
 end
 
 --- 撤回消息
@@ -768,13 +809,13 @@ local function llm_review_message(event, word, kind)
         return "nollm"
     end
     -- 记录上下文，on_chat_response 收到结果后按 req_id 取回
-    llm_ctx[rid] = { group_id = event.group_id, user_id = event.user_id, message_id = mid, word = word, pk = pk, kind = kind }
+    llm_ctx[rid] = { group_id = event.group_id, user_id = event.user_id, message_id = mid, word = word, pk = pk, kind = kind, admins = event.admins }
     return "ok"
 end
 
---- 构建回调事件（复用 ctx 中的群/用户/消息，供复查与处罚使用）
+--- 构建回调事件（复用 ctx 中的群/用户/消息/管理员，供复查与处罚使用）
 local function ctx_event(ctx)
-    local event = { group_id = ctx.group_id, user_id = ctx.user_id, message_type = "group" }
+    local event = { group_id = ctx.group_id, user_id = ctx.user_id, message_type = "group", admins = ctx.admins }
     if ctx.message_id ~= "" then event.message_id = ctx.message_id end
     return event
 end
