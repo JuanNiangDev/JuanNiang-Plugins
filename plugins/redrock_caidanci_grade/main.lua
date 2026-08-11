@@ -237,7 +237,8 @@ local function compare_guess(guess, target)
 end
 
 --- 获取第 N 次猜测的鼓励语
-local function get_encouragement(attempt_num, max_attempts, feedback)
+---@param hint_used boolean 本局提示是否已用（已用则不再引导 /提示）
+local function get_encouragement(attempt_num, max_attempts, feedback, hint_used)
     local green_count = 0
     for _ in string.gmatch(feedback, "G") do
         green_count = green_count + 1
@@ -255,6 +256,9 @@ local function get_encouragement(attempt_num, max_attempts, feedback)
     if remaining <= 1 then
         return "最后一次机会啦！卷娘相信你一定能猜出来✨"
     elseif remaining <= 2 then
+        if hint_used then
+            return "还有" .. remaining .. "次机会，加油～"
+        end
         return "还有" .. remaining .. "次机会，用 /提示 获取帮助哦～"
     else
         local encouragements = {
@@ -938,11 +942,17 @@ jn.command.register("猜", function(args, event)
     -- 还没结束
     save_game(group_id, game)
 
-    local encouragement = get_encouragement(attempt_num, game.max_attempts, states)
+    -- 提示已用（词性/意思或字母揭示）后不再引导 /提示
+    local hint_used = game.hint_used or (game.hints and #game.hints >= 1)
+    local encouragement = get_encouragement(attempt_num, game.max_attempts, states, hint_used)
     local remaining = game.max_attempts - #game.attempts
     local lines = { encouragement }
     if remaining <= 3 then
-        lines[#lines + 1] = "（剩余 " .. remaining .. " 次，发送 /提示 获取帮助）"
+        if hint_used then
+            lines[#lines + 1] = "（剩余 " .. remaining .. " 次）"
+        else
+            lines[#lines + 1] = "（剩余 " .. remaining .. " 次，发送 /提示 获取帮助）"
+        end
     end
     reply_with_board(event, table.concat(lines, "\n"), game)
     return true
