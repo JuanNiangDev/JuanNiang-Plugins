@@ -489,18 +489,10 @@ local function tile_class(state)
 end
 
 --- 生成棋盘逐行 HTML（max_attempts 行 × length 列）
---- 提示只作用于最近一次尝试所在行；尚无尝试时落在第 1 行
+--- 提示（词性/字母）只发文字，不渲染进棋盘
 local function build_rows_html(game)
     local n = game.length
     local parts = {}
-    local hint_row = #game.attempts
-    local hint_positions = {}
-    for _, h in ipairs(game.hints or {}) do
-        hint_positions[h.pos] = h.letter
-    end
-    if hint_row == 0 and game.hints and #game.hints > 0 then
-        hint_row = 1
-    end
     -- 当前轮次：最近一次输入的那一行（开局尚无输入时高亮第 1 行）
     local current_row = #game.attempts
     if current_row == 0 then current_row = 1 end
@@ -510,10 +502,7 @@ local function build_rows_html(game)
         for i = 1, n do
             local cls
             local content = ""
-            if r == hint_row and hint_positions[i] then
-                cls = "tile hint"
-                content = string.upper(hint_positions[i])
-            elseif att then
+            if att then
                 cls = "tile " .. tile_class(string.sub(att.states, i, i))
                 content = string.upper(string.sub(att.guess, i, i))
             else
@@ -527,18 +516,12 @@ local function build_rows_html(game)
     return table.concat(parts, "")
 end
 
---- 棋盘状态缓存 key（与群无关，相同局面共享渲染）
+--- 棋盘状态缓存 key（与群无关，相同局面共享渲染；提示只发文字，不影响棋盘）
 local function board_cache_key(game)
     local parts = { tostring(game.length), tostring(#game.attempts) }
     for _, att in ipairs(game.attempts) do
         parts[#parts + 1] = att.guess .. ":" .. att.states
     end
-    local hints = {}
-    for _, h in ipairs(game.hints or {}) do
-        hints[#hints + 1] = h.pos .. h.letter
-    end
-    table.sort(hints)
-    parts[#parts + 1] = table.concat(hints, ",")
     return "board:" .. table.concat(parts, "|")
 end
 
@@ -836,8 +819,9 @@ jn.command.register("提示", function(args, event)
     game.hints[#game.hints + 1] = { pos = pos, letter = letter }
     save_game(group_id, game)
 
-    local text = "💡 提示：第 " .. pos .. " 位是 " .. string.upper(letter)
-    reply_with_board(event, text, game)
+    -- 字母提示只发文字：渲染进棋盘会随轮次移动到最近一行，与猜测字母混淆，
+    -- 用户无法判断单词中该字母的真实数量（如两个 T 时只提示出一个 T）
+    reply(event, "💡 提示：第 " .. pos .. " 位是 " .. string.upper(letter))
     return true
 end, {
     description = "查看当前猜单词游戏的提示",
