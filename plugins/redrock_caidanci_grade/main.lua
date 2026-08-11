@@ -303,6 +303,60 @@ local POS_NAMES = {
     abbr = "缩写",
 }
 
+--- 取释义行中的第一个中文意思（按 ASCII / 全角逗号分号切分，字节级扫描）
+---
+--- 注意：不能用 Lua 字符类写 `[^,;，；]+` 来切分——Lua 模式按「字节」匹配，
+--- 全角 `，；` 的 UTF-8 字节（EF BC 8C / EF BC 9B）会混进排除集合，导致任何
+--- 多字节编码中含有 0xBC/0x8C/0x9B/0xEF 的汉字被拦腰截断，产出半个汉字
+--- （如 `伤`=E4 BC A4 含 0xBC，会被切成「悲\xE4」这类非法 UTF-8 乱码）。
+--- 这里改为逐字节扫描，只在真正的分隔符处切断。
+---@param rest string 词性行内容（如 "悲伤的, 痛的, 引起痛苦的"）
+---@return string 首个释义（可能为空串，表示 rest 以分隔符开头）
+local function first_meaning(rest)
+    local len = #rest
+    for i = 1, len do
+        local b = string.byte(rest, i)
+        if b == 0x2C or b == 0x3B then -- ASCII , ;
+            return rest:sub(1, i - 1)
+        end
+        if b == 0xEF and i + 2 <= len then -- 全角 ，(EF BC 8C) / ；(EF BC 9B)
+            local b2 = string.byte(rest, i + 1)
+            local b3 = string.byte(rest, i + 2)
+            if (b2 == 0xBC and (b3 == 0x8C or b3 == 0x9B)) then
+                return rest:sub(1, i - 1)
+            end
+        end
+    end
+    return rest
+end
+
+--- 丢弃字符串尾部不完整的 UTF-8 序列（防御脏词库数据，避免发出半个汉字）。
+--- 完整序列（含 ASCII 结尾）原样保留；只处理「起始字节声明长度超出实际」的截断。
+---@param s string
+---@return string
+local function truncate_tail_utf8(s)
+    local len = #s
+    local cont = 0 -- 从尾部起连续的后续字节数
+    while len > 0 do
+        local b = string.byte(s, len)
+        if b < 0x80 then
+            return s:sub(1, len) -- ASCII 字符收尾，之前序列必然完整
+        elseif b >= 0xC0 then
+            local need -- 该起始字节应携带的后续字节数
+            if b < 0xE0 then need = 1
+            elseif b < 0xF0 then need = 2
+            else need = 3 end
+            if cont >= need then
+                return s:sub(1, len + need) -- 序列完整，保留
+            end
+            return s:sub(1, len - 1) -- 尾部序列不完整，去掉起始字节
+        end
+        cont = cont + 1
+        len = len - 1
+    end
+    return ""
+end
+
 --- 从释义中随机取一个「词性 + 单个中文意思」；无可用词性行返回 nil
 local function pick_pos_meaning(word)
     local t = word_trans[word]
@@ -316,11 +370,11 @@ local function pick_pos_meaning(word)
     end
     if #pos_lines == 0 then return nil end
     local pick = pos_lines[math.random(#pos_lines)]
-    local meaning = pick.rest:match("^[^,;，；]+")
-    if meaning then
-        meaning = meaning:gsub("^%s+", ""):gsub("%s+$", "")
-    else
-        meaning = pick.rest
+    local meaning = truncate_tail_utf8(first_meaning(pick.rest))
+    meaning = meaning:gsub("^%s+", ""):gsub("%s+$", "")
+    if meaning == "" then
+        -- rest 以分隔符开头时回退为整行释义
+        meaning = truncate_tail_utf8(pick.rest):gsub("^%s+", ""):gsub("%s+$", "")
     end
     return POS_NAMES[pick.pos] or pick.pos, meaning
 end
