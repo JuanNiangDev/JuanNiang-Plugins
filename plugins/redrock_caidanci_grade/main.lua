@@ -919,7 +919,7 @@ jn.command.register("猜", function(args, event)
     if #game.attempts >= game.max_attempts then
         game.status = "lost"
         save_game(group_id, game)
-        reply_with_board(event, get_defeat_msg(game.word), game)
+        reply_with_board(event, append_meaning(get_defeat_msg(game.word), game.word), game)
         return true
     end
 
