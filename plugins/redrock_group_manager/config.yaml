@@ -49,14 +49,14 @@ configs:
 
   - key: llm_review_enabled
     type: bool
-    label: 灰色地带LLM审查
-    description: 命中灰色词（校园卡/考研/群名片/加群等）时送 LLM 审查；关闭则灰色词直接放行
+    label: 关键词AI审查
+    description: 命中关键词后送 LLM 复核（敏感/黑名单高危词带倾向提示防误触，灰色词常规审查）；关闭则敏感/黑名单词直接处罚、灰色词直接放行
     default: true
 
   - key: exempt_users
     type: list
-    label: 豁免 QQ 列表
-    description: 被豁免的 QQ 号不参与任何违规检测（/豁免 可添加，面板可增删）
+    label: 白名单 QQ 列表
+    description: 加入白名单的 QQ 号不参与任何违规检测（/白名单 可添加，面板可增删）
     default: []
 
   - key: admin_users

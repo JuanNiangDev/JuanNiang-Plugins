@@ -44,7 +44,10 @@ local WORD_FILES = {
 }
 
 --- 加载单个词库文件并入目标数组：去空白/去注释 → 小写 → 跨文件去重
---- 纯 ASCII 且短于 3 字符的 token（如 "av"）丢弃，防止误命中 "have/save" 等正常单词
+--- 纯 ASCII 且短于 3 字符的 token（如 "av"）丢弃，防止误命中 "have/save" 等正常单词；
+--- SHORT_ASCII_ALLOW 中显式列出的短词（如 "sb"）保留（灰色辱骂词审查用）
+local SHORT_ASCII_ALLOW = { ["sb"] = true }
+
 local function load_word_file(path, words, seen)
     local lines, err = jn.file.read_lines(path)
     if not lines then
@@ -55,7 +58,7 @@ local function load_word_file(path, words, seen)
     for _, line in ipairs(lines) do
         local w = line:gsub("^%s+", ""):gsub("%s+$", ""):lower()
         if w ~= "" and w:sub(1, 1) ~= "#" and not seen[w] then
-            if not (w:match("^[a-z0-9]+$") and #w < 3) then
+            if not (w:match("^[a-z0-9]+$") and #w < 3) or SHORT_ASCII_ALLOW[w] then
                 seen[w] = true
                 n = n + 1
                 words[#words + 1] = w
@@ -98,11 +101,13 @@ subtract_black()
 local VIOLATION_MUTE = tonumber(jn.config.get("violation_mute_seconds")) or 1800
 
 -- ====================================================================
--- 灰色地带 LLM 审查（复用 Bot 自身 LLM Provider 配置，jn.llm 接口）
--- 命中灰色词（校园卡/考研/群名片/加群等）→ llm.chat_async 异步审查，
--- 不阻塞事件循环与其它插件；LLM 返回 JSON
+-- 关键词 AI 审查（复用 Bot 自身 LLM Provider 配置，jn.llm 接口）
+-- 两级制度均引入 LLM 复核：
+--   灰色地带（校园卡/考研/群名片/加群等）→ 常规审查，violation != none 时按三级惩罚处理
+--   敏感/黑名单高危词 → 带倾向的复核提示词（防关键词误触，如 插入U盘/一台独立主机），
+--                        LLM 确认违规后处罚；LLM 不可用/异常时退回关键词直接处罚
+-- 均异步调用 llm.chat_async，不阻塞事件循环与其它插件；LLM 返回 JSON
 --   {"violation": "ad"|"sensitive"|"none", "reason": "..."}
--- violation != none 时按三级惩罚处理，否则放行。
 -- ====================================================================
 local LLM_REVIEW_ENABLED = jn.config.get("llm_review_enabled")
 if LLM_REVIEW_ENABLED == nil then LLM_REVIEW_ENABLED = true end
@@ -115,12 +120,11 @@ local llm_reviewed = {}         -- [message_id] = ts  消息去重
 local llm_ctx = {}              -- [req_id] = {group_id, user_id, message_id, word, pk} 异步结果上下文
 
 -- LLM 审查系统提示词：只输出 JSON
-local LLM_SYSTEM_PROMPT = [[
-你是一个 QQ 大学新生群（迎新群）的广告与敏感内容审查员。群内存在大量伪装成学校通知、勤工俭学、校园卡办理、学习资料分享的营销广告，需要你判断消息是否构成广告或敏感违规。
-
+-- 公共判定标准（灰色常规审查与敏感/黑名单高危复核共用）
+local LLM_CRITERIA = [[
 判断标准：
 1. 广告违规（ad）：包含明确的营销、引流、变现意图，例如推销办卡/套餐/流量卡、贷款/提额/套现、兼职/刷单/修图结算、寄宿自习室/考研考公机构、0元购/1折/送福利、以"学校通知/勤工实践/资料分享"为幌子拉人进群、留下微信号/QQ群号/二维码引流等。
-2. 敏感违规（sensitive）：色情、软色情/擦边、政治敏感、暴力、赌博、代孕/器官买卖等违法违禁内容。其中软色情/擦边是重点，指不出现露骨词但明显带性暗示、性挑逗、性化描述的内容，包括：
+2. 敏感违规（sensitive）：色情、软色情/擦边、政治敏感、暴力、赌博、辱骂/人身攻击/恶意诅咒（如"死妈""sb""傻逼"等侮辱性词汇）、代孕/器官买卖等违法违禁内容。其中软色情/擦边是重点，指不出现露骨词但明显带性暗示、性挑逗、性化描述的内容，包括：
    - 性暗示/性挑逗：评价他人"骚""欲""够味"等性吸引力词汇；"谁来当我主人""求调教"等性支配/角色扮演语境；"有没有单身的哥哥""处对象"等带性暗示的求偶/交友；描述"撩起来""对着镜头扭"等性化动作。
    - 疑似未成年内容（最高优先级）：将学生/校园语境（校服、初中/高中课堂、新生）与性暗示、性化、擦边内容关联（如"初中课堂撩校服扭""学生妹"），即使没有露骨词也必须判 sensitive。
    - 擦边平台/账号引流：推荐或引流到以擦边内容为主的平台账号、主页（如"快手/抖音/推特/X 上全是性感内容""就她的主页能打""第一骚"），或分享此类平台擦边视频/截图。
@@ -142,13 +146,33 @@ local LLM_SYSTEM_PROMPT = [[
 判定原则：
 - 只看消息本身是否构成违规。不要因为提及"校园卡""考研""兼职""加群"等灰色词就判违规，需结合上下文判断是否存在营销/引流意图。
 - 群名片、联系方式等中性信息单独出现不算违规。
-- 拿不准时倾向 none（宁放过，勿误杀），但明显的广告话术（含上述变体伪装）必须判 ad。
 - 变体识别只用于还原真实意图，不要因为出现"裙/板/薇"等单字或单个 emoji 就判违规；变体（含 emoji 替代）+ 营销词 + 引流动作（数字串、加联系方式）同时出现才是强违规信号。
 - 软色情从严：性暗示 + 学生/校园语境（校服、课堂、新生）必须判 sensitive；正常情感话题（"有没有对象""谈恋爱""处对象"单纯交友、宠物叫"主人"、普通"撩头发/撩人"玩笑）不算违规，需结合整体语境区分。
+- 判定倾向按审查类型由各自提示词头部给出（灰色常规审查倾向 none；敏感/黑名单高危复核倾向违规）。
 
 只输出 JSON，不要输出任何其它文字，格式：
 {"violation":"ad|sensitive|none","reason":"一句话说明判定理由"}
 ]]
+
+-- 灰色地带常规审查提示词：中性判定，拿不准倾向 none
+local LLM_SYSTEM_PROMPT = [[
+你是一个 QQ 大学新生群（迎新群）的广告与敏感内容审查员。群内存在大量伪装成学校通知、勤工俭学、校园卡办理、学习资料分享的营销广告，需要你判断消息是否构成广告或敏感违规。
+
+判定倾向（灰色词常规审查）：拿不准时倾向 none（宁放过，勿误杀），但明显的广告话术（含变体伪装）必须判 ad。
+
+]] .. LLM_CRITERIA
+
+-- 敏感/黑名单高危复核提示词：命中高危关键词，倾向违规，但须核实关键词是否误触
+local BLACK_LLM_SYSTEM_PROMPT = [[
+你是一个 QQ 大学新生群（迎新群）的广告与敏感内容审查员。这条消息命中了高危违规关键词，语义上极可能构成广告或敏感违规，需要你复核确认。
+
+重要（高危关键词复核规则）：
+- 命中关键词只是提示信号，请结合整句上下文语义核实，不要被关键词匹配误导。
+- 若关键词属于正常语境误触（例如"插入U盘"命中"插入"、"一台独立主机"命中"台独"等），消息本身无营销/引流/辱骂/违禁意图，判 none。
+- 若消息确实具备营销、引流、变现意图或辱骂、人身攻击、违禁内容，即使措辞看似正常也必须判 ad 或 sensitive。
+- 判定倾向（高危复核）：拿不准时倾向违规（ad 或 sensitive），除非能明确判定为关键词正常语境误触，才判 none。
+
+]] .. LLM_CRITERIA
 
 -- QQ 群聊推荐卡片：OneBot 11 json 消息段 data 中的 app 标识（计入广告违规）
 local QQ_CARD_APPS = {
@@ -211,10 +235,10 @@ local function incr_kv(key)
 end
 
 -- ====================================================================
--- 管理数据：豁免 / 手动管理员 / 违规记录（持久化于 config.yaml）
+-- 管理数据：白名单 / 手动管理员 / 违规记录（持久化于 config.yaml）
 -- 与 config.yaml 的 list 配置项双向同步：
 --   面板「配置」页可增删修改（保存后插件自动重载生效）
---   插件在 /豁免 或违规变更时写回 config.yaml（插件目录内，jn.file）
+--   插件在 /豁免 /白名单 或违规变更时写回 config.yaml（插件目录内，jn.file）
 -- 违规记录格式: "群号:QQ号:违规次数"（违规人及违规等级，面板可见可改）
 -- ====================================================================
 
@@ -226,13 +250,13 @@ local CONFIG_SCHEMA = {
     { key = "copy_threshold",          type = "string", label = "复读触发阈值",           description = "多少人连续发送相同消息判定为复读（默认 3）",                     def = "3" },
     { key = "enable_copy_check",       type = "bool",   label = "启用复读检测",           description = "是否启用 +1 复读检测",                                        def = true },
     { key = "violation_mute_seconds",  type = "string", label = "违规禁言时长(秒)",       description = "第二次违规时禁言时长，默认 1800（30 分钟）",                     def = "1800" },
-    { key = "llm_review_enabled",      type = "bool",   label = "灰色地带LLM审查",       description = "命中灰色词（校园卡/考研/群名片/加群等）时送 LLM 审查；关闭则灰色词直接放行", def = true },
-    { key = "exempt_users",            type = "list",   label = "豁免 QQ 列表",           description = "被豁免的 QQ 号不参与任何违规检测（/豁免 可添加，面板可增删）",   def = {} },
+    { key = "llm_review_enabled",      type = "bool",   label = "关键词AI审查",           description = "命中关键词后送 LLM 复核（敏感/黑名单高危词带倾向提示防误触，灰色词常规审查）；关闭则敏感/黑名单词直接处罚、灰色词直接放行", def = true },
+    { key = "exempt_users",            type = "list",   label = "白名单 QQ 列表",           description = "加入白名单的 QQ 号不参与任何违规检测（/白名单 可添加，面板可增删）", def = {} },
     { key = "admin_users",             type = "list",   label = "手动管理员 QQ 列表",     description = "群角色无法识别时手动指定的管理员账号（面板可增删）",               def = {} },
     { key = "violations",              type = "list",   label = "违规记录(群号:QQ:次数)", description = "违规人及违规等级，格式 群号:QQ号:次数；删除某行即重置该用户违规", def = {} },
 }
 
-local EXEMPT = {}  -- [qq] = true            豁免账号
+local EXEMPT = {}  -- [qq] = true            白名单账号（不参与任何检测）
 local ADMIN  = {}  -- [qq] = true            手动管理员账号
 local VIOL   = {}  -- ["群号:QQ"] = 次数      违规记录
 
@@ -281,7 +305,7 @@ local function save_config()
         "# ====================================================================",
         "# redrock_group_manager 插件配置",
         "# ====================================================================",
-        "# 本文件同时由插件维护（/豁免、违规记录变更时自动写回），",
+        "# 本文件同时由插件维护（/豁免、/白名单、违规记录变更时自动写回），",
         "# 也可在 Web 面板「插件 → 配置」页编辑，保存后自动重载生效。",
         "# ====================================================================",
         "",
@@ -361,7 +385,7 @@ end
 
 load_state()
 
---- 是否被豁免（豁免账号不参与任何检测）
+--- 是否在白名单（白名单账号不参与任何检测）
 local function is_exempt(user_id)
     return EXEMPT[tostring(user_id)] == true
 end
@@ -408,7 +432,34 @@ local function is_admin(event)
     return false
 end
 
---- 私聊通知所有管理员
+--- 私聊通知所有管理员（异步入队，逐条随机延迟发送，避免同时群发触发风控）
+--- 用 jn.timer.after 做异步延时（需要 timer 权限），不阻塞事件派发与其它插件；
+--- 到点后引擎回调 on_timer_response，发送下一条并调度再下一条。
+local notify_queue = {}     -- 待发送通知 {qq, msg}
+local notify_running = false
+
+local NOTIFY_DELAY_MIN = 5   -- 相邻两条通知最小间隔（秒）
+local NOTIFY_DELAY_MAX = 30  -- 相邻两条通知最大间隔（秒）
+
+--- 发送队列头部一条；若仍有剩余，安排随机延迟后继续（异步，不阻塞）
+local function notify_pump()
+    if #notify_queue == 0 then
+        notify_running = false
+        return
+    end
+    local item = table.remove(notify_queue, 1)
+    jn.onebot11.send_private_msg(item.qq, item.msg)
+    if #notify_queue > 0 then
+        local delay = math.random(NOTIFY_DELAY_MIN, NOTIFY_DELAY_MAX)
+        -- 提交失败（返回 0 或 jn.timer 不可用）时停止本轮，避免队列空转
+        local ok = (jn.timer and jn.timer.after(delay, { pump = true })) or 0
+        if ok == 0 then notify_running = false end
+    else
+        notify_running = false
+    end
+end
+
+--- 私聊通知所有管理员（异步入队，逐条随机延迟发送）
 local function notify_admins(event, text)
     if not event.admins then return end
     local group_id = event.group_id
@@ -416,8 +467,22 @@ local function notify_admins(event, text)
     local group_name = group_info and group_info.group_name or tostring(group_id)
     local msg = "【群管理通知】\n群: " .. group_name .. "\n" .. text
     for _, qq in ipairs(event.admins) do
-        jn.onebot11.send_private_msg(tonumber(qq), msg)
+        notify_queue[#notify_queue + 1] = { qq = tonumber(qq), msg = msg }
     end
+    if not notify_running then
+        notify_running = true
+        notify_pump()
+    end
+end
+
+-- 引擎异步定时回调：jn.timer.after 到点后派发（异步注册表 kind "timer"）
+function on_timer_response(req_id, ctx, result, err)
+    if not ctx or not ctx.pump then return end
+    if err and err ~= "" then
+        notify_running = false
+        return
+    end
+    notify_pump()
 end
 
 --- 撤回消息
@@ -463,7 +528,7 @@ local function is_group_recommend_card(raw)
     return false
 end
 
---- 判断是否为管理员/群主（违规处罚、豁免命令使用）：
+--- 判断是否为管理员/群主（违规处罚、白名单命令使用）：
 --- 系统/手动管理员直接放行；群角色可识别时 owner/admin 放行；
 --- 群角色无法识别时（get_group_member_info 失败）退回手动管理账号判断
 local function is_group_admin(event)
@@ -693,24 +758,32 @@ end
 -- 插件按 req_id 取回上下文，再按三级惩罚处理。审查耗时期间不阻塞
 -- 消息流程，也不消费消息（先放行，违规再追罚）。
 -- ====================================================================
-local function llm_review_message(event, word)
+--- 关键词 AI 审查（灰色常规 / 敏感 / 黑名单高危复核共用）
+--- 命中词 → llm.chat_async 异步提交审查并立即返回；LLM 返回 JSON
+--- {violation, reason} 后由引擎派发到插件入口 on_chat_response(req_id, content, err)
+--- 返回状态：
+---   "ok"    = 已提交，等待 LLM 裁决（on_chat_response 追罚/放行）
+---   "skip"  = 该用户有在途审查或同消息去重，无需重复提交
+---   "nollm" = 未启用或无可用 Provider/提交失败，未提交（高危词调用方应退回直接处罚）
+local function llm_review_message(event, word, kind)
+    kind = kind or "gray"
     if not LLM_REVIEW_ENABLED then
-        jn.log.info(string.format("[group_mgr] LLM 审查未启用，灰色词放行: user=%d 群=%d 词=%s", event.user_id, event.group_id, word))
-        return
+        jn.log.info(string.format("[group_mgr] LLM 审查未启用，关键词放行: user=%d 群=%d 词=%s", event.user_id, event.group_id, word))
+        return "nollm"
     end
     if not jn.llm or not jn.llm.available() then
-        jn.log.warn(string.format("[group_mgr] 无可用 LLM Provider，灰色词放行: user=%d 群=%d 词=%s", event.user_id, event.group_id, word))
-        return
+        jn.log.warn(string.format("[group_mgr] 无可用 LLM Provider，关键词放行: user=%d 群=%d 词=%s", event.user_id, event.group_id, word))
+        return "nollm"
     end
 
     -- 同一用户同一时刻只保留一个在途审查，避免刷屏打爆 LLM
     local pk = tostring(event.group_id) .. ":" .. tostring(event.user_id)
-    if llm_pending[pk] then return end
+    if llm_pending[pk] then return "skip" end
 
     -- 同一条消息不重复审查（内存去重 + 顺带清理过期条目）
     local mid = tostring(event.message_id or "")
     local now = now_ts()
-    if mid ~= "" and llm_reviewed[mid] and now - llm_reviewed[mid] < LLM_DEDUP_WINDOW then return end
+    if mid ~= "" and llm_reviewed[mid] and now - llm_reviewed[mid] < LLM_DEDUP_WINDOW then return "skip" end
     llm_pending[pk] = true
     if mid ~= "" then llm_reviewed[mid] = now end
     local expired = {}
@@ -719,20 +792,44 @@ local function llm_review_message(event, word)
     end
     for _, k in ipairs(expired) do llm_reviewed[k] = nil end
 
-    -- 剥离 CQ 码后截断送入 LLM
+    -- 剥离 CQ 码后截断送入 LLM；敏感/黑名单走带倾向的高危复核提示词
     local text = (event.raw_message or ""):gsub("%[CQ:[^%]]*%]", " "):gsub("%s+", " "):sub(1, LLM_MAX_TEXT)
+    local prompt, label = LLM_SYSTEM_PROMPT, "灰色词"
+    if kind ~= "gray" then
+        prompt, label = BLACK_LLM_SYSTEM_PROMPT, "高危关键词"
+    end
     local messages = {
-        { role = "system", content = LLM_SYSTEM_PROMPT },
-        { role = "user", content = "待审查群消息（命中灰色词：<" .. word .. ">）：\n" .. text },
+        { role = "system", content = prompt },
+        { role = "user", content = "待审查群消息（命中" .. label .. "：<" .. word .. ">）：\n" .. text },
     }
     local rid = jn.llm.chat_async(messages, { timeout = LLM_TIMEOUT })
     if not rid or rid == 0 then
         llm_pending[pk] = nil
-        jn.log.warn("[group_mgr] llm.chat_async 提交失败，灰色词放行")
-        return
+        jn.log.warn("[group_mgr] llm.chat_async 提交失败，关键词放行")
+        return "nollm"
     end
     -- 记录上下文，on_chat_response 收到结果后按 req_id 取回
-    llm_ctx[rid] = { group_id = event.group_id, user_id = event.user_id, message_id = mid, word = word, pk = pk }
+    llm_ctx[rid] = { group_id = event.group_id, user_id = event.user_id, message_id = mid, word = word, pk = pk, kind = kind, admins = event.admins }
+    return "ok"
+end
+
+--- 构建回调事件（复用 ctx 中的群/用户/消息/管理员，供复查与处罚使用）
+local function ctx_event(ctx)
+    local event = { group_id = ctx.group_id, user_id = ctx.user_id, message_type = "group", admins = ctx.admins }
+    if ctx.message_id ~= "" then event.message_id = ctx.message_id end
+    return event
+end
+
+--- 高危复核（敏感/黑名单）失败或 LLM 返回非 JSON 时的兜底：
+--- 退回关键词直接处罚，保持高危词拦截语义
+local function punish_high_risk_fallback(ctx)
+    local event = ctx_event(ctx)
+    if is_exempt(ctx.user_id) or is_group_admin(event) then return end
+    if ctx.kind == "sensitive" then
+        handle_violation(event, "敏感违规：" .. ctx.word, "sensitive")
+    else
+        handle_violation(event, "广告违规(黑名单)：" .. ctx.word, "ad")
+    end
 end
 
 -- 异步 LLM 审查结果入口（引擎异步注册表 kind "chat" 派发）：
@@ -742,26 +839,30 @@ function on_chat_response(req_id, content, err)
     if not ctx then return end
     llm_ctx[req_id] = nil
     llm_pending[ctx.pk] = nil
+    local high_risk = ctx.kind ~= "gray" -- 敏感/黑名单高危复核
     if err and err ~= "" then
         jn.log.warn(string.format("[group_mgr] LLM 审查失败: %s", tostring(err)))
+        if high_risk then punish_high_risk_fallback(ctx) end
         return
     end
     local verdict = jn.json.decode(content or "")
     if type(verdict) ~= "table" then
         jn.log.warn("[group_mgr] LLM 审查返回非 JSON，放行: " .. tostring(content))
+        if high_risk then punish_high_risk_fallback(ctx) end
         return
     end
     local violation = verdict.violation
     local reason = verdict.reason or ctx.word
     if violation == "ad" or violation == "sensitive" then
-        -- 审查耗时期间可能已被豁免/成为管理员，复查后再处罚
-        local event = { group_id = ctx.group_id, user_id = ctx.user_id, message_type = "group" }
-        if ctx.message_id ~= "" then event.message_id = ctx.message_id end
+        -- 审查耗时期间可能已被加入白名单/成为管理员，复查后再处罚
+        local event = ctx_event(ctx)
         if is_exempt(ctx.user_id) or is_group_admin(event) then return end
         local category = violation == "sensitive" and "sensitive" or "ad"
-        handle_violation(event, "LLM审查(" .. category .. ")：" .. tostring(reason), category)
+        local tag = high_risk and (ctx.kind == "sensitive" and "敏感" or "黑名单") or ""
+        local prefix = high_risk and ("LLM审查(" .. tag .. "·" .. category .. ")：") or ("LLM审查(" .. category .. ")：")
+        handle_violation(event, prefix .. tostring(reason), category)
     else
-        jn.log.info(string.format("[group_mgr] LLM 审查放行: user=%d 群=%d 词=%s", ctx.user_id, ctx.group_id, ctx.word))
+        jn.log.info(string.format("[group_mgr] LLM 审查放行: user=%d 群=%d 词=%s%s", ctx.user_id, ctx.group_id, ctx.word, high_risk and "（高危关键词误触过滤）" or ""))
     end
 end
 
@@ -781,21 +882,26 @@ local function check_sensitive(event)
         return true
     end
 
-    -- 敏感违规：色情 / 政治 / 脏话词库
+    -- 敏感违规：色情 / 政治 / 脏话 / 辱骂词库 → LLM 高危复核（确认违规后追罚；
+    -- LLM 不可用/关闭时退回关键词直接处罚）
     local sw = match_any(raw, WORDS.sensitive)
     if sw then
-        handle_violation(event, "敏感违规：" .. sw, "sensitive")
-        return true
+        if llm_review_message(event, sw, "sensitive") == "nollm" then
+            handle_violation(event, "敏感违规：" .. sw, "sensitive")
+        end
+        return false
     end
 
-    -- 黑色地带：无歧义广告词（样本提取 + cn_advertisement）→ 直接三级惩罚
+    -- 黑色地带：无歧义广告词（样本提取 + cn_advertisement）→ LLM 高危复核（兜底同上）
     local bw = match_any(raw, WORDS.black)
     if bw then
-        handle_violation(event, "广告违规(黑名单)：" .. bw, "ad")
-        return true
+        if llm_review_message(event, bw, "black") == "nollm" then
+            handle_violation(event, "广告违规(黑名单)：" .. bw, "ad")
+        end
+        return false
     end
 
-    -- 灰色地带：语义模糊（校园卡/考研/群名片/加群等）→ 异步 LLM 审查，
+    -- 灰色地带：语义模糊（校园卡/考研/群名片/加群/辱骂等）→ 常规 LLM 审查，
     -- 不立即处罚、不消费消息；LLM 判定违规后由回调追罚
     local gw = match_any(raw, WORDS.gray)
     if gw then
@@ -811,7 +917,7 @@ end
 function on_message(event)
     if event.message_type ~= "group" then return false, nil end
 
-    -- 豁免账号不参与任何检测
+    -- 白名单账号不参与任何检测
     if is_exempt(event.user_id) then return false, nil end
 
     -- 违规检测（广告/敏感，优先级最高）
@@ -877,15 +983,19 @@ end, {
 })
 
 -- ====================================================================
--- 命令: /豁免 —— 管理员豁免某用户（不再检测，清除其违规记录）
+-- 命令: /豁免 —— 管理员对某用户执行一次豁免：解除禁言 + 清除违规记录
+-- （不加入白名单，该用户仍参与正常违规检测；需要长期免检请用 /白名单）
 -- ====================================================================
 
--- 豁免话术（多套随机）
-local EXEMPT_TEMPLATES = {
+-- /豁免 话术（多套随机）
+local PARDON_TEMPLATES = {
     ok = {
-        "好啦，%d 已经被卷娘记到豁免小本本上啦，违规记录也清空咯～",
-        "收到！%d 以后可以放心发言，卷娘不会管 TA 啦，违规记录已清空～",
-        "%d 获得免死金牌一枚！卷娘已豁免 TA，并清空了违规记录哦～",
+        "好啦，%d 的禁言已解除，违规记录也清空咯～不过 TA 还在正常检测范围内哦～",
+        "收到！%d 解禁 + 违规清零完成，卷娘会继续盯着 TA 的～",
+        "%d 这次先放过：解除禁言、清空违规记录～下次再犯可就要按规矩来咯～",
+    },
+    whitelisted = {
+        "%d 本来就在白名单里，不用豁免啦～卷娘顺手帮 TA 解了禁言、清了记录～",
     },
     denied = {
         "只有管理员才能用豁免哦～",
@@ -893,9 +1003,6 @@ local EXEMPT_TEMPLATES = {
     },
     usage = {
         "用法：/豁免 QQ号 或 /豁免 @某人 哦～",
-    },
-    already = {
-        "%d 早就在卷娘的豁免名单里啦～",
     },
 }
 
@@ -906,7 +1013,7 @@ local function pick(msgs, fmt)
     return m
 end
 
---- 解析 /豁免 参数：QQ 号 或 @某人（[CQ:at,qq=...]）
+--- 解析 /豁免 /白名单 参数：QQ 号 或 @某人（[CQ:at,qq=...]）
 local function parse_target_q(args)
     if not args or #args == 0 then return nil end
     local raw = tostring(args[1])
@@ -918,41 +1025,22 @@ local function parse_target_q(args)
     return tonumber(qq)
 end
 
---- 豁免时自动解除禁言：直接调用 ban_group_member(duration=0) 解除。
+--- 解除禁言：直接调用 ban_group_member(duration=0) 解除。
 --- 不依赖 get_group_member_info 的 shut_up_timestamp 判断——部分 OneBot
 --- 实现（如 NapCat 群成员缓存）该字段可能缺失/失效，导致漏判不调解禁。
 --- duration=0 为 OneBot11 规范解禁语义（0 表示取消禁言），对未禁言成员是无害 no-op。
 local function unmute_if_banned(group_id, user_id)
     local ok, err = jn.onebot11.ban_group_member(group_id, user_id, 0)
     if not ok then
-        jn.log.warn(string.format("[group_mgr] 豁免 %d 自动解禁失败（群 %d）: %s", user_id, group_id, tostring(err)))
+        jn.log.warn(string.format("[group_mgr] 解除 %d 禁言失败（群 %d）: %s", user_id, group_id, tostring(err)))
         return false
     end
-    jn.log.info(string.format("[group_mgr] 豁免 %d 时自动解除禁言（群 %d）", user_id, group_id))
+    jn.log.info(string.format("[group_mgr] 已解除 %d 禁言（群 %d）", user_id, group_id))
     return true
 end
 
-jn.command.register("豁免", function(args, event)
-    if event.message_type ~= "group" then
-        reply(event, "该命令仅限群聊使用哦～")
-        return true
-    end
-    if not is_group_admin(event) then
-        reply(event, pick(EXEMPT_TEMPLATES.denied))
-        return true
-    end
-    local qq = parse_target_q(args)
-    if not qq then
-        reply(event, pick(EXEMPT_TEMPLATES.usage))
-        return true
-    end
-    if EXEMPT[tostring(qq)] then
-        reply(event, pick(EXEMPT_TEMPLATES.already, qq))
-        return true
-    end
-
-    EXEMPT[tostring(qq)] = true
-    -- 清除该账号全部群的违规记录
+--- 清除指定 QQ 号全部群的违规记录，返回清除条数
+local function clear_violations(qq)
     local cleared = 0
     local suffix = ":" .. tostring(qq)
     for k in pairs(VIOL) do
@@ -961,35 +1049,111 @@ jn.command.register("豁免", function(args, event)
             cleared = cleared + 1
         end
     end
+    return cleared
+end
+
+--- 解除禁言 + 清空违规记录并回复（/豁免 与 /白名单 共用）
+local function unmute_and_clear(event, qq, msg)
+    local cleared = clear_violations(qq)
     save_config()
 
-    -- 豁免时若用户处于禁言状态自动解除禁言
     local unmuted = unmute_if_banned(event.group_id, qq)
-
-    local msg = pick(EXEMPT_TEMPLATES.ok, qq)
     if unmuted then
         msg = msg .. "另外 TA 之前被禁言，已顺手解除咯～"
     end
     reply(event, msg)
-    jn.log.info(string.format("[group_mgr] %d 豁免了 %d（清除违规 %d 条，解除禁言 %s）", event.user_id, qq, cleared, tostring(unmuted)))
+    return cleared, unmuted
+end
+
+jn.command.register("豁免", function(args, event)
+    if event.message_type ~= "group" then
+        reply(event, "该命令仅限群聊使用哦～")
+        return true
+    end
+    if not is_group_admin(event) then
+        reply(event, pick(PARDON_TEMPLATES.denied))
+        return true
+    end
+    local qq = parse_target_q(args)
+    if not qq then
+        reply(event, pick(PARDON_TEMPLATES.usage))
+        return true
+    end
+
+    local tpl = PARDON_TEMPLATES.ok
+    if is_exempt(qq) then tpl = PARDON_TEMPLATES.whitelisted end
+    local cleared, unmuted = unmute_and_clear(event, qq, pick(tpl, qq))
+    jn.log.info(string.format("[group_mgr] %d 豁免了 %d（清除违规 %d 条，解除禁言 %s，未加入白名单）", event.user_id, qq, cleared, tostring(unmuted)))
     return true
 end, {
-    description = "豁免某用户：不再检测、清除违规记录，若被禁言自动解除（管理员）",
+    description = "豁免某用户：解除禁言并清空违规记录（不加入白名单，管理员）",
     usage = "/豁免 QQ号 或 /豁免 @某人",
 })
 
 -- ====================================================================
--- 命令: /解除豁免（/取消豁免）—— 管理员从豁免清单移除某用户，恢复检测
+-- 命令: /白名单 —— 管理员将某用户加入白名单（不再检测），
+-- 同时解除禁言、清除违规记录
+-- ====================================================================
+
+-- /白名单 话术（多套随机）
+local WHITELIST_TEMPLATES = {
+    ok = {
+        "好啦，%d 已经被卷娘记到白名单小本本上啦，违规记录也清空咯～",
+        "收到！%d 已加入白名单，以后可以放心发言，卷娘不会管 TA 啦，违规记录已清空～",
+        "%d 获得免死金牌一枚！卷娘已将 TA 加入白名单，并清空了违规记录哦～",
+    },
+    denied = {
+        "只有管理员才能用白名单哦～",
+        "白名单是管理员的专属技能啦，你不行哦～",
+    },
+    usage = {
+        "用法：/白名单 QQ号 或 /白名单 @某人 哦～",
+    },
+    already = {
+        "%d 早就在卷娘的白名单里啦～",
+    },
+}
+
+jn.command.register("白名单", function(args, event)
+    if event.message_type ~= "group" then
+        reply(event, "该命令仅限群聊使用哦～")
+        return true
+    end
+    if not is_group_admin(event) then
+        reply(event, pick(WHITELIST_TEMPLATES.denied))
+        return true
+    end
+    local qq = parse_target_q(args)
+    if not qq then
+        reply(event, pick(WHITELIST_TEMPLATES.usage))
+        return true
+    end
+    if EXEMPT[tostring(qq)] then
+        reply(event, pick(WHITELIST_TEMPLATES.already, qq))
+        return true
+    end
+
+    EXEMPT[tostring(qq)] = true
+    local cleared, unmuted = unmute_and_clear(event, qq, pick(WHITELIST_TEMPLATES.ok, qq))
+    jn.log.info(string.format("[group_mgr] %d 将 %d 加入白名单（清除违规 %d 条，解除禁言 %s）", event.user_id, qq, cleared, tostring(unmuted)))
+    return true
+end, {
+    description = "将某用户加入白名单：不再检测、清除违规记录，若被禁言自动解除（管理员）",
+    usage = "/白名单 QQ号 或 /白名单 @某人",
+})
+
+-- ====================================================================
+-- 命令: /解除豁免（/取消豁免）—— 管理员从白名单移除某用户，恢复检测
 -- ====================================================================
 
 local UNEXEMPT_TEMPLATES = {
     ok = {
-        "好啦，%d 的豁免已解除，回归正常检测咯～",
-        "收到！%d 已从豁免清单移除，之后会正常检测啦～",
-        "免死金牌收回！%d 解除豁免，卷娘继续盯着 TA 哦～",
+        "好啦，%d 已移出白名单，回归正常检测咯～",
+        "收到！%d 已从白名单移除，之后会正常检测啦～",
+        "免死金牌收回！%d 移出白名单，卷娘继续盯着 TA 哦～",
     },
     not_found = {
-        "%d 本来就不在豁免清单里啦～",
+        "%d 本来就不在白名单里啦～",
     },
     usage = {
         "用法：/解除豁免 QQ号 或 /解除豁免 @某人 哦～",
@@ -1003,7 +1167,7 @@ local function register_unexempt(path)
             return true
         end
         if not is_group_admin(event) then
-            reply(event, pick(EXEMPT_TEMPLATES.denied))
+            reply(event, pick(PARDON_TEMPLATES.denied))
             return true
         end
         local qq = parse_target_q(args)
@@ -1015,13 +1179,13 @@ local function register_unexempt(path)
             EXEMPT[tostring(qq)] = nil
             save_config()
             reply(event, pick(UNEXEMPT_TEMPLATES.ok, qq))
-            jn.log.info(string.format("[group_mgr] %d 解除了 %d 的豁免", event.user_id, qq))
+            jn.log.info(string.format("[group_mgr] %d 将 %d 移出白名单", event.user_id, qq))
         else
             reply(event, pick(UNEXEMPT_TEMPLATES.not_found, qq))
         end
         return true
     end, {
-        description = "解除豁免某用户：从豁免清单移除，恢复检测（管理员）",
+        description = "解除豁免某用户：从白名单移除，恢复检测（管理员）",
         usage = "/解除豁免 QQ号 或 /解除豁免 @某人",
     })
 end
