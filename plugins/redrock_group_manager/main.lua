@@ -441,6 +441,25 @@ local notify_running = false
 local NOTIFY_DELAY_MIN = 5   -- 相邻两条通知最小间隔（秒）
 local NOTIFY_DELAY_MAX = 30  -- 相邻两条通知最大间隔（秒）
 
+-- 群名缓存（group_id → {name, ts}）：群名几乎不变，避免每次违规都同步查一次
+-- get_group_info（最坏 10s 超时阻塞事件派发）；TTL 1 小时
+local group_name_cache = {}
+local GROUP_NAME_TTL = 3600
+
+--- 获取群名：优先缓存，未命中/过期时同步查询（正常毫秒级返回）
+local function get_group_name(group_id)
+    local cached = group_name_cache[group_id]
+    if cached and (os.time() - cached.ts) < GROUP_NAME_TTL then
+        return cached.name
+    end
+    local group_info, err = jn.onebot11.get_group_info(group_id)
+    local name = group_info and group_info.group_name or tostring(group_id)
+    if group_info and not err then
+        group_name_cache[group_id] = { name = name, ts = os.time() }
+    end
+    return name
+end
+
 --- 发送队列头部一条；若仍有剩余，安排随机延迟后继续（异步，不阻塞）
 local function notify_pump()
     if #notify_queue == 0 then
@@ -463,8 +482,7 @@ end
 local function notify_admins(event, text)
     if not event.admins then return end
     local group_id = event.group_id
-    local group_info, _ = jn.onebot11.get_group_info(group_id)
-    local group_name = group_info and group_info.group_name or tostring(group_id)
+    local group_name = get_group_name(group_id)
     local msg = "【群管理通知】\n群: " .. group_name .. "\n" .. text
     for _, qq in ipairs(event.admins) do
         notify_queue[#notify_queue + 1] = { qq = tonumber(qq), msg = msg }
@@ -485,10 +503,11 @@ function on_timer_response(req_id, ctx, result, err)
     notify_pump()
 end
 
---- 撤回消息
+--- 撤回消息（异步 fire-and-forget：违规场景不需要确认结果，避免同步 WS 调用
+--- 阻塞事件派发；需要确认的场景用 jn.onebot11.delete_msg 同步版）
 local function delete_msg(event)
     if event.message_id then
-        jn.onebot11.delete_msg(event.message_id)
+        jn.onebot11.delete_msg_async(event.message_id)
     end
 end
 
@@ -604,19 +623,19 @@ local function handle_violation(event, reason, category)
     if count == 1 then
         action = "撤回并警告"
         delete_msg(event)
-    elseif count == 2 then
-        action = "撤回并禁言30分钟"
-        delete_msg(event)
-        jn.onebot11.ban_group_member(group_id, user_id, VIOLATION_MUTE)
-        incr_kv(gkey(group_id, "stats:mute"))
-    else
-        action = "撤回并踢出群聊"
-        delete_msg(event)
-        jn.onebot11.kick_group_member(group_id, user_id, false)
-        VIOL[vkey] = nil -- 踢出后重置违规次数
-        save_config()
-        incr_kv(gkey(group_id, "stats:kick"))
-    end
+    	elseif count == 2 then
+    		action = "撤回并禁言30分钟"
+    		delete_msg(event)
+    		jn.onebot11.ban_group_member_async(group_id, user_id, VIOLATION_MUTE)
+    		incr_kv(gkey(group_id, "stats:mute"))
+    	else
+    		action = "撤回并踢出群聊"
+    		delete_msg(event)
+    		jn.onebot11.kick_group_member_async(group_id, user_id, false)
+    		VIOL[vkey] = nil -- 踢出后重置违规次数
+    		save_config()
+    		incr_kv(gkey(group_id, "stats:kick"))
+    	end
     incr_kv(gkey(group_id, "stats:" .. category))
 
     -- 卡片计入广告违规话术
@@ -672,10 +691,10 @@ local function check_image_spam(event)
     -- 判断
     if #recent >= IMG_SPAM_THRESHOLD then
         local warned = get_kv(warn_key)
-        if warned == "1" then
-            -- 已经警告过，还在刷 → 禁言
-            jn.onebot11.ban_group_member(group_id, user_id, IMG_MUTE_DURATION)
-            incr_kv(gkey(group_id, "stats:mute"))
+        		if warned == "1" then
+        			-- 已经警告过，还在刷 → 禁言（异步，不阻塞事件派发）
+        			jn.onebot11.ban_group_member_async(group_id, user_id, IMG_MUTE_DURATION)
+        			incr_kv(gkey(group_id, "stats:mute"))
             jn.log.info(string.format("[group_mgr] %d 刷屏禁言 %ds 群 %d", user_id, IMG_MUTE_DURATION, group_id))
             notify_admins(event, user_id .. " 因图片刷屏被禁言 " .. IMG_MUTE_DURATION .. "s")
         else
