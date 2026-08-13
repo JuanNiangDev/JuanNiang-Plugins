@@ -441,23 +441,31 @@ local notify_running = false
 local NOTIFY_DELAY_MIN = 5   -- 相邻两条通知最小间隔（秒）
 local NOTIFY_DELAY_MAX = 30  -- 相邻两条通知最大间隔（秒）
 
--- 群名缓存（group_id → {name, ts}）：群名几乎不变，避免每次违规都同步查一次
--- get_group_info（最坏 10s 超时阻塞事件派发）；TTL 1 小时
+-- 群名缓存（group_id → {name, ts, ttl}）：群名几乎不变，避免每次违规都同步查一次
+-- get_group_info（最坏 10s 超时阻塞事件派发）。成功 TTL 1 小时；查询失败时
+-- 缓存兜底名（群号）+ 短重试窗口，失败期间不再反复同步查询
 local group_name_cache = {}
-local GROUP_NAME_TTL = 3600
+local GROUP_NAME_TTL = 3600       -- 成功结果有效期（秒）
+local GROUP_NAME_FAIL_TTL = 60    -- 失败结果重试窗口（秒）
 
---- 获取群名：优先缓存，未命中/过期时同步查询（正常毫秒级返回）
+--- 获取群名：优先缓存，未命中/过期时同步查询（正常毫秒级返回）。
+--- 查询失败返回群号兜底，并缓存 60s 重试窗口：窗口内直接复用兜底，
+--- 避免失败持续期间每次违规都触发一次同步查询（最坏 10s 超时）
 local function get_group_name(group_id)
     local cached = group_name_cache[group_id]
-    if cached and (os.time() - cached.ts) < GROUP_NAME_TTL then
+    if cached and (os.time() - cached.ts) < cached.ttl then
         return cached.name
     end
     local group_info, err = jn.onebot11.get_group_info(group_id)
-    local name = group_info and group_info.group_name or tostring(group_id)
     if group_info and not err then
-        group_name_cache[group_id] = { name = name, ts = os.time() }
+        local name = group_info.group_name or tostring(group_id)
+        group_name_cache[group_id] = { name = name, ts = os.time(), ttl = GROUP_NAME_TTL }
+        return name
     end
-    return name
+    -- 查询失败：缓存兜底名（群号），短重试窗口内不再同步查询
+    jn.log.warn(string.format("[group_mgr] 查询群 %d 名称失败: %s", group_id, tostring(err)))
+    group_name_cache[group_id] = { name = tostring(group_id), ts = os.time(), ttl = GROUP_NAME_FAIL_TTL }
+    return tostring(group_id)
 end
 
 --- 发送队列头部一条；若仍有剩余，安排随机延迟后继续（异步，不阻塞）
