@@ -503,11 +503,11 @@ function on_timer_response(req_id, ctx, result, err)
     notify_pump()
 end
 
---- 撤回消息（异步 fire-and-forget：违规场景不需要确认结果，避免同步 WS 调用
---- 阻塞事件派发；需要确认的场景用 jn.onebot11.delete_msg 同步版）
+--- 撤回消息（同步：处罚动作需确认结果，踢人/禁言失败要能即时感知；
+--- 违规处罚不频繁，同步等待可接受）
 local function delete_msg(event)
     if event.message_id then
-        jn.onebot11.delete_msg_async(event.message_id)
+        jn.onebot11.delete_msg(event.message_id)
     end
 end
 
@@ -618,25 +618,32 @@ local function handle_violation(event, reason, category)
     VIOL[vkey] = count
     save_config()
 
-    -- 三级惩罚：1 警告 / 2 禁言30分钟 / 3 踢出群聊（踢出后重置次数）
-    local action
-    if count == 1 then
-        action = "撤回并警告"
-        delete_msg(event)
+    	-- 三级惩罚：1 警告 / 2 禁言30分钟 / 3 踢出群聊（踢出后重置次数）
+    	local action
+    	if count == 1 then
+    		action = "撤回并警告"
+    		delete_msg(event)
     	elseif count == 2 then
     		action = "撤回并禁言30分钟"
     		delete_msg(event)
-    		jn.onebot11.ban_group_member_async(group_id, user_id, VIOLATION_MUTE)
+    		jn.onebot11.ban_group_member(group_id, user_id, VIOLATION_MUTE)
     		incr_kv(gkey(group_id, "stats:mute"))
     	else
     		action = "撤回并踢出群聊"
     		delete_msg(event)
-    		jn.onebot11.kick_group_member_async(group_id, user_id, false)
-    		VIOL[vkey] = nil -- 踢出后重置违规次数
-    		save_config()
-    		incr_kv(gkey(group_id, "stats:kick"))
+    		local ok, err = jn.onebot11.kick_group_member(group_id, user_id, false)
+    		if ok then
+    			VIOL[vkey] = nil -- 踢出后重置违规次数
+    			save_config()
+    			incr_kv(gkey(group_id, "stats:kick"))
+    		else
+    			-- 踢人失败：保留违规次数（下次再犯仍按第 3 级处理），通知管理员人工处理
+    			jn.log.warn(string.format("[group_mgr] 踢人失败 user=%d 群=%d: %s", user_id, group_id, tostring(err)))
+    			action = "撤回并踢出群聊（失败）"
+    			notify_admins(event, string.format("%d %s（第 %d 次）-> 踢人失败: %s，请管理员人工处理", user_id, reason, count, tostring(err)))
+    		end
     	end
-    incr_kv(gkey(group_id, "stats:" .. category))
+    	incr_kv(gkey(group_id, "stats:" .. category))
 
     -- 卡片计入广告违规话术
     local msg_cat = category == "card" and "ad" or category
@@ -691,10 +698,10 @@ local function check_image_spam(event)
     -- 判断
     if #recent >= IMG_SPAM_THRESHOLD then
         local warned = get_kv(warn_key)
-        		if warned == "1" then
-        			-- 已经警告过，还在刷 → 禁言（异步，不阻塞事件派发）
-        			jn.onebot11.ban_group_member_async(group_id, user_id, IMG_MUTE_DURATION)
-        			incr_kv(gkey(group_id, "stats:mute"))
+		if warned == "1" then
+			-- 已经警告过，还在刷 → 禁言
+			jn.onebot11.ban_group_member(group_id, user_id, IMG_MUTE_DURATION)
+			incr_kv(gkey(group_id, "stats:mute"))
             jn.log.info(string.format("[group_mgr] %d 刷屏禁言 %ds 群 %d", user_id, IMG_MUTE_DURATION, group_id))
             notify_admins(event, user_id .. " 因图片刷屏被禁言 " .. IMG_MUTE_DURATION .. "s")
         else
