@@ -1,0 +1,79 @@
+# ====================================================================
+# repo-intro 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# 数字类配置用 string 类型，插件内 tonumber 读取。
+# ====================================================================
+
+configs:
+  - key: enable_github
+    type: bool
+    label: 启用 GitHub 仓库介绍
+    description: 发送 GitHub 仓库链接时自动整理并发布仓库信息
+    default: true
+
+  - key: enable_huggingface
+    type: bool
+    label: 启用 Hugging Face 介绍
+    description: 发送 Hugging Face 模型/数据集链接时自动整理并发布
+    default: true
+
+  - key: enable_modelscope
+    type: bool
+    label: 启用 ModelScope 介绍
+    description: 发送 ModelScope 模型/数据集链接时自动整理并发布
+    default: true
+
+  - key: hf_mirror
+    type: bool
+    label: Hugging Face 走镜像站
+    description: 元数据与 README 请求走 hf-mirror.com（国内 huggingface.co 直连常不通）；关闭则直连 huggingface.co
+    default: true
+
+  - key: enable_summary
+    type: bool
+    label: 启用 LLM 总结
+    description: 用主程序 LLM 翻译描述并总结 README；关闭则只发仓库名与原文简介
+    default: true
+
+  - key: reply_quote
+    type: bool
+    label: 引用原消息
+    description: 回复时是否自动引用触发的那条消息
+    default: true
+
+  - key: group_only
+    type: bool
+    label: 仅群聊生效
+    description: 开启后只在群聊中处理，私聊忽略
+    default: false
+
+  - key: cache_ttl
+    type: string
+    label: 结果缓存时长（秒）
+    description: 同一仓库的介绍结果缓存秒数，默认 604800（7 天）
+    default: "604800"
+
+  - key: max_readme_chars
+    type: string
+    label: README 最大输入字数
+    description: 送入 LLM 的 README 最大字符数，默认 10000
+    default: "10000"
+
+  - key: llm_timeout
+    type: string
+    label: LLM 超时（秒）
+    description: 调用主程序 LLM 的超时秒数，默认 60
+    default: "60"
+
+  - key: max_repos
+    type: string
+    label: 单条消息最多处理链接数
+    description: 一条消息里最多处理几个仓库链接，默认 5，超出忽略
+    default: "5"
