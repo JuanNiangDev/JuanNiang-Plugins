@@ -119,7 +119,7 @@ M.onebot11 = onebot11
 ---@class jn.HTTP
 ---@field get fun(url: string): jn.HTTPResponse, string?
 ---@field post fun(url: string, content_type?: string, body?: string): jn.HTTPResponse, string?
----@field get_async fun(url: string, ctx?: table): number 异步 GET，立即返回 req_id；完成后引擎调用插件入口 on_http_response(req_id, ctx, result, err)
+---@field get_async fun(url: string, ctx?: table, headers?: table): number 异步 GET，立即返回 req_id；完成后引擎调用插件入口 on_http_response(req_id, ctx, result, err)。可选第 3 位 headers 表（{ ["User-Agent"]="...", ["Referer"]="..." }）用于反爬/风控站点
 ---@field post_async fun(url: string, content_type?: string, body?: string, ctx?: table): number 异步 POST（最后一个 table 参数视为 ctx）
 M.http = http
 

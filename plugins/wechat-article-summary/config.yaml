@@ -1,0 +1,67 @@
+# ====================================================================
+# wechat-article-summary 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持三种：
+#   bool   → Web 面板开关
+#   string → Web 面板单行输入框
+#   list   → Web 面板可增删的多项输入框
+# value 为用户当前生效值（缺省时回退 default）。插件通过
+# jn.config.get("key") / jn.config.all() 读取。
+# 数字类配置用 string 类型，插件内 tonumber 读取。
+# ====================================================================
+
+configs:
+  - key: enabled
+    type: bool
+    label: 启用公众号文章总结
+    description: 发送 mp.weixin.qq.com 文章链接时自动抓取并总结；关闭则完全不处理
+    default: true
+
+  - key: enable_summary
+    type: bool
+    label: 启用 LLM 总结
+    description: 用主程序 LLM 按文章类型总结核心内容；关闭则只发标题与公众号名
+    default: true
+
+  - key: reply_quote
+    type: bool
+    label: 引用原消息
+    description: 回复时是否自动引用触发的那条消息
+    default: true
+
+  - key: group_only
+    type: bool
+    label: 仅群聊生效
+    description: 开启后只在群聊中处理，私聊忽略
+    default: false
+
+  - key: cache_ttl
+    type: string
+    label: 结果缓存时长（秒）
+    description: 同一篇文章的总结结果缓存秒数，默认 604800（7 天）
+    default: "604800"
+
+  - key: max_content_chars
+    type: string
+    label: 正文最大输入字数
+    description: 送入 LLM 的文章正文最大字符数，默认 10000
+    default: "10000"
+
+  - key: llm_timeout
+    type: string
+    label: LLM 超时（秒）
+    description: 调用主程序 LLM 的超时秒数，默认 60
+    default: "60"
+
+  - key: max_articles
+    type: string
+    label: 单条消息最多处理链接数
+    description: 一条消息里最多处理几篇文章链接，默认 5，超出忽略
+    default: "5"
+
+  - key: ua
+    type: string
+    label: 抓取 User-Agent
+    description: 抓取文章页使用的浏览器 UA（微信对默认 UA 风控，勿改回非浏览器 UA）
+    default: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
