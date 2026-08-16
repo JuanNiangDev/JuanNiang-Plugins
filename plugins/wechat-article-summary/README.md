@@ -39,11 +39,12 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 ```
 📰 标题
 📖 公众号名（抓不到则不显示该行）
-核心内容总结（200~350 字；早报/新闻汇总类为前 5 条新闻标题 + "共 X 条"）
+核心内容总结（50~150 字；早报/新闻汇总类为前 5 条新闻标题 + "共 X 条"）
 🔗 原文链接
+[封面图]（默认附在末尾，send_cover 可关）
 ```
 
-（多篇时每段之间空两行，一次发送。）
+（多篇时每段之间空两行，一次发送；封面图取第一篇抓取到封面的文章。）
 
 ## 抓取说明
 
@@ -56,6 +57,7 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 | enabled | 总开关 | true |
 | enable_summary | LLM 总结开关（关闭只发标题与公众号名） | true |
 | reply_quote | 回复时引用原消息 | true |
+| send_cover | 发送封面图（og:image） | true |
 | group_only | 仅群聊生效 | false |
 | cache_ttl | 总结结果缓存秒数 | 604800（7 天） |
 | max_content_chars | 送入 LLM 的正文最大字数 | 10000 |

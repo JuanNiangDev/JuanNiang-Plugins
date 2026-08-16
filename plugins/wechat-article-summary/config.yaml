@@ -30,6 +30,12 @@ configs:
     description: 回复时是否自动引用触发的那条消息
     default: true
 
+  - key: send_cover
+    type: bool
+    label: 发送封面图
+    description: 总结输出末尾附带文章封面图（og:image）；关闭则不发送
+    default: true
+
   - key: group_only
     type: bool
     label: 仅群聊生效

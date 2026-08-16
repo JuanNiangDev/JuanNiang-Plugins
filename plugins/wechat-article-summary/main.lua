@@ -128,15 +128,16 @@ end
 -- --------------------------------------------------------------------
 -- HTML 解析（微信文章页）
 -- --------------------------------------------------------------------
--- 提取 meta 信息：og:title / og:description / 公众号名（var nickname，作者 js_author_name 不用）
+-- 提取 meta 信息：og:title / og:description / 封面图 / 公众号名（var nickname，作者 js_author_name 不用）
 local function extract_meta(html)
     local title = html:match('property="og:title" content="([^"]*)"') or ""
     local desc = html:match('property="og:description" content="([^"]*)"') or ""
+    local cover = html:match('property="og:image" content="([^"]*)"') or ""
     local account = html:match('var nickname = htmlDecode%("([^"]*)"%)')
         or html:match('var nickname = "([^"]*)"')
         or ""
     account = account:gsub("^%s+", ""):gsub("%s+$", "")
-    return title, desc, account
+    return title, desc, cover, account
 end
 
 -- 提取正文容器：id="js_content" 开标签之后到其配对 </div>（div 深度计数，
@@ -190,7 +191,7 @@ local function parse_article(body)
         end
         return nil, "文章内容解析失败"
     end
-    local title, desc, account = extract_meta(body)
+    local title, desc, cover, account = extract_meta(body)
     local content = html_to_text(extract_body(body))
     if content == "" then
         return nil, "文章内容为空"
@@ -198,6 +199,7 @@ local function parse_article(body)
     return {
         title = title,
         desc = desc,
+        cover = cover,
         account = account,
         content = truncate(content),
     }, nil
@@ -212,12 +214,11 @@ local function article_cache_get(e)
     local v = jn.cache.get(article_cache_key(e))
     if type(v) ~= "table" then return nil end
     if not v.summary then return nil end
-    -- 缓存结构升级：旧缓存无 account（曾存文章作者名），视为未命中重建，
-    -- 避免显示作者名而非公众号名
-    if not v.account then return nil end
-    -- 恢复抓取期 meta（标题/公众号名），缓存命中时输出段完整
+    -- 缓存结构升级：旧缓存无 account（曾存文章作者名）或无 cover，视为未命中重建
+    if not v.account or not v.cover then return nil end
+    -- 恢复抓取期 meta（标题/公众号名/封面图），缓存命中时输出段完整
     if (v.title or "") ~= "" or (v.account or "") ~= "" then
-        e.meta = { title = v.title or "", account = v.account or "", desc = "" }
+        e.meta = { title = v.title or "", account = v.account or "", cover = v.cover or "", desc = "" }
     end
     return v
 end
@@ -236,7 +237,7 @@ local function llm_system_prompt()
     local p = [[你是中文公众号文章总结助手。用户会给你一篇或多篇微信公众号文章的标题、公众号名与正文内容，请对每篇文章独立判定类型、总结核心内容，最后按指定 JSON 输出。
 
 【零、通用铁律（所有文章必做）】
-1. 只总结正文明确给出的内容，禁止编造文章未提及的时间、事件、人物、数据、功能；未写明写"未提及"或省略。
+1. 只总结正文明确给出的内容，禁止编造文章未提及的时间、事件、人物、数据、功能；未写明的直接省略，禁止输出"未提及""未说明""未给出"等话术。
 2. summary 一律简体中文，保留专有名词、机构名、产品名原文。
 3. 每篇独立判定类型，禁止按公众号或标题前缀归一类。
 4. 多篇文章务必全部覆盖，不得遗漏。
@@ -281,14 +282,12 @@ end
 -- 组装单篇段
 local function compose_section(e)
     local lines = {}
-    if e.meta and e.meta.title and e.meta.title ~= "" then
-        lines[#lines + 1] = "📰 " .. e.meta.title
-    else
-        lines[#lines + 1] = "📰 微信公众号文章"
-    end
+    local title = (e.meta and e.meta.title) or "微信公众号文章"
+    lines[#lines + 1] = "📰 " .. title
     -- 公众号名（来自 var nickname），抓不到则不显示该行
-    if e.meta and e.meta.account and e.meta.account ~= "" then
-        lines[#lines + 1] = "📖 " .. e.meta.account
+    local account = (e.meta and e.meta.account) or ""
+    if account ~= "" then
+        lines[#lines + 1] = "📖 " .. account
     end
 
     local llm = e.llm
@@ -296,18 +295,16 @@ local function compose_section(e)
     if summary ~= "" then
         lines[#lines + 1] = summary
     end
-    if e.err and not llm then
-        lines[#lines + 1] = "⚠️ " .. e.err
-    end
-    lines[#lines + 1] = "🔗 " .. e.url
+    lines[#lines + 1] = e.url
     return table.concat(lines, "\n")
 end
 
--- 组装整条消息：段间空两行
+-- 组装整条消息：段间空两行。失败条目（无 LLM 结果且有错误）直接跳过，
+-- 全部失败时返回 nil 不发送（静默，不输出报错）
 local function compose_message(batch)
     local sections = {}
     for _, e in ipairs(batch.entries) do
-        if not e.skipped then
+        if not e.skipped and (e.llm or not e.err) then
             sections[#sections + 1] = compose_section(e)
         end
     end
@@ -315,9 +312,9 @@ local function compose_message(batch)
     return table.concat(sections, "\n\n\n")
 end
 
--- 发送（reply 引用 + 文本）
+-- 发送（reply 引用 + 文本 + 封面图（🔗 之后，send_cover 开关））；text 为空（全部失败）静默不发送
 local function send_summary(batch, text)
-    if not text or text == "" then text = "文章总结失败，请稍后再试～" end
+    if not text or text == "" then return end
     local segments
     local t = batch.target
     if t.reply_quote and t.message_id ~= nil and tostring(t.message_id) ~= "" then
@@ -327,6 +324,19 @@ local function send_summary(batch, text)
         }
     else
         segments = { { type = "text", data = { text = text } } }
+    end
+    -- 封面图（og:image）放链接之后；取第一篇抓取到封面的文章
+    if t.send_cover then
+        local cover = nil
+        for _, e in ipairs(batch.entries) do
+            if not e.skipped and e.meta and e.meta.cover and e.meta.cover ~= "" then
+                cover = e.meta.cover
+                break
+            end
+        end
+        if cover then
+            segments[#segments + 1] = { type = "image", data = { file = cover } }
+        end
     end
     if t.message_type == "group" then
         jn.onebot11.send_group_msg(t.target_id, segments)
@@ -411,18 +421,23 @@ local function handle_article(ctx, result, err)
             if rid and rid ~= 0 then return end -- 重试已提交，等待回调
         end
         e.err = "请求失败：" .. tostring(err)
+        jn.log.warn("[wechat-article-summary] 文章抓取失败 url=" .. (e.url or "") .. " err=" .. tostring(err))
     elseif status == 403 or status == 429 then
         e.err = "微信风控拦截，请稍后再试"
+        jn.log.warn("[wechat-article-summary] 微信风控拦截 url=" .. (e.url or "") .. " status=" .. status)
     elseif status == 404 then
         e.err = "文章不存在或已删除"
+        jn.log.warn("[wechat-article-summary] 文章不存在 url=" .. (e.url or "") .. " status=" .. status)
     elseif status < 200 or status >= 300 then
         e.err = "抓取失败（HTTP " .. status .. "）"
+        jn.log.warn("[wechat-article-summary] 文章抓取异常 url=" .. (e.url or "") .. " status=" .. status)
     else
         local meta, perr = parse_article(result.body or "")
         if meta then
             e.meta = meta
         else
             e.err = perr or "文章内容解析失败"
+            jn.log.warn("[wechat-article-summary] 文章解析失败 url=" .. (e.url or "") .. " err=" .. tostring(perr))
         end
     end
     batch.pending = batch.pending - 1
@@ -478,6 +493,7 @@ function on_chat_response(req_id, content, err)
                     type = r.type and tostring(r.type) or "",
                     title = (e.meta and e.meta.title) or (r.title and tostring(r.title)) or "",
                     account = (e.meta and e.meta.account) or "",
+                    cover = (e.meta and e.meta.cover) or "",
                     summary = r.summary and tostring(r.summary) or "",
                 }
                 e.llm = content_tbl
@@ -560,6 +576,7 @@ function on_message(event)
             target_id = (event.group_id ~= 0 and event.group_id) or event.user_id,
             message_id = event.message_id,
             reply_quote = cfg_bool("reply_quote", true),
+            send_cover = cfg_bool("send_cover", true),
         },
     }
 
