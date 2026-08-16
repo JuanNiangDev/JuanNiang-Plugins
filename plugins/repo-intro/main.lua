@@ -271,7 +271,7 @@ local function llm_system_prompt()
     local p = [[你是中文仓库介绍助手。用户会给你若干仓库（GitHub / Hugging Face / ModelScope）的元数据与 README 内容，请对每个仓库独立判定类型、写出简体中文介绍，最后按指定 JSON 输出。
 
 【零、通用铁律（所有仓库必做）】
-1. 只写 README 与元数据明确给出的内容，禁止编造参数量、分数、功能、许可证、安装命令、API 价格；未写明写"未说明"或省略，绝不编造。
+1. 只写 README 与元数据明确给出的内容，禁止编造参数量、分数、功能、许可证、安装命令、API 价格；未写明的直接省略，禁止输出"未说明""未给出""未提及"等话术。
 2. summary 一律简体中文，英文内容翻译；项目名、命令、API 名、模型名保留原文。
 3. 每个仓库独立判断类型，禁止按组织/前缀归一类；同一组织不同仓库类型可能完全不同。
 4. README 不一定是 README.md（可能是 README.org/.rst），别把"有文档"误判成"无文档"；多个仓库务必全部覆盖，不得遗漏。
@@ -358,36 +358,39 @@ end
 local function compose_section(e)
     local lines = {}
     local name = (e.meta and e.meta.name) or (e.owner .. "/" .. e.repo)
-    lines[#lines + 1] = "📦 " .. name .. " · " .. platform_label(e)
+    lines[#lines + 1] = "📦 " .. name -- 平台名不显示
 
     local llm = e.llm
-    if llm and llm.type and llm.type ~= "" then
-        lines[#lines + 1] = "🏷 " .. llm.type
+    -- GitHub：模型名：官方描述（desc_cn 中文优先）；无官方描述时用 LLM 一句话标题。
+    -- HF/MS：仅 LLM 一句话标题。统一以 📝 前缀展示。
+    local desc_line = nil
+    if e.kind == "github" then
+        local desc = (llm and llm.desc_cn) or (llm and llm.desc) or (e.meta and e.meta.desc)
+        if desc and desc ~= "" then
+            desc_line = e.repo .. "：" .. desc
+        elseif llm and llm.title and llm.title ~= "" then
+            desc_line = llm.title
+        end
+    elseif llm and llm.title and llm.title ~= "" then
+        desc_line = llm.title
     end
-    if llm and llm.title and llm.title ~= "" then
-        lines[#lines + 1] = llm.title
-    end
-    -- GitHub 描述行（中文翻译优先，来自 LLM 结果缓存或实时元数据）
-    local desc = (llm and llm.desc_cn) or (llm and llm.desc) or (e.meta and e.meta.desc)
-    if e.kind == "github" and desc and desc ~= "" then
-        lines[#lines + 1] = "📝 " .. desc
+    if desc_line then
+        lines[#lines + 1] = "📝 " .. desc_line
     end
     local summary = llm and llm.summary or (e.meta and e.meta.desc) or ""
     if summary ~= "" then
         lines[#lines + 1] = summary
     end
-    if e.err and not llm then
-        lines[#lines + 1] = "⚠️ " .. e.err
-    end
-    lines[#lines + 1] = "🔗 " .. (e.url or "")
+    lines[#lines + 1] = e.url or ""
     return table.concat(lines, "\n")
 end
 
--- 组装整条消息：段间空两行
+-- 组装整条消息：段间空两行。失败条目（无 LLM 结果且有错误）直接跳过，
+-- 全部失败时返回 nil 不发送（静默，不输出报错）
 local function compose_message(batch)
     local sections = {}
     for _, e in ipairs(batch.entries) do
-        if not e.skipped then
+        if not e.skipped and (e.llm or not e.err) then
             sections[#sections + 1] = compose_section(e)
         end
     end
@@ -395,9 +398,9 @@ local function compose_message(batch)
     return table.concat(sections, "\n\n\n")
 end
 
--- 发送（reply 引用 + 文本）
+-- 发送（reply 引用 + 文本）；text 为空（全部失败）静默不发送
 local function send_intro(batch, text)
-    if not text or text == "" then text = "仓库信息整理失败，请稍后再试～" end
+    if not text or text == "" then return end
     local segments
     local t = batch.target
     if t.reply_quote and t.message_id ~= nil and tostring(t.message_id) ~= "" then
@@ -482,13 +485,21 @@ local function check_batch(batch)
     end
 end
 
--- meta 阶段
+-- meta 阶段（网络错误/超时重试一次——容器出口对高频请求偶发瞬时挂起）
 local function handle_meta(ctx, result, err)
     local batch = ctx.batch
     local e = batch.entries[ctx.idx]
     local status = result and result.status or 0
     if err then
+        local attempt = (ctx.fetch_attempt or 0) + 1
+        if attempt <= 1 then
+            local c = copy_ctx(ctx)
+            c.fetch_attempt = attempt
+            local rid = jn.http.get_async(meta_api_url(e), c)
+            if rid and rid ~= 0 then return end -- 重试已提交，等待回调
+        end
         e.err = "请求失败：" .. tostring(err)
+        jn.log.warn("[repo-intro] 仓库元数据获取失败 url=" .. (e.url or "") .. " err=" .. tostring(err))
         batch.pending = batch.pending - 1
         return
     end
@@ -496,17 +507,20 @@ local function handle_meta(ctx, result, err)
         -- GitHub API 未认证限流 60 次/小时（按容器 IP）；区分于仓库不存在
         e.err = e.kind == "github" and ("GitHub API 限流，请稍后再试（" .. e.owner .. "/" .. e.repo .. "）")
             or ("接口限流，请稍后再试（" .. e.owner .. "/" .. e.repo .. "）")
+        jn.log.warn("[repo-intro] 仓库接口限流 url=" .. (e.url or "") .. " status=" .. status)
         batch.pending = batch.pending - 1
         return
     end
     if status < 200 or status >= 300 then
         e.err = "未找到仓库 " .. e.owner .. "/" .. e.repo
+        jn.log.warn("[repo-intro] 仓库不存在或不可访问 url=" .. (e.url or "") .. " status=" .. status)
         batch.pending = batch.pending - 1
         return
     end
     local data = jn.json.decode(result.body or "")
     if type(data) ~= "table" then
         e.err = "未找到仓库 " .. e.owner .. "/" .. e.repo
+        jn.log.warn("[repo-intro] 仓库元数据解析失败 url=" .. (e.url or "") .. " status=" .. status)
         batch.pending = batch.pending - 1
         return
     end
