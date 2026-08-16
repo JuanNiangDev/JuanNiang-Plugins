@@ -77,3 +77,15 @@ configs:
     label: 单条消息最多处理链接数
     description: 一条消息里最多处理几个仓库链接，默认 5，超出忽略
     default: "5"
+
+  - key: summary_min_chars
+    type: string
+    label: 总结最小字数
+    description: LLM 总结的最少字数，默认 50
+    default: "50"
+
+  - key: summary_max_chars
+    type: string
+    label: 总结最大字数
+    description: LLM 总结的最多字数，默认 150
+    default: "150"

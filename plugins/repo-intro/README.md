@@ -71,6 +71,8 @@ Qwen2.5 系列 7B 模型，Dense 架构，支持 128K 上下文，文本生成�
 | `max_readme_chars` | string | `10000` | 送入 LLM 的 README 最大字符数 |
 | `llm_timeout` | string | `60` | 主程序 LLM 调用超时（秒） |
 | `max_repos` | string | `5` | 单条消息最多处理的链接数 |
+| `summary_min_chars` | string | `50` | LLM 总结的最少字数 |
+| `summary_max_chars` | string | `150` | LLM 总结的最多字数 |
 
 ## 权限
 

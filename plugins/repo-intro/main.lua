@@ -266,7 +266,9 @@ end
 -- 内容由 8 个子智能体对 80+ 示例仓库逐仓抓取 README/元数据后校准
 -- --------------------------------------------------------------------
 local function llm_system_prompt()
-    return [[你是中文仓库介绍助手。用户会给你若干仓库（GitHub / Hugging Face / ModelScope）的元数据与 README 内容，请对每个仓库独立判定类型、写出简体中文介绍，最后按指定 JSON 输出。
+    local min_c = tostring(cfg_num("summary_min_chars", 50))
+    local max_c = tostring(cfg_num("summary_max_chars", 150))
+    local p = [[你是中文仓库介绍助手。用户会给你若干仓库（GitHub / Hugging Face / ModelScope）的元数据与 README 内容，请对每个仓库独立判定类型、写出简体中文介绍，最后按指定 JSON 输出。
 
 【零、通用铁律（所有仓库必做）】
 1. 只写 README 与元数据明确给出的内容，禁止编造参数量、分数、功能、许可证、安装命令、API 价格；未写明写"未说明"或省略，绝不编造。
@@ -323,8 +325,9 @@ summary 要点（按子类型）：SDK/库：是什么、支持什么模型/硬�
 - Space：SDK、功能、能否在线使用
 
 【三、输出格式】严格只输出如下 JSON（不要输出 JSON 以外的任何内容，不要用代码块包裹）：
-{"repos":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字）","summary":"详细介绍（简体中文，200~350字，突出是什么、能做什么、关键数字）","desc_cn":"官方描述中文翻译（GitHub 必填，无则空字符串）"}]}
+{"repos":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字）","summary":"详细介绍（简体中文，__MIN__~__MAX__字，突出是什么、能做什么、关键数字）","desc_cn":"官方描述中文翻译（GitHub 必填，无则空字符串）"}]}
 index 与输入仓库编号一一对应（从 1 开始）。]]
+    return p:gsub("__MIN__", min_c):gsub("__MAX__", max_c)
 end
 
 -- 组装单仓库送 LLM 的用户输入
@@ -461,6 +464,7 @@ local function start_llm(batch)
         { role = "system", content = llm_system_prompt() },
         { role = "user", content = table.concat(parts, "\n\n") },
     }
+    batch.llm_messages = messages -- 失败重试复用
     local rid = jn.llm.chat_async(messages, { timeout = cfg_num("llm_timeout", 60) })
     if not rid or rid == 0 then
         jn.log.warn("[repo-intro] llm.chat_async 提交失败，降级为无摘要发送")
@@ -603,6 +607,17 @@ function on_chat_response(req_id, content, err)
 
     local usable = batch.llm_usable or {}
     if err and err ~= "" then
+        -- Provider 瞬时失败（如网关 connection reset）重试最多 2 次
+        local tries = (batch.llm_retries or 0) + 1
+        if tries <= 2 and batch.llm_messages then
+            batch.llm_retries = tries
+            local rid = jn.llm.chat_async(batch.llm_messages, { timeout = cfg_num("llm_timeout", 60) })
+            if rid and rid ~= 0 then
+                jn.log.warn("[repo-intro] LLM 失败重试(" .. tries .. "/2): " .. tostring(err))
+                llm_ctx[rid] = batch
+                return
+            end
+        end
         jn.log.warn("[repo-intro] LLM 总结失败: " .. tostring(err))
         compose_and_send(batch)
         return
