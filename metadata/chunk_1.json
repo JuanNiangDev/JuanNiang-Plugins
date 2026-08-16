@@ -140,6 +140,16 @@
     "has_readme": true
   },
   {
+    "name": "repo-intro",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "发送 GitHub / Hugging Face / ModelScope 仓库链接时，自动引用原消息并翻译描述、总结 README（复用主程序 LLM）",
+    "path": "repo-intro",
+    "image": "repo-intro/avatar.png",
+    "has_config": true,
+    "has_readme": true
+  },
+  {
     "name": "system",
     "version": "1.0.0",
     "author": "JuanNiang-Neo",
@@ -166,6 +176,16 @@
     "description": "Webhook 示例插件：处理 GitHub/告警/钉钉等外部推送，转发到 QQ 群",
     "path": "webhook-example",
     "image": "webhook-example/avatar.png",
+    "has_config": true,
+    "has_readme": true
+  },
+  {
+    "name": "wechat-article-summary",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "发送微信公众号文章链接时，自动抓取正文并用主程序 LLM 按文章类型总结核心内容（新闻/观点/教程/项目介绍等），多篇合并一次输出",
+    "path": "wechat-article-summary",
+    "image": "wechat-article-summary/avatar.png",
     "has_config": true,
     "has_readme": true
   },
