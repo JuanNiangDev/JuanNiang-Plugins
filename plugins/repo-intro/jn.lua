@@ -119,7 +119,7 @@ M.onebot11 = onebot11
 ---@class jn.HTTP
 ---@field get fun(url: string): jn.HTTPResponse, string?
 ---@field post fun(url: string, content_type?: string, body?: string): jn.HTTPResponse, string?
----@field get_async fun(url: string, ctx?: table, headers?: table): number 异步 GET，立即返回 req_id；完成后引擎调用插件入口 on_http_response(req_id, ctx, result, err)。可选第 3 位 headers 表（{ ["User-Agent"]="...", ["Referer"]="..." }）用于反爬/风控站点
+---@field get_async fun(url: string, ctx?: table, headers?: table): number 异步 GET，立即返回 req_id；完成后引擎调用插件入口 on_http_response(req_id, ctx, result, err)。可选第 3 位 headers 表（{ ["User-Agent"]="...", ["Authorization"]="Bearer ..." }）用于反爬/认证（如 GitHub API token）
 ---@field post_async fun(url: string, content_type?: string, body?: string, ctx?: table): number 异步 POST（最后一个 table 参数视为 ctx）
 M.http = http
 
@@ -149,7 +149,8 @@ M.database = database
 ---@field escape fun(s: any): string PostgreSQL 字符串字面量单引号转义（'→''），返回可直接放进 '...' 的安全字符串
 M.sql = {
 	escape = function(s)
-		return tostring(s):gsub("'", "''")
+		-- 括号包裹：只返回转义串，丢弃 gsub 的替换计数第二返回值
+		return (tostring(s):gsub("'", "''"))
 	end,
 }
 
