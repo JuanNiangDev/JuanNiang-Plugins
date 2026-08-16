@@ -82,7 +82,19 @@ local function parse_urls(raw)
         if c == "" or not c:match("%w") then
             local q = raw:sub(s + #lneedle):match("^([%w%+%/%_%%%&%.%-=]+)")
             if q and q:find("__biz", 1, true) then
-                local key = "wx?" .. q
+                -- 规范化 key：只用文章标识参数（sn 优先，其次 __biz/mid/idx），
+                -- 排除 chksm/scene/srcid 等分享追踪参数——同一文章的不同分享
+                -- 链接共享缓存与在途去重
+                local sn = q:match("[?&]sn=([^&]+)")
+                local key
+                if sn then
+                    key = "wx?sn=" .. sn
+                else
+                    local biz = q:match("__biz=([^&]+)") or ""
+                    local mid = q:match("[?&]mid=([^&]+)") or ""
+                    local idx = q:match("[?&]idx=([^&]+)") or ""
+                    key = "wx?" .. biz .. "/" .. mid .. "/" .. idx
+                end
                 if not seen[key] then
                     seen[key] = true
                     entries[#entries + 1] = {
@@ -121,7 +133,24 @@ end
 
 local function truncate(str)
     local max = cfg_num("max_content_chars", 10000)
-    if #str > max then return str:sub(1, max) end
+    if max <= 0 then return "" end
+    -- 按 UTF-8 字符计数截断（max_content_chars 为字符数而非字节数）：
+    -- 超限时截到完整字符边界，尾部残缺的多字节序列整体丢弃。
+    local count, i, n = 0, 1, #str
+    while i <= n do
+        local b = str:byte(i)
+        local len = 1
+        if b >= 0xF0 then len = 4
+        elseif b >= 0xE0 then len = 3
+        elseif b >= 0xC0 then len = 2
+        end
+        if i + len - 1 > n then break end -- 残缺序列：丢弃其后全部
+        count = count + 1
+        if count > max then
+            return str:sub(1, i - 1)
+        end
+        i = i + len
+    end
     return str
 end
 
@@ -175,8 +204,9 @@ local function html_to_text(html)
     text = text:gsub("<script[^>]*>.-</script>", " ")
     text = text:gsub("<style[^>]*>.-</style>", " ")
     text = text:gsub("<[^>]+>", " ")
-    text = text:gsub("&nbsp;", " "):gsub("&amp;", "&"):gsub("&lt;", "<"):gsub("&gt;", ">")
-    text = text:gsub("&#39;", "'"):gsub("&quot;", '"')
+    -- &amp; 最后解码：避免 &amp;lt; 这类双重编码被提前解成 <
+    text = text:gsub("&nbsp;", " "):gsub("&lt;", "<"):gsub("&gt;", ">")
+    text = text:gsub("&#39;", "'"):gsub("&quot;", '"'):gsub("&amp;", "&")
     text = text:gsub("%s+", " ")
     return text:gsub("^%s+", ""):gsub("%s+$", "")
 end
@@ -295,7 +325,7 @@ local function compose_section(e)
     if summary ~= "" then
         lines[#lines + 1] = summary
     end
-    lines[#lines + 1] = e.url
+    lines[#lines + 1] = "🔗 原文链接：" .. e.url
     return table.concat(lines, "\n")
 end
 
@@ -540,11 +570,14 @@ local function build_batch(event)
             e.done = true
         else
             local dedup = jn.cache.get("dedup:" .. e.key)
-            if dedup and (os.time() - tonumber(dedup) < 60) then
+            local d = tonumber(dedup)
+            -- 缓存值非数字视为缺失（防污染）；去重窗口用 llm_timeout，
+            -- 保证在途标记覆盖整个 LLM 处理周期
+            if dedup and d and (os.time() - d < cfg_num("llm_timeout", 60)) then
                 e.done = true
                 e.skipped = true -- 正在被其他消息处理，跳过
             else
-                jn.cache.set("dedup:" .. e.key, os.time(), 60)
+                jn.cache.set("dedup:" .. e.key, os.time(), cfg_num("llm_timeout", 60))
                 e.owned_dedup = true -- 本批次自己设置的去重标记，完成后只清自己的
                 uncached[#uncached + 1] = #entries + 1
             end

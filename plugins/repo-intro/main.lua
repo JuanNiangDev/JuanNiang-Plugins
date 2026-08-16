@@ -393,14 +393,14 @@ local compose_and_send
 -- 加载模板（batch 内缓存，改文件后重启生效）
 local function load_template()
     local n = cfg_string("card_template", "5")
+    local tpl, err
     if n == "random" then
         n = tostring(math.random(1, 5)) -- 每次渲染随机选一个
-        local t, e = jn.file.read("templates/card-" .. n .. ".html")
-        if not t then
-            n = "5" -- 随机到的模板不存在时回退默认
-        end
+        tpl = jn.file.read("templates/card-" .. n .. ".html")
+        if tpl then return tpl end -- 随机命中即用，不再重复读取
+        n = "5" -- 随机到的模板不存在时回退默认
     end
-    local tpl, err = jn.file.read("templates/card-" .. n .. ".html")
+    tpl, err = jn.file.read("templates/card-" .. n .. ".html")
     if not tpl then
         jn.log.warn("[repo-intro] 卡片模板读取失败 templates/card-" .. n .. ".html err=" .. tostring(err))
         return nil
@@ -442,7 +442,8 @@ local function fill_template(tpl, e)
     }
     local out = tpl
     for k, v in pairs(data) do
-        out = out:gsub("{{" .. k .. "}}", tostring(v))
+        -- 替换函数而非字符串：值含 % 时不会被当作替换模式（gsub 的替换串中 % 有特殊含义）
+        out = out:gsub("{{" .. k .. "}}", function() return tostring(v) end)
     end
     return out
 end
@@ -470,21 +471,19 @@ local function start_cards(batch)
         return
     end
     local pending = 0
-    local card_ctx = batch.card_ctx or {}
     for idx, e in ipairs(usable) do
         if not e.card_url or e.card_url == "" then
             local html = fill_template(tpl, e)
             pending = pending + 1
             local rid = jn.t2i.generate_url_async(html, {
-                viewport_width = cfg_num("card_width", 1200),
-                viewport_height = cfg_num("card_height", 900),
+                viewport_width = cfg_num("card_width", 900),
+                viewport_height = cfg_num("card_height", 450),
                 timeout = 60,
             }, { idx = idx })
             if not rid or rid == 0 then
                 pending = pending - 1
                 e.card_url = nil
             else
-                card_ctx[rid] = { idx = idx }
                 card_ctx_batch_tbl[rid] = batch
             end
         end

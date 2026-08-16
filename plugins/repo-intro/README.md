@@ -39,7 +39,7 @@ Qwen2.5 系列 7B 模型，Dense 架构，支持 128K 上下文，文本生成�
 
 ## 工作流程
 
-```
+```text
 检测到链接（可多个）→ 未命中缓存者逐仓库拉取元数据+README → 合并一次 LLM 调用 → 逐仓库缓存 → 组装一条消息发送
 ```
 
@@ -73,10 +73,15 @@ Qwen2.5 系列 7B 模型，Dense 架构，支持 128K 上下文，文本生成�
 | `max_repos` | string | `5` | 单条消息最多处理的链接数 |
 | `summary_min_chars` | string | `50` | LLM 总结的最少字数 |
 | `summary_max_chars` | string | `150` | LLM 总结的最多字数 |
+| `card_enabled` | bool | `true` | 发送仓库卡片图（走主程序 T2I 服务渲染 HTML 模板） |
+| `card_template` | string | `5` | 卡片模板编号（当前仅有 5；`random` 每次随机选一个） |
+| `card_width` | string | `900` | 卡片渲染宽度像素（模板 900×450） |
+| `card_height` | string | `450` | 卡片渲染高度像素（模板 900×450） |
+| `github_token` | string | 空 | GitHub Personal Access Token：限流 60→5000 次/小时并可访问私有仓库；留空走匿名免费层级 |
 
 ## 权限
 
-`onebot11` / `http` / `cache` / `llm`
+`onebot11` / `http` / `cache` / `llm` / `file`（卡片模板读取） / `t2i`（卡片渲染）
 
 ## 许可
 
