@@ -37,6 +37,12 @@ local function cfg_num(key, default)
     return n
 end
 
+local function cfg_string(key, default)
+    local v = jn.config.get(key)
+    if v == nil or v == "" then return default end
+    return tostring(v)
+end
+
 -- --------------------------------------------------------------------
 -- URL 解析（提取一条消息中的全部仓库链接）
 -- --------------------------------------------------------------------
@@ -218,7 +224,9 @@ local function extract_meta(e, data)
             lang = data.language,
             stars = data.stargazers_count,
             forks = data.forks_count,
+            issues = data.open_issues_count,
             topics = data.topics,
+            avatar = data.owner and data.owner.avatar_url,
         }
     elseif e.kind == "hf" then
         return {
@@ -242,7 +250,7 @@ local function extract_meta(e, data)
     end
 end
 
--- 每仓库 LLM 结果缓存（值：JSON {type,title,summary,install}）
+-- 每仓库 LLM 结果缓存（值：JSON {type,title,summary,install,card_url}）
 local function repo_cache_key(e)
     return "intro:" .. e.key
 end
@@ -250,9 +258,10 @@ end
 local function repo_cache_get(e)
     local v = jn.cache.get(repo_cache_key(e))
     if type(v) ~= "table" then return nil end
-    -- 缓存结构升级：旧版缓存无 desc_cn（GitHub 描述行中文依赖它），视为未命中
-    -- 重建一次（写入新格式），避免旧缓存一直缺中文描述行
+    -- 缓存结构升级：旧版缓存无 desc_cn（GitHub 描述行中文依赖它）或无 card_url（卡片图），
+    -- 视为未命中重建一次（写入新格式），避免旧缓存一直缺描述行/卡片
     if e.kind == "github" and v.desc_cn == nil then return nil end
+    if cfg_bool("card_enabled", true) and v.card_url == nil then return nil end
     return v
 end
 
@@ -352,6 +361,146 @@ local function repo_input_for_llm(e, idx)
 end
 
 -- --------------------------------------------------------------------
+-- 仓库卡片图（T2I：HTML 模板渲染，模板在 templates/ 目录，占位符 {{KEY}}）
+-- --------------------------------------------------------------------
+-- T2I 回调上下文表：req_id → batch（on_t2i_response 回调不带 batch）。
+-- 注意：必须在 start_cards 之前声明（local 词法作用域），否则闭包引用全局 nil
+local card_ctx_batch_tbl = {}
+local function card_ctx_batch(req_id)
+    local b = card_ctx_batch_tbl[req_id]
+    card_ctx_batch_tbl[req_id] = nil
+    return b
+end
+
+-- 前向声明：finish_cards（卡片段）调用发送段末尾定义的 compose_and_send
+local compose_and_send
+
+-- 加载模板（batch 内缓存，改文件后重启生效）
+local function load_template()
+    local n = cfg_string("card_template", "5")
+    if n == "random" then
+        n = tostring(math.random(1, 5)) -- 每次渲染随机选一个
+        local t, e = jn.file.read("templates/card-" .. n .. ".html")
+        if not t then
+            n = "5" -- 随机到的模板不存在时回退默认
+        end
+    end
+    local tpl, err = jn.file.read("templates/card-" .. n .. ".html")
+    if not tpl then
+        jn.log.warn("[repo-intro] 卡片模板读取失败 templates/card-" .. n .. ".html err=" .. tostring(err))
+        return nil
+    end
+    return tpl
+end
+
+-- 数字格式化：≥1000 → k（与原版 hello_github_card 一致）
+local function fmt_count(n)
+    n = tonumber(n)
+    if not n or n < 0 then return "0" end
+    if n >= 1000 then
+        local k = n / 1000
+        if k >= 10 then
+            return string.format("%.0fk", k)
+        end
+        return string.format("%.1fk", k)
+    end
+    return tostring(n)
+end
+
+-- 填充模板：OWNER/REPO/DESC/URL + 统计（STARS/FORKS/ISSUES/LANG_NAME）
+local function fill_template(tpl, e)
+    local m = e.meta or {}
+    local llm = e.llm or {}
+    local desc = (llm.desc_cn ~= nil and llm.desc_cn ~= "") and llm.desc_cn
+        or (llm.desc ~= nil and llm.desc ~= "") and llm.desc
+        or (m.desc or "")
+    local data = {
+        OWNER = e.owner,
+        REPO = e.repo,
+        DESC = desc,
+        URL = e.url or "",
+        STARS = fmt_count(m.stars),
+        FORKS = fmt_count(m.forks),
+        ISSUES = fmt_count(m.issues),
+        LANG_NAME = (m.lang and m.lang ~= "") and m.lang or "Other",
+        AVATAR = m.avatar or "",
+    }
+    local out = tpl
+    for k, v in pairs(data) do
+        out = out:gsub("{{" .. k .. "}}", tostring(v))
+    end
+    return out
+end
+
+-- 卡片渲染完成后：写缓存（含 card_url）并发送
+local function finish_cards(batch)
+    for idx, ct in pairs(batch.pending_content or {}) do
+        local e = batch.llm_usable and batch.llm_usable[idx]
+        if e then
+            ct.card_url = e.card_url or ""
+            repo_cache_set(e, ct)
+        end
+    end
+    compose_and_send(batch)
+end
+
+-- 触发卡片渲染（每仓库一张；全部完成后 finish_cards）
+local function start_cards(batch)
+    local usable = batch.llm_usable or {}
+    local tpl = load_template()
+    local enabled = cfg_bool("card_enabled", true)
+        and tpl ~= nil and jn.t2i ~= nil and jn.t2i.is_active() and jn.t2i.generate_url_async ~= nil
+    if not enabled then
+        finish_cards(batch)
+        return
+    end
+    local pending = 0
+    local card_ctx = batch.card_ctx or {}
+    for idx, e in ipairs(usable) do
+        if not e.card_url or e.card_url == "" then
+            local html = fill_template(tpl, e)
+            pending = pending + 1
+            local rid = jn.t2i.generate_url_async(html, {
+                viewport_width = cfg_num("card_width", 1200),
+                viewport_height = cfg_num("card_height", 900),
+                timeout = 60,
+            }, { idx = idx })
+            if not rid or rid == 0 then
+                pending = pending - 1
+                e.card_url = nil
+            else
+                card_ctx[rid] = { idx = idx }
+                card_ctx_batch_tbl[rid] = batch
+            end
+        end
+    end
+    batch.card_pending = pending
+    if pending == 0 then
+        finish_cards(batch)
+    end
+end
+
+-- T2I 异步回调（引擎级异步注册表 kind "t2i"）
+function on_t2i_response(req_id, ctx, result, err)
+    local batch = card_ctx_batch(req_id)
+    if not batch then return end
+    local idx = ctx and ctx.idx
+    local e = batch.llm_usable and idx and batch.llm_usable[idx]
+    if err or not result or result == "" then
+        jn.log.warn("[repo-intro] 卡片渲染失败 idx=" .. tostring(idx) .. " err=" .. tostring(err))
+        if e then e.card_url = nil end
+    elseif e then
+        e.card_url = result
+    end
+    if batch.card_pending then
+        batch.card_pending = batch.card_pending - 1
+        if batch.card_pending <= 0 then
+            finish_cards(batch)
+        end
+    end
+end
+
+-- --------------------------------------------------------------------
 -- 发送 / 组装
 -- --------------------------------------------------------------------
 -- 组装单仓库段
@@ -385,31 +534,35 @@ local function compose_section(e)
     return table.concat(lines, "\n")
 end
 
--- 组装整条消息：段间空两行。失败条目（无 LLM 结果且有错误）直接跳过，
--- 全部失败时返回 nil 不发送（静默，不输出报错）
-local function compose_message(batch)
-    local sections = {}
+-- 组装整条消息的 segment 数组：每仓库一段文本 + 卡片图（🔗 后）。
+-- 失败条目（无 LLM 结果且有错误）直接跳过，全部失败时返回 nil 不发送（静默）
+local function compose_segments(batch)
+    local segs = {}
+    local send_card = cfg_bool("card_enabled", true)
+    local first = true
     for _, e in ipairs(batch.entries) do
         if not e.skipped and (e.llm or not e.err) then
-            sections[#sections + 1] = compose_section(e)
+            local text = compose_section(e)
+            if not first then
+                text = "\n\n" .. text -- 段间空两行（QQ 多 segment 拼接显示）
+            end
+            first = false
+            segs[#segs + 1] = { type = "text", data = { text = text } }
+            if send_card and e.card_url and e.card_url ~= "" then
+                segs[#segs + 1] = { type = "image", data = { file = e.card_url } }
+            end
         end
     end
-    if #sections == 0 then return nil end
-    return table.concat(sections, "\n\n\n")
+    if #segs == 0 then return nil end
+    return segs
 end
 
--- 发送（reply 引用 + 文本）；text 为空（全部失败）静默不发送
-local function send_intro(batch, text)
-    if not text or text == "" then return end
-    local segments
+-- 发送（reply 引用 + segments）；segments 为空（全部失败）静默不发送
+local function send_intro(batch, segments)
+    if not segments or #segments == 0 then return end
     local t = batch.target
     if t.reply_quote and t.message_id ~= nil and tostring(t.message_id) ~= "" then
-        segments = {
-            { type = "reply", data = { id = tostring(t.message_id) } },
-            { type = "text", data = { text = text } },
-        }
-    else
-        segments = { { type = "text", data = { text = text } } }
+        table.insert(segments, 1, { type = "reply", data = { id = tostring(t.message_id) } })
     end
     if t.message_type == "group" then
         jn.onebot11.send_group_msg(t.target_id, segments)
@@ -419,19 +572,15 @@ local function send_intro(batch, text)
 end
 
 -- 流水线终点：发送 + 清理本批次设置的在途去重标记
--- 注意：只清理本批次 own 的去重标记（e.owned_dedup）。别的消息仍在途的
--- 批次设置的去重标记不能动，否则会让同仓库并发重复抓取。
--- 全部条目被跳过（在途去重/缓存）时 compose_message 返回 nil，不发送
--- 兜底文案（避免对一条正在被处理的链接回复"整理失败"）。
-local function compose_and_send(batch)
+compose_and_send = function(batch)
     for _, e in ipairs(batch.entries) do
         if e.owned_dedup then
             jn.cache.del("dedup:" .. e.key)
         end
     end
-    local text = compose_message(batch)
-    if text then
-        send_intro(batch, text)
+    local segments = compose_segments(batch)
+    if segments then
+        send_intro(batch, segments)
     end
 end
 
@@ -646,6 +795,7 @@ function on_chat_response(req_id, content, err)
 
     -- 按 index 回填到对应的未缓存仓库
     local used = {}
+    local pending_content = batch.pending_content or {}
     for _, r in ipairs(results) do
         if type(r) == "table" and r.index then
             local e = usable[tonumber(r.index)]
@@ -656,9 +806,10 @@ function on_chat_response(req_id, content, err)
                     summary = r.summary and tostring(r.summary) or "",
                     desc_cn = r.desc_cn and tostring(r.desc_cn) or "",
                     desc = (e.meta and e.meta.desc) or "",
+                    card_url = (e.card_url and tostring(e.card_url)) or "",
                 }
                 e.llm = content_tbl
-                repo_cache_set(e, content_tbl)
+                pending_content[tonumber(r.index)] = content_tbl
                 used[tonumber(r.index)] = true
             end
         end
@@ -670,7 +821,8 @@ function on_chat_response(req_id, content, err)
         end
     end
 
-    compose_and_send(batch)
+    batch.pending_content = pending_content
+    start_cards(batch) -- 渲染卡片（若启用）→ 写缓存（含 card_url）→ 发送
 end
 
 -- --------------------------------------------------------------------
@@ -703,6 +855,7 @@ local function build_batch(event)
             local cached = repo_cache_get(e)
             if cached then
                 e.llm = cached
+                e.card_url = cached.card_url or ""
                 e.done = true
             else
                 local dedup = jn.cache.get("dedup:" .. e.key)

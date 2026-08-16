@@ -89,3 +89,27 @@ configs:
     label: 总结最大字数
     description: LLM 总结的最多字数，默认 150
     default: "150"
+
+  - key: card_enabled
+    type: bool
+    label: 发送仓库卡片图
+    description: 每个仓库段末尾附带 HTML 模板渲染的卡片图（走主程序 T2I 服务）；关闭则只发文本
+    default: true
+
+  - key: card_template
+    type: string
+    label: 卡片模板编号
+    description: 使用 templates/ 目录下哪个模板（当前仅有 5：hello_github_card 像素级复刻样式），random 每次渲染随机选一个；默认 5
+    default: "5"
+
+  - key: card_width
+    type: string
+    label: 卡片渲染宽度
+    description: 渲染视口宽度像素（卡片尺寸），默认 900
+    default: "900"
+
+  - key: card_height
+    type: string
+    label: 卡片渲染高度
+    description: 渲染视口高度像素（卡片尺寸），默认 450
+    default: "450"

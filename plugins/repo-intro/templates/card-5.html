@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>GitHub Repository Card</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 900px;
+      height: 450px;
+      overflow: hidden;
+      background-color: #f6f8fa; /* 与原版一致 */
+      font-family: "Maple Mono Normal NF CN", "Noto Sans CJK SC", "WenQuanYi Zen Hei", "PingFang SC", "Microsoft YaHei", -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+
+    /* 右上角圆形头像：加载作者头像，失败时显示灰圆占位 */
+    .avatar {
+      position: absolute;
+      right: 60px;
+      top: 50px;
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background-color: #d0d7de;
+      overflow: hidden;
+    }
+    .avatar img {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      object-fit: cover;
+      display: block;
+    }
+
+    /* 标题：作者灰 + 仓库名黑粗（字号 48）。右缘 660 避让头像（700 起），
+       与描述同宽；超宽时 owner/ 与 repo 自动换行，repo 过长截断 */
+    .title {
+      position: absolute;
+      left: 60px;
+      right: 240px;
+      top: 60px;
+      display: flex;
+      flex-wrap: wrap;
+      font-size: 48px;
+      line-height: 55px;
+    }
+    .title .owner, .title .slash { color: #656d76; font-weight: 400; white-space: nowrap; }
+    .title .repo {
+      color: #1f2328;
+      font-weight: 700;
+      max-width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* 标题右侧 GitHub 图标（垂直居中于标题行，位于内容区与头像之间） */
+    .title-icon {
+      position: absolute;
+      right: 206px;
+      top: 74px;
+      width: 26px;
+      height: 26px;
+      color: #57606a;
+    }
+    .title-icon svg { width: 26px; height: 26px; fill: currentColor; }
+
+    /* 描述：24px 灰，最多 4 行（行高 30），与标题同宽；
+       统计区随之下移，保证大多数一句话描述完整显示 */
+    .desc {
+      position: absolute;
+      left: 60px;
+      right: 240px;
+      top: 250px;
+      font-size: 24px;
+      line-height: 30px;
+      color: #656d76;
+      display: -webkit-box;
+      -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      word-break: break-word;
+    }
+
+    /* 描述右侧图标（垂直居中于描述首行） */
+    .desc-icon {
+      position: absolute;
+      right: 206px;
+      top: 255px;
+      width: 20px;
+      height: 20px;
+      color: #57606a;
+    }
+    .desc-icon svg { width: 20px; height: 20px; fill: currentColor; }
+
+    /* 底部统计区：四槽等分，图标 20px #57606a + 数字 26px 粗黑 + 标签 15px 灰 */
+    .stats {
+      position: absolute;
+      left: 60px;
+      right: 60px;
+      top: 380px;
+      display: flex;
+    }
+    .stat { flex: 1; min-width: 0; }
+    .stat-top {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .stat-top .icon {
+      width: 20px;
+      height: 20px;
+      flex-shrink: 0;
+      fill: #57606a;
+    }
+    .stat-top .num {
+      font-size: 26px;
+      font-weight: 700;
+      color: #1f2328;
+      line-height: 26px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* 语言名：允许换行（不省略），避免长语言名（Jupyter Notebook 等）被截断 */
+    .stat-top .num-lang {
+      font-size: 20px;
+      line-height: 22px;
+      white-space: normal;
+      word-break: break-word;
+      display: block;
+    }
+    .stat-label {
+      margin-top: 10px;
+      font-size: 15px;
+      color: #656d76;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 头像：作者头像，失败时灰圆占位 -->
+  <div class="avatar"><img src="{{AVATAR}}" onerror="this.style.display='none'" alt=""></div>
+
+  <!-- 标题 + 右侧 GitHub 图标 -->
+  <div class="title">
+    <span class="owner">{{OWNER}}</span><span class="slash">/</span><span class="repo">{{REPO}}</span>
+  </div>
+  <div class="title-icon">
+    <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+  </div>
+
+  <!-- 描述 + 右侧链接图标 -->
+  <div class="desc">{{DESC}}</div>
+  <div class="desc-icon">
+    <svg viewBox="0 0 16 16"><path d="M10.604 1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1ZM3.75 2A1.75 1.75 0 0 0 2 3.75v8.5c0 .966.784 1.75 1.75 1.75h8.5A1.75 1.75 0 0 0 14 12.25v-3a.75.75 0 0 0-1.5 0v3a.25.25 0 0 1-.25.25h-8.5a.25.25 0 0 1-.25-.25v-8.5a.25.25 0 0 1 .25-.25h3a.75.75 0 0 0 0-1.5h-3Z"/></svg>
+  </div>
+
+  <!-- 统计：Stars / Forks / Issues+PRs / Language -->
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-top">
+        <svg class="icon" viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+        <span class="num">{{STARS}}</span>
+      </div>
+      <div class="stat-label">Stars</div>
+    </div>
+    <div class="stat">
+      <div class="stat-top">
+        <svg class="icon" viewBox="0 0 1024 1024"><path d="M384 334.08V512h128a128 128 0 0 0 128-128V334.08a128.042667 128.042667 0 1 1 85.333333 0V384a213.333333 213.333333 0 0 1-213.333333 213.333333H384v92.586667a128.042667 128.042667 0 1 1-85.333333 0V334.08a128.042667 128.042667 0 1 1 85.333333 0zM341.333333 853.333333a42.666667 42.666667 0 1 0 0-85.333333 42.666667 42.666667 0 0 0 0 85.333333z m341.333334-597.333333a42.666667 42.666667 0 1 0 0-85.333333 42.666667 42.666667 0 0 0 0 85.333333zM341.333333 256a42.666667 42.666667 0 1 0 0-85.333333 42.666667 42.666667 0 0 0 0 85.333333z" fill="#57606a"/></svg>
+        <span class="num">{{FORKS}}</span>
+      </div>
+      <div class="stat-label">Forks</div>
+    </div>
+    <div class="stat">
+      <div class="stat-top">
+        <svg class="icon" viewBox="0 0 16 16"><path d="M8 9.5a1.5 1.5 0 1 0 .001-3.001A1.5 1.5 0 0 0 8 9.5ZM8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"/></svg>
+        <span class="num">{{ISSUES}}</span>
+      </div>
+      <div class="stat-label">Issues+PRs</div>
+    </div>
+    <div class="stat">
+      <div class="stat-top">
+        <svg class="icon" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#8250df"/></svg>
+        <span class="num num-lang">{{LANG_NAME}}</span>
+      </div>
+      <div class="stat-label">Language</div>
+    </div>
+  </div>
+
+</body>
+</html>
