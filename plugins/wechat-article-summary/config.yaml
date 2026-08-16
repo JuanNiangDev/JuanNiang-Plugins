@@ -65,3 +65,15 @@ configs:
     label: 抓取 User-Agent
     description: 抓取文章页使用的浏览器 UA（微信对默认 UA 风控，勿改回非浏览器 UA）
     default: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+  - key: summary_min_chars
+    type: string
+    label: 总结最小字数
+    description: LLM 总结的最少字数，默认 50
+    default: "50"
+
+  - key: summary_max_chars
+    type: string
+    label: 总结最大字数
+    description: LLM 总结的最多字数，默认 150
+    default: "150"

@@ -231,7 +231,9 @@ end
 -- LLM 提示词（按文章类型分类总结，多篇同一提示词）
 -- --------------------------------------------------------------------
 local function llm_system_prompt()
-    return [[你是中文公众号文章总结助手。用户会给你一篇或多篇微信公众号文章的标题、公众号名与正文内容，请对每篇文章独立判定类型、总结核心内容，最后按指定 JSON 输出。
+    local min_c = tostring(cfg_num("summary_min_chars", 50))
+    local max_c = tostring(cfg_num("summary_max_chars", 150))
+    local p = [[你是中文公众号文章总结助手。用户会给你一篇或多篇微信公众号文章的标题、公众号名与正文内容，请对每篇文章独立判定类型、总结核心内容，最后按指定 JSON 输出。
 
 【零、通用铁律（所有文章必做）】
 1. 只总结正文明确给出的内容，禁止编造文章未提及的时间、事件、人物、数据、功能；未写明写"未提及"或省略。
@@ -254,8 +256,9 @@ local function llm_system_prompt()
    总结：核心内容，突出最有信息量的部分。
 
 【二、输出格式】严格只输出如下 JSON（不要输出 JSON 以外的任何内容，不要用代码块包裹）：
-{"articles":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字）","summary":"核心内容总结（简体中文，200~350字；早报/新闻汇总类按上述第 5 类格式列出标题与总数）"}]}
+{"articles":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字）","summary":"核心内容总结（简体中文，__MIN__~__MAX__字；早报/新闻汇总类按上述第 5 类格式列出标题与总数）"}]}
 index 与输入文章编号一一对应（从 1 开始）。]]
+    return p:gsub("__MIN__", min_c):gsub("__MAX__", max_c)
 end
 
 -- 组装单篇送 LLM 的用户输入
@@ -442,12 +445,13 @@ function on_chat_response(req_id, content, err)
 
     local usable = batch.llm_usable or {}
     if err and err ~= "" then
-        -- Provider 瞬时失败（如网关 connection reset）重试一次
-        if not batch.llm_retried and batch.llm_messages then
-            batch.llm_retried = true
+        -- Provider 瞬时失败（如网关 connection reset）重试最多 2 次
+        local tries = (batch.llm_retries or 0) + 1
+        if tries <= 2 and batch.llm_messages then
+            batch.llm_retries = tries
             local rid = jn.llm.chat_async(batch.llm_messages, { timeout = cfg_num("llm_timeout", 60) })
             if rid and rid ~= 0 then
-                jn.log.warn("[wechat-article-summary] LLM 失败重试: " .. tostring(err))
+                jn.log.warn("[wechat-article-summary] LLM 失败重试(" .. tries .. "/2): " .. tostring(err))
                 llm_ctx[rid] = batch
                 return
             end

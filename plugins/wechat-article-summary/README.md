@@ -61,6 +61,8 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 | max_content_chars | 送入 LLM 的正文最大字数 | 10000 |
 | llm_timeout | LLM 超时秒数 | 60 |
 | max_articles | 单条消息最多处理链接数 | 5 |
+| summary_min_chars | LLM 总结的最少字数 | 50 |
+| summary_max_chars | LLM 总结的最多字数 | 150 |
 | ua | 抓取 User-Agent（勿改回非浏览器 UA） | Chrome 126 UA |
 
 ## 依赖
