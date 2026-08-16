@@ -174,6 +174,21 @@ local function meta_api_url(e)
     end
 end
 
+-- GitHub API 请求头：配置 github_token 时带 Bearer 认证（限流 60→5000 次/小时，
+-- 且可访问私有仓库）；留空走匿名免费层级（60 次/小时，按容器 IP）。
+-- UA 与 API 版本头必带；仅用于 github 类请求，避免把 token 泄漏给 HF/MS。
+local function gh_headers()
+    local h = {
+        ["User-Agent"] = "JuanNiang-Neo-repo-intro/1.0",
+        ["X-GitHub-Api-Version"] = "2022-11-28",
+    }
+    local token = cfg_string("github_token", "")
+    if token ~= "" then
+        h["Authorization"] = "Bearer " .. token
+    end
+    return h
+end
+
 -- 返回下一步 README 的 (url, stage)；nil 表示直接进 LLM（数据集已内嵌 README）
 local function readme_url_for(e)
     if e.kind == "github" then
@@ -644,7 +659,7 @@ local function handle_meta(ctx, result, err)
         if attempt <= 1 then
             local c = copy_ctx(ctx)
             c.fetch_attempt = attempt
-            local rid = jn.http.get_async(meta_api_url(e), c)
+            local rid = jn.http.get_async(meta_api_url(e), c, e.kind == "github" and gh_headers() or nil)
             if rid and rid ~= 0 then return end -- 重试已提交，等待回调
         end
         e.err = "请求失败：" .. tostring(err)
@@ -682,7 +697,7 @@ local function handle_meta(ctx, result, err)
     end
     local c = copy_ctx(ctx)
     c.stage = stage
-    local rid = jn.http.get_async(url, c)
+    local rid = jn.http.get_async(url, c, e.kind == "github" and gh_headers() or nil)
     if not rid or rid == 0 then
         batch.pending = batch.pending - 1 -- README 拉取失败，仍继续
     end
@@ -704,7 +719,7 @@ local function handle_readme(ctx, result, err)
         end
         local c = copy_ctx(ctx)
         c.stage = "readme_raw"
-        local rid = jn.http.get_async(data.download_url, c)
+        local rid = jn.http.get_async(data.download_url, c, e.kind == "github" and gh_headers() or nil)
         if not rid or rid == 0 then batch.pending = batch.pending - 1 end
         return
     end
@@ -905,7 +920,7 @@ function on_message(event)
 
     for _, i in ipairs(uncached) do
         local ctx = { batch = batch, idx = i, stage = "meta" }
-        local rid = jn.http.get_async(meta_api_url(batch.entries[i]), ctx)
+        local rid = jn.http.get_async(meta_api_url(batch.entries[i]), ctx, batch.entries[i].kind == "github" and gh_headers() or nil)
         if not rid or rid == 0 then
             batch.entries[i].err = "请求提交失败"
             batch.pending = batch.pending - 1

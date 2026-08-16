@@ -113,3 +113,9 @@ configs:
     label: 卡片渲染高度
     description: 渲染视口高度像素（卡片尺寸），默认 450
     default: "450"
+
+  - key: github_token
+    type: string
+    label: GitHub API Token（可选）
+    description: 填写 GitHub Personal Access Token 后，GitHub API 限流从 60 次/小时提升至 5000 次/小时，并可访问私有仓库；留空使用匿名免费层级（60 次/小时）
+    default: ""
