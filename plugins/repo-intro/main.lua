@@ -438,7 +438,10 @@ local function fill_template(tpl, e)
         FORKS = fmt_count(m.forks),
         ISSUES = fmt_count(m.issues),
         LANG_NAME = (m.lang and m.lang ~= "") and m.lang or "Other",
-        AVATAR = m.avatar or "",
+        -- MS/HF 元数据无头像字段；空 src 会让 Chromium 在 file:// 页面请求文档自身，
+        -- 渲染服务行为不可控。用 data URI 灰圆占位（与模板灰圆底色一致），避免任何资源请求。
+        AVATAR = (m.avatar ~= nil and m.avatar ~= "") and m.avatar
+            or "data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='140'%20height='140'%3E%3Ccircle%20cx='70'%20cy='70'%20r='70'%20fill='%23d0d7de'/%3E%3C/svg%3E",
     }
     local out = tpl
     for k, v in pairs(data) do
@@ -475,10 +478,12 @@ local function start_cards(batch)
         if not e.card_url or e.card_url == "" then
             local html = fill_template(tpl, e)
             pending = pending + 1
+            -- 注意：不传 timeout。SDK 文档约定单位为秒，但 Go SDK 原样透传、
+            -- T2I 服务端按 Playwright 毫秒处理，传 60 会被当成 60ms，渲染必失败（500）。
+            -- 不传则服务端用默认 30s，本地 file:// 渲染绰绰有余。
             local rid = jn.t2i.generate_url_async(html, {
                 viewport_width = cfg_num("card_width", 900),
                 viewport_height = cfg_num("card_height", 450),
-                timeout = 60,
             }, { idx = idx })
             if not rid or rid == 0 then
                 pending = pending - 1
