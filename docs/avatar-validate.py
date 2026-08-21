@@ -20,9 +20,15 @@ SEMI_MAX_RATIO = 0.30
 
 
 def validate(path: str) -> int:
+    """校验头像 PNG 的透明背景与不透明主体占比。
+
+    图片不可读（缺失 / 损坏 / 非图片格式）会触发 Pillow 的 OSError，
+    捕获后判为验证失败；其余异常视为校验器缺陷，向上传播。
+    返回 0 表示通过，1 表示不通过。
+    """
     try:
         im = Image.open(path).convert("RGBA")
-    except Exception as e:  # 文件缺失 / 损坏 / 非图片格式 → 判为验证失败
+    except OSError as e:  # 文件缺失 / 损坏 / 非图片格式 → 判为验证失败
         print("file: %s" % path)
         print("  [FAIL] readable image -> %s" % e)
         print("RESULT: FAIL")
