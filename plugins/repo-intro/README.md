@@ -48,6 +48,24 @@ Qwen2.5 系列 7B 模型，Dense 架构，支持 128K 上下文，文本生成�
 - 机器人自己的消息不处理，防止自触发循环。
 - 单条消息最多处理 `max_repos` 个链接（默认 5）。
 
+## 卡片字体
+
+卡片模板 `templates/card-5.html` 内嵌了 **Maple Mono Normal NF CN** 的 woff2 子集（base64 data URI，约 964KB）。因为 T2I 渲染服务只收到 HTML 文本、没有文件上传通道，字体必须打进模板里才能正常显示中文。
+
+- 字符集：ASCII + Latin-1 + 常用标点/符号 + **GB2312 一级汉字（3755 个）**
+- 子集字体的 family 名保持 `Maple Mono Normal NF CN` 不变，与模板 CSS 声明一致
+- 原始字体、子集文件与字符集见 `fonts/` 目录（`card-best.woff2`、`charset.txt`）
+
+重新生成（需要 fonttools + brotli）：
+
+```bash
+python3 -m venv /tmp/fontenv
+/tmp/fontenv/bin/pip install fonttools brotli
+
+# 在插件目录执行
+PYFTSUBSET=/tmp/fontenv/bin/pyftsubset ./fonts/rebuild.sh
+```
+
 ## 数据来源
 
 | 平台 | 元数据 API | README |
