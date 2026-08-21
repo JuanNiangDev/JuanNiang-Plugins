@@ -27,13 +27,13 @@ def validate(path: str) -> int:
     返回 0 表示通过，1 表示不通过。
     """
     try:
-        im = Image.open(path).convert("RGBA")
-    except OSError as e:  # 文件缺失 / 损坏 / 非图片格式 → 判为验证失败
+        with Image.open(path, formats=["PNG"]) as im:
+            a = np.array(im.convert("RGBA").getchannel("A")).astype(int)
+    except OSError as e:  # 文件缺失 / 损坏 / 非 PNG 格式 → 判为验证失败
         print("file: %s" % path)
-        print("  [FAIL] readable image -> %s" % e)
+        print("  [FAIL] readable PNG -> %s" % e)
         print("RESULT: FAIL")
         return 1
-    a = np.array(im.getchannel("A")).astype(int)
     total = a.size
     transparent = int((a == 0).sum())
     opaque = int((a >= 250).sum())
