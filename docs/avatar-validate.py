@@ -20,7 +20,13 @@ SEMI_MAX_RATIO = 0.30
 
 
 def validate(path: str) -> int:
-    im = Image.open(path).convert("RGBA")
+    try:
+        im = Image.open(path).convert("RGBA")
+    except Exception as e:  # 文件缺失 / 损坏 / 非图片格式 → 判为验证失败
+        print("file: %s" % path)
+        print("  [FAIL] readable image -> %s" % e)
+        print("RESULT: FAIL")
+        return 1
     a = np.array(im.getchannel("A")).astype(int)
     total = a.size
     transparent = int((a == 0).sum())
