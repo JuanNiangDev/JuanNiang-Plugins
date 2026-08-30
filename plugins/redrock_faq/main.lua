@@ -17,7 +17,7 @@ local REPLIES = {
     frontend = "他们是网站前台的画师。小程序、网站、webAPP里都有他们的影子。打造完美的网页是前端的宗旨！\n\n🔗 了解更多：https://docs.qq.com/doc/DWWZsdWtNVGtBYXFw",
     backend = [[后端是数据架构师，千万别小看它，这可是网校背后最可靠的保障。
 
-🔗 了解更多：https://docs.qq.com/doc/DWWpEc1dYUEhRVEph]],
+🔗 了解更多：https://docs.qq.com/pdf/DYkJCR2xVUnVKeUt5]],
     mobile = "移动开发部的同学是APP的开发者，想解锁APP的无限可能吗？\n\n🔗 了解更多：https://docs.qq.com/doc/DWXRjZGZyRk9MVmxW",
     ops = "运维安全部的成员技术高超，多亏了他们的存在，网校的系统才维持着安全稳定！\n\n🔗 了解更多：https://docs.qq.com/doc/DWXpiSnBwdEN1TGps",
     android = "Android是移动开发部从事安卓系统APP研发的子部门。他们利用Java和Kotlin来创造无限的可能，想在手机拥有一个自己创造的APP吗？加入Android吧！\n\n🔗 移动开发部：https://docs.qq.com/doc/DWXRjZGZyRk9MVmxW",
