@@ -81,7 +81,7 @@
   },
   {
     "name": "redrock_faq",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "author": "Redrock",
     "description": "红岩网校 FAQ 查询插件（/redrock \u003c关键词\u003e 命令式查询）",
     "path": "redrock_faq",
