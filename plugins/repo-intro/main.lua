@@ -192,7 +192,9 @@ end
 -- 返回下一步 README 的 (url, stage)；nil 表示直接进 LLM（数据集已内嵌 README）
 local function readme_url_for(e)
     if e.kind == "github" then
-        -- readme API 返回 download_url，正确处理 README 大小写/非标准命名
+        -- readme API 返回 base64 content（可直接解码）+ download_url；正确处理
+        -- README 大小写/非标准命名。国内部署优先解码 content（与元数据同源
+        -- api.github.com，可达），避免走 download_url 指向的 raw.githubusercontent.com
         return "https://api.github.com/repos/" .. e.owner .. "/" .. e.repo .. "/readme", "readme"
     elseif e.kind == "hf" then
         return "https://" .. hf_host() .. "/" .. e.owner .. "/" .. e.repo .. "/raw/main/README.md", "readme"
@@ -209,6 +211,15 @@ end
 -- --------------------------------------------------------------------
 -- 工具函数
 -- --------------------------------------------------------------------
+local function platform_label(e)
+    if e.kind == "github" then return "GitHub" end
+    if e.kind == "hf" then
+        local sub = e.sub or "models"
+        return "Hugging Face · " .. ({ models = "模型", datasets = "数据集", spaces = "Space" })[sub]
+    end
+    return "ModelScope · " .. (e.sub == "datasets" and "数据集" or "模型")
+end
+
 local function copy_ctx(ctx)
     local c = {}
     for k, v in pairs(ctx) do c[k] = v end
@@ -221,13 +232,73 @@ local function truncate(str)
     return str
 end
 
-local function platform_label(e)
-    if e.kind == "github" then return "GitHub" end
-    if e.kind == "hf" then
-        local sub = e.sub or "models"
-        return "Hugging Face · " .. ({ models = "模型", datasets = "数据集", spaces = "Space" })[sub]
+-- --------------------------------------------------------------------
+-- base64 解码（gopher-lua 无标准库；逐 4 字符解码，避免大数溢出）
+-- --------------------------------------------------------------------
+local B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local B64_MAP = {}
+for i = 1, #B64_CHARS do B64_MAP[B64_CHARS:sub(i, i)] = i - 1 end
+
+-- 解码失败返回 nil（由调用方回退 download_url）；空输入返回 ""。
+local function b64_decode(s)
+    if not s or s == "" then return "" end
+    s = s:gsub("%s", ""):gsub("=+$", "") -- GitHub content 按 60 字符换行并带 '=' 填充
+    local acc = ""
+    local out = {}
+    local n = #s
+    local i = 1
+    -- gopher-lua 的 table.concat 会把表内全部元素（含分隔符）压栈，而插件栈
+    -- 固定 5120；README 较大时单次 concat 会触发 registry overflow，因此每块
+    -- 累计 FLUSH 条输出就 flush 一次，再拼进 acc（2*FLUSH 需远小于 5120）。
+    local FLUSH = 1024
+    while i <= n do
+        local c1 = B64_MAP[s:sub(i, i)]; i = i + 1
+        local c2 = B64_MAP[s:sub(i, i)]; i = i + 1
+        if not c1 or not c2 then return nil end -- 含非 base64 字符
+        local c3 = (i <= n) and B64_MAP[s:sub(i, i)] or nil
+        if c3 then i = i + 1 end
+        local c4 = (i <= n) and B64_MAP[s:sub(i, i)] or nil
+        if c4 then i = i + 1 end
+        out[#out + 1] = string.char(c1 * 4 + math.floor(c2 / 16))
+        if c3 then
+            out[#out + 1] = string.char((c2 % 16) * 16 + math.floor(c3 / 4))
+            if c4 then
+                out[#out + 1] = string.char((c3 % 4) * 64 + c4)
+            end
+        end
+        if #out >= FLUSH then
+            acc = acc .. table.concat(out)
+            out = {}
+        end
     end
-    return "ModelScope · " .. (e.sub == "datasets" and "数据集" or "模型")
+    if #out > 0 then
+        acc = acc .. table.concat(out)
+    end
+    return acc
+end
+
+-- --------------------------------------------------------------------
+-- 附带文本提取：剥掉链接/URL，保留分享者随链接发来的说明文字
+-- --------------------------------------------------------------------
+-- 移除 markdown 链接 [text](url) 与裸 URL（含 t.co 短链），压缩空白。
+-- 结果作为"附带文本"送 LLM（可能是推文/推荐语，也可能纯噪声，由 LLM 甄别）。
+local function extract_context_text(raw)
+    if not raw or raw == "" then return "" end
+    local s = raw
+    s = s:gsub("%[[^%]]*%]%(%s*[^%)]*%s*%)", " ") -- 剥掉 [text](url)
+    s = s:gsub("https?://[^%s%)%]%>]+", " ")       -- 剥掉裸 URL
+    s = s:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    return s
+end
+
+-- 附带文本是否值得送 LLM：太短视为残留噪声（仅链接/一两个字），上限 2000 字符。
+local function context_text_for(raw)
+    if not cfg_bool("use_context_text", true) then return "" end
+    local t = extract_context_text(raw)
+    if #t < 9 then return "" end -- 短于 3 个汉字视为纯语气/碎片回复，不送
+    local max = 2000
+    if #t > max then return t:sub(1, max) end
+    return t
 end
 
 -- 解析元数据 JSON → 精简字段表
@@ -267,7 +338,9 @@ end
 
 -- 每仓库 LLM 结果缓存（值：JSON {type,title,summary,install,card_url}）
 local function repo_cache_key(e)
-    return "intro:" .. e.key
+    -- v2：README 改为直解 base64 + 附带文本 + 反套话规则，旧缓存摘要质量差，
+    -- 升级 key 强制全部重建一次，避免 7 天 TTL 内继续命中旧的空话摘要。
+    return "intro:v2:" .. e.key
 end
 
 local function repo_cache_get(e)
@@ -295,26 +368,31 @@ local function llm_system_prompt()
     local p = [[你是中文仓库介绍助手。用户会给你若干仓库（GitHub / Hugging Face / ModelScope）的元数据与 README 内容，请对每个仓库独立判定类型、写出简体中文介绍，最后按指定 JSON 输出。
 
 【零、通用铁律（所有仓库必做）】
-1. 只写 README 与元数据明确给出的内容，禁止编造参数量、分数、功能、许可证、安装命令、API 价格；未写明的直接省略，禁止输出"未说明""未给出""未提及"等话术。
+1. 只写 README、元数据与【附带文本】中明确给出的内容，禁止编造参数量、分数、功能、许可证、安装命令、API 价格、Star 数；未写明的直接省略。
 2. summary 一律简体中文，英文内容翻译；项目名、命令、API 名、模型名保留原文。
 3. 每个仓库独立判断类型，禁止按组织/前缀归一类；同一组织不同仓库类型可能完全不同。
 4. README 不一定是 README.md（可能是 README.org/.rst），别把"有文档"误判成"无文档"；多个仓库务必全部覆盖，不得遗漏。
 5. desc_cn：仓库官方 description 的简体中文翻译（≤60 字），GitHub 仓库必填；无官方描述则填空字符串。
+6. 【附带文本】是分享者随链接发来的消息片段（推文/推荐语等），不是仓库官方文档。仅当它确实描述了某个仓库的用途、功能、安装或使用方式时，才把它作为该仓库的补充信息并入 summary（例如补充了 README 没有的一句话定位或安装命令）；它与 README 冲突时以 README 为准。若是与仓库无关的闲聊、个人情绪、晒 Star、祝贺、转发语、感谢、广告等噪声，一律忽略，禁止写入任何字段；不要把某个仓库的附带文本安到别的仓库头上。
+7. 严禁输出空话套话与"元信息旁白"，包括但不限于："推测与XX相关""具体内容/用途需查阅仓库代码与文档""具体功能详见仓库文档""未提供详细文档，待作者补充""当前元数据未包含功能描述，以仓库内容为准""仓库未提供进一步功能说明与文档""README 未说明""暂无描述""未说明/未给出/未提及"等。README 内容少或被截断时，也要从已有的标题、一句话描述、元数据里提炼可写的信息；实在没有，summary 输出空字符串（绝不硬凑），title 可只写仓库名。宁可少说，不可说废话。
+8. 严禁大段罗列与流水账：任何清单——智能体、平台、设备、模型、技术栈、语言——**一律最多列 2 个，其余用"等"带过，宁少勿多**（如"支持 Claude Code 等主流编码 Agent"；"iOS 与 Web 端"而非"iOS/Android App、Web 与桌面端"）。禁止完整罗列（如 Claude Code、Codex、Cursor、Grok Build、OpenCode 全写出来）；安装/部署最多给一条最简命令（如 npx skills add owner/repo、npm install -g 包名），多平台（Windows/macOS/Arch）、Node 版本要求、完整 clone+install 步骤、配置文件路径、目录结构等细节一律省略或一句话带过；技术栈/语言最多提 1 个（如"React 编写"）或省略。summary 精炼，突出"是什么、能做什么、关键数字"，一般一两句话、不超过 __MAX__ 字。
+9. summary 不得重复官方 description/desc_cn 已展示过的原文——描述行之外才写 summary，内容应是描述没有的实质信息（能力、用途、规模、一条最简安装命令）。
+10. summary 中任何并列清单（智能体/平台/设备/模型/语言等）**具名项只允许 1~2 个**：写 2 个用"A、B 等"，写 1 个用"A 等"。3 个具名项即违规。判例："支持 Claude Code、Codex 等"✓；"Claude Code、Codex、Cursor 等"✗；"iOS、Android、Web 等端"✗；"iOS、Android 与 Web 端"✗（应写作"iOS 与 Web 端"）。安装/部署命令整条 summary 最多 1 条。跨平台/多端类仓库直接概括为"跨平台"或"iOS、Android 等主流端"（≤2），禁止点齐所有平台。
 
 【一、GitHub 仓库类型判定与总结】
 依次判定：先看是否第 1、2 类，都不是则归第 3 类。
 
 1. MCP / Skills / Agent 插件类
 证据（满足其一即倾向此类）：README 或描述含 "MCP"、"skill"、"plugin"、"插件"；README 给出面向 AI 编码工具/智能体的安装命令（如 npx skills add owner/repo、/plugin marketplace add owner/repo、/plugin install 插件名、dsh plugin add 插件名、把目录复制到 $DSH_HOME/skills/ 或 .agents/skills/）；结构含 skills/ 目录、SKILL.md、插件 manifest、MCP 配置；topics 含 claude-code、codex、agent-skills。核心特征：是"装进某个 Agent 直接用"的现成能力包，本身不是独立运行的程序。
-summary 要点：产品定位一句话 + 核心能力 1~3 点 + 安装方式（必须原样写出真实命令——npx/npm 类如 npx skills add owner/repo、npm install -g 包名；插件市场类如 /plugin marketplace add owner/repo 再 /plugin install 插件名；DSH 类如 dsh plugin add 插件名；复制类写明源/目标目录；MCP 类给 claude mcp add ... -- npx -y 包名 或 mcpServers 配置块。禁止只写"需安装"不给命令）。
+summary 要点：产品定位一句话 + 核心能力 1~2 点 + 安装一条最简命令（如 npx skills add owner/repo、/plugin install 插件名、dsh plugin add 插件名、claude mcp add ... -- npx -y 包名；复制类一句"复制到 skills 目录"即可，不给完整路径步骤）。禁止罗列多平台/多步骤安装、禁止写"需安装"却无命令。
 
 2. AI Agent 项目
 证据：描述含 agent、智能体、自动化、workflow、一键生成、数字人、浏览器自动化；README 描述"输入→输出"流水线（如"输入主题即自动生成脚本、字幕、配乐并合成视频"）并给运行/部署说明（Docker、npm install、API Key、Web 界面）；topics 含 ai-agent、llm-agent、automation。核心特征：本身是可独立运行的程序/服务/工作流。
-summary 要点：先讲"把什么变成什么"（输入→输出），再列核心能力（自动脚本/素材/字幕/配音、浏览器自动化等），最后写部署/使用方式（Docker 一键、npm install＋API Key、网页版/桌面版、本地运行）。
+summary 要点：先讲"把什么变成什么"（输入→输出），再讲核心能力与亮点（概括，不逐个枚举功能），部署/使用一句话（如"Docker 一键部署"、"npm install 后填 API Key"）。禁止罗列多平台部署步骤。
 
 3. 其他类
 其余全部：SDK/库与框架、API 网关/代理（把某模型封装成 OpenAI 兼容接口）、Web 应用（AI 简历编辑器、聊天前端）、数据集、论文/研究实现、学习资源（教程、awesome 精选列表）、实用小工具、整活、个人/组织主页、开源模型仓库。
-summary 要点（按子类型）：SDK/库：是什么、支持什么模型/硬件、怎么装怎么调；API 网关：封装什么成什么接口、多账号/多模型、部署；Web 应用：定位、特性、部署或在线地址；数据集：规模、内容、标注、引用；论文/研究实现：论文名、方法、代码/权重地址；学习资源/awesome：范围、数量、亮点；实用工具：解决什么问题、怎么用；整活：一句话说明玩法。
+summary 要点（按子类型，均遵守零.8 反罗列、精炼）：SDK/库：是什么、支持什么模型/硬件、怎么装怎么调；API 网关：封装什么成什么接口、多账号/多模型、部署；Web 应用：定位、特性、部署或在线地址；数据集：规模、内容、标注、引用；论文/研究实现：论文名、方法、代码/权重地址；学习资源/awesome：范围、数量、亮点；实用工具：解决什么问题、怎么用；整活：一句话说明玩法。
 
 模型仓库（GitHub 上发布权重的仓库）归第 3 类，但必须写：模型定位与能力（如"手机端可运行的图文理解模型"）；参数量/权重规格（如 0.1B、4B，或"1 分钟音频即可训练"）；部署方式（HuggingFace 权重下载、本地/手机运行、在线 Demo、Colab 训练）；有论文或基准可补一句。
 
@@ -349,7 +427,7 @@ summary 要点（按子类型）：SDK/库：是什么、支持什么模型/硬�
 - Space：SDK、功能、能否在线使用
 
 【三、输出格式】严格只输出如下 JSON（不要输出 JSON 以外的任何内容，不要用代码块包裹）：
-{"repos":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字）","summary":"详细介绍（简体中文，__MIN__~__MAX__字，突出是什么、能做什么、关键数字）","desc_cn":"官方描述中文翻译（GitHub 必填，无则空字符串）"}]}
+{"repos":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字，无信息时可用仓库名，禁止套话）","summary":"精炼介绍（简体中文，通常 __MIN__~__MAX__字；内容充分时写足、内容稀少时写短或留空；突出是什么、能做什么、关键数字；严禁空话套话旁白与罗列；不得重复 desc_cn）","desc_cn":"官方描述中文翻译（GitHub 必填，无则空字符串）"}]}
 index 与输入仓库编号一一对应（从 1 开始）。]]
     return p:gsub("__MIN__", min_c):gsub("__MAX__", max_c)
 end
@@ -635,6 +713,13 @@ local function start_llm(batch)
         { role = "system", content = llm_system_prompt() },
         { role = "user", content = table.concat(parts, "\n\n") },
     }
+    -- 附带文本（分享者消息中除链接外的说明，可能是推文/推荐语，也可能是噪声）：
+    -- 一并送 LLM 作为补充信息，由提示词规则甄别是否采用。
+    if batch.context_text and batch.context_text ~= "" then
+        messages[2].content = messages[2].content
+            .. "\n\n【附带文本（分享者随链接发来的消息，非仓库官方文档，与仓库无关的噪声请忽略）】\n"
+            .. batch.context_text
+    end
     batch.llm_messages = messages -- 失败重试复用
     local rid = jn.llm.chat_async(messages, { timeout = cfg_num("llm_timeout", 60) })
     if not rid or rid == 0 then
@@ -717,7 +802,21 @@ local function handle_readme(ctx, result, err)
             return
         end
         local data = jn.json.decode(result.body or "")
-        if type(data) ~= "table" or not data.download_url then
+        if type(data) ~= "table" then
+            batch.pending = batch.pending - 1
+            return
+        end
+        -- readme API 自带 base64 content，与元数据同源（api.github.com，国内可达）；
+        -- 优先解码直接得到 README，避免下载 download_url 指向的 raw.githubusercontent.com
+        -- （国内常被墙/超时，导致 README 缺失、LLM 只能写"无 README/详见文档"套话）。
+        local decoded = b64_decode(data.content)
+        if decoded and decoded ~= "" then
+            e.readme = truncate(decoded)
+            batch.pending = batch.pending - 1
+            return
+        end
+        -- content 缺失/解码失败：回退 download_url 拉取原文
+        if not data.download_url then
             batch.pending = batch.pending - 1
             return
         end
@@ -909,6 +1008,7 @@ function on_message(event)
         entries = entries,
         uncached = uncached,
         pending = #uncached,
+        context_text = context_text_for(raw),
         target = {
             message_type = event.message_type,
             target_id = (event.group_id ~= 0 and event.group_id) or event.user_id,

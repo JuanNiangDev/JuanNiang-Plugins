@@ -42,6 +42,12 @@ configs:
     description: 用主程序 LLM 翻译描述并总结 README；关闭则只发仓库名与原文简介
     default: true
 
+  - key: use_context_text
+    type: bool
+    label: 附带文本参与总结
+    description: 消息中除仓库链接外的说明文字（如推文、推荐语）一并交给 LLM 作为仓库补充信息；LLM 会自动忽略与仓库无关的闲聊噪声。关闭则只用 README 与元数据
+    default: true
+
   - key: reply_quote
     type: bool
     label: 引用原消息
@@ -81,7 +87,7 @@ configs:
   - key: summary_min_chars
     type: string
     label: 总结最小字数
-    description: LLM 总结的最少字数，默认 50
+    description: LLM 总结的目标字数（默认 50）；内容稀少时允许如实写短或留空，避免为凑字数写套话
     default: "50"
 
   - key: summary_max_chars
