@@ -322,10 +322,9 @@ local function extract_meta(e, data)
             downloads = data.downloads,
             likes = data.likes,
             params = data.safetensors and data.safetensors.total or nil,
-            -- HF 头像：t2i 渲染器网络无法直连 huggingface CDN（国内部署），走 wsrv.nl
-            -- 图片代理取组织社交缩略图并裁成方形；失败时模板 onerror 隐藏为灰圆占位
-            avatar = "https://wsrv.nl/?url=cdn-thumbnails.huggingface.co/social-thumbnails/"
-                .. e.owner .. ".png&w=280&h=280&fit=cover",
+            -- HF 头像在 avatar 阶段抓 org 页提取 cdn-avatars（og:image 是横幅大图，非头像），
+            -- 这里不设静态头像；fetch 失败时模板灰圆兜底
+            avatar = nil,
         }
     elseif e.kind == "ms" then
         local d = data.Data or data
@@ -517,24 +516,34 @@ local function fmt_params_bytes(n)
 end
 
 local function model_params(e, mi)
+    local total = nil
     local p = e.meta and e.meta.params
     if p and tonumber(p) then
-        local s = fmt_params_bytes(p)
-        if s then return s end
+        total = fmt_params_bytes(p)
     end
-    local mp = mi and mi.params
-    if mp and mp ~= "" then
-        -- 护栏：模型库异常大值（>10T）视为数据污染，按缺失处理（HF meta 更可靠）
-        local num = tonumber(mp:match("^([%d%.]+)"))
-        if mp:match("T$") and num and num > 10 then
-            return "闭源"
+    if not total then
+        local mp = mi and mi.params
+        if mp and mp ~= "" then
+            -- 护栏：模型库异常大值（>10T）视为数据污染，按缺失处理（HF meta 更可靠）
+            local num = tonumber(mp:match("^([%d%.]+)"))
+            if not (mp:match("T$") and num and num > 10) then
+                total = tostring(mp)
+            end
         end
-        return tostring(mp)
     end
-    return "闭源"
+    if not total then return "闭源" end
+    -- 激活参数（MoE）：从模型名/repo 提取 A\d+B，如 Hunyuan-A13B / 122B-A10B / 30B-A3B
+    local name = (e.meta and e.meta.name) or (e.owner .. "/" .. e.repo)
+    local act = name:match("A(%d+%.?%d*)B")
+    if act then
+        local a = act:gsub("%.0+$", "") -- 仅剥小数尾零，保留整数尾零（10→10，10.0→10）
+        if a == "" then a = act end
+        return total .. "(A" .. a .. "B)"
+    end
+    return total
 end
 
--- 上下文：1M / 262k / 32k（就近千位取整）
+-- 上下文：1M / 256k / 32k（1024 取整，贴合厂商口径 32k/128k/256k）
 local function fmt_context(n)
     n = tonumber(n)
     if not n or n <= 0 then return "—" end
@@ -542,8 +551,8 @@ local function fmt_context(n)
         local m = n / 1000000
         return string.format("%.1f", m):gsub("%.?0+$", "") .. "M"
     end
-    if n >= 1000 then
-        return tostring(math.floor((n + 500) / 1000)) .. "k"
+    if n >= 1024 then
+        return tostring(math.floor((n + 512) / 1024)) .. "k"
     end
     return tostring(n)
 end
@@ -580,17 +589,35 @@ local function fmt_price(v)
 end
 
 -- 价格块：币种(国产¥/国外$)、输入/输出/思考/缓存、闲时、上下文分段
+-- 国产模型判定：modeldb cn 标记 / provider_local / 厂商名启发式
+local CN_PROVIDERS = { deepseek=true, qwen=true, alibaba=true, zhipu=true, chatglm=true, glm=true,
+    kimi=true, moonshot=true, doubao=true, volc=true, volcengine=true, baidu=true, hunyuan=true,
+    tencent=true, minimax=true, bytedance=true, iflytek=true, xfyun=true, stepfun=true, ernie=true,
+    spark=true, ["01ai"]=true, minimaxai=true, nvdia=true }
+local function is_cn_model(e, mi)
+    if mi and mi.cn then return true end
+    if mi and mi.pl and mi.pl ~= "" then return true end
+    local low = ((e.meta and e.meta.name) or (e.owner .. "/" .. e.repo)):lower()
+    for org in pairs(CN_PROVIDERS) do
+        if low:find(org, 1, true) then return true end
+    end
+    return false
+end
+
 local function model_pricing_html(e, mi)
     local pr = mi and mi.pr or {}
     if #pr == 0 then return "" end
-    local has_cny = false
-    for _, p in ipairs(pr) do
-        if p.cur == "CNY" then has_cny = true break end
-    end
+    local cn = is_cn_model(e, mi)
     local sym, cur = "¥", "CNY"
-    if not has_cny then sym, cur = "$", "USD" end
+    if not cn then sym, cur = "$", "USD" end
+    -- 国产模型但库内无 CNY 档：把 USD 档按 7.2 汇率换算成 CNY 展示
+    local USD_RATE = 7.2
+    local function conv(v)
+        if not v then return nil end
+        return math.floor(v * USD_RATE * 100 + 0.5) / 100
+    end
     local std, off, tiers = {}, {}, {}
-    for _, p in ipairs(pr) do
+    local function collect(p)
         if p.cur == cur then
             if p.tier == "off_peak" then
                 off[#off + 1] = p
@@ -601,25 +628,40 @@ local function model_pricing_html(e, mi)
             end
         end
     end
+    for _, p in ipairs(pr) do
+        collect(p)
+    end
+    if #std == 0 and #off == 0 and #tiers == 0 and cn then
+        for _, p in ipairs(pr) do
+            if p.cur == "USD" then
+                collect({ cur = "CNY", tier = p.tier, min = p.min, max = p.max,
+                    input = conv(p.input), output = conv(p.output),
+                    thinking = conv(p.thinking), cache = conv(p.cache) })
+            end
+        end
+    end
     local rows = {}
-    local s = std[1]
-    if s then
-        local ii, oo = fmt_price(s.input), fmt_price(s.output)
-        local kv = {}
-        if ii and oo then
-            kv[#kv + 1] = '输入 <b>' .. sym .. ii .. '</b>'
-            kv[#kv + 1] = '输出 <b>' .. sym .. oo .. '</b>'
-        end
-        local th = fmt_price(s.thinking)
-        if th and oo and th ~= oo then
-            kv[#kv + 1] = '思考 <b class="price-think">' .. sym .. th .. '</b>'
-        end
-        local cc = fmt_price(s.cache)
-        if cc then
-            kv[#kv + 1] = '缓存 <b>' .. sym .. cc .. '</b>'
-        end
-        if #kv > 0 then
-            rows[#rows + 1] = '<div class="price-row">' .. table.concat(kv, ' · ') .. '</div>'
+    -- 有上下文分段时只用分段（flat 标准行会与分段重复）
+    if #tiers == 0 then
+        local s = std[1]
+        if s then
+            local ii, oo = fmt_price(s.input), fmt_price(s.output)
+            local kv = {}
+            if ii and oo then
+                kv[#kv + 1] = '输入 <b>' .. sym .. ii .. '</b>'
+                kv[#kv + 1] = '输出 <b>' .. sym .. oo .. '</b>'
+            end
+            local th = fmt_price(s.thinking)
+            if th and oo and th ~= oo then
+                kv[#kv + 1] = '思考 <b class="price-think">' .. sym .. th .. '</b>'
+            end
+            local cc = fmt_price(s.cache)
+            if cc then
+                kv[#kv + 1] = '缓存 <b>' .. sym .. cc .. '</b>'
+            end
+            if #kv > 0 then
+                rows[#rows + 1] = '<div class="price-row">' .. table.concat(kv, ' · ') .. '</div>'
+            end
         end
     end
     local o = off[1]
@@ -636,12 +678,18 @@ local function model_pricing_html(e, mi)
         for _, t in ipairs(tiers) do
             local ii, oo = fmt_price(t.input), fmt_price(t.output)
             if ii and oo then
-                local maxc = fmt_context(t.max)
-                -- 去重相同上下文分段（不同来源可能重复收录同一档）
-                local rk = tostring(t.min or 0) .. "-" .. tostring(t.max or 0)
+                -- 开区间（max 缺失）显示 >min ctx；有界显示 ≤max ctx
+                local rng
+                if t.max == nil or t.max == 0 then
+                    rng = '>' .. fmt_context(t.min) .. ' ctx'
+                else
+                    rng = '≤' .. fmt_context(t.max) .. ' ctx'
+                end
+                -- 去重：同价格只留第一个分段（避免 ≤256k 与 >128k 同价重复展示）
+                local rk = tostring(t.input or "") .. "/" .. tostring(t.output or "")
                 if not seen[rk] then
                     seen[rk] = true
-                    tkv[#tkv + 1] = '≤' .. maxc .. ' ctx <b>' .. sym .. ii .. '/' .. sym .. oo .. '</b>'
+                    tkv[#tkv + 1] = rng .. ' <b>' .. sym .. ii .. '/' .. sym .. oo .. '</b>'
                 end
             end
         end
@@ -662,7 +710,11 @@ local function fill_model_template(tpl, e)
     local data = {
         OWNER = e.owner,
         REPO = e.repo,
-        AVATAR = (m.avatar ~= nil and m.avatar ~= "") and m.avatar or GRAY_AVATAR,
+        -- HF：org 页提取的组织头像 cdn-avatars 走 wsrv.nl 代理（t2i 无法直连 HF CDN）
+        -- MS：直连 resouces.modelscope.cn
+        AVATAR = (e.kind == "hf" and m.avatar_src ~= nil and m.avatar_src ~= "")
+            and ("https://wsrv.nl/?url=" .. m.avatar_src .. "&w=280&h=280&fit=cover")
+            or ((m.avatar ~= nil and m.avatar ~= "") and m.avatar or GRAY_AVATAR),
         PARAMS_CHIP = '<span class="chip"><span class="lbl">参数量</span><span class="val">'
             .. model_params(e, mi) .. '</span></span>',
         CONTEXT_CHIP = '<span class="chip"><span class="lbl">上下文</span><span class="val">'
@@ -1027,6 +1079,16 @@ local function handle_meta(ctx, result, err)
     if not rid or rid == 0 then
         batch.pending = batch.pending - 1 -- README 拉取失败，仍继续
     end
+    -- HF 组织头像：抓 org 页提取 cdn-avatars（og:image 是横幅大图，非头像）
+    if e.kind == "hf" then
+        batch.pending = batch.pending + 1
+        local ca = copy_ctx(ctx)
+        ca.stage = "avatar"
+        local rid2 = jn.http.get_async("https://" .. hf_host() .. "/" .. e.owner, ca)
+        if not rid2 or rid2 == 0 then
+            batch.pending = batch.pending - 1
+        end
+    end
 end
 
 -- readme 阶段
@@ -1094,6 +1156,19 @@ local function handle_readme(ctx, result, err)
     batch.pending = batch.pending - 1
 end
 
+-- avatar 阶段（HF org 页提取组织头像 cdn-avatars URL）
+local function handle_avatar(ctx, result, err)
+    local batch = ctx.batch
+    local e = batch.entries[ctx.idx]
+    if not err and result and result.status == 200 and result.body and e.meta then
+        local src = result.body:match("https://cdn%-avatars%.huggingface%.co/v1/production/uploads/[%w%-%._/]+")
+        if src then
+            e.meta.avatar_src = src
+        end
+    end
+    batch.pending = batch.pending - 1
+end
+
 -- readme_raw 阶段（github download_url 内容）
 local function handle_readme_raw(ctx, result, err)
     local batch = ctx.batch
@@ -1113,6 +1188,8 @@ function on_http_response(req_id, ctx, result, err)
         handle_readme(ctx, result, err)
     elseif ctx.stage == "readme_raw" then
         handle_readme_raw(ctx, result, err)
+    elseif ctx.stage == "avatar" then
+        handle_avatar(ctx, result, err)
     end
     check_batch(ctx.batch)
 end
