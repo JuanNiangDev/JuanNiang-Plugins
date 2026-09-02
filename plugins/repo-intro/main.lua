@@ -837,7 +837,10 @@ local function start_cards(batch)
     end
     local pending = 0
     for idx, e in ipairs(usable) do
-        if not e.card_url or e.card_url == "" then
+        -- 非模型的 HF/MS 仓库（数据集/Space 等路由）不渲染卡片图，只发文本
+        if e.kind ~= "github" and e.sub ~= "models" then
+            e.card_url = ""
+        elseif not e.card_url or e.card_url == "" then
             -- HF/MS 模型卡固定用 card-6，GitHub 用配置模板
             local etpl = tpl
             if e.kind ~= "github" then
