@@ -32,9 +32,15 @@ configs:
 
   - key: send_cover
     type: bool
-    label: 发送封面图
-    description: 总结输出末尾附带文章封面图（og:image）；关闭则不发送
+    label: 发送图文图片
+    description: 总结输出末尾附带文章全部图片（按正文顺序依次发送，支持图文）；关闭则不发送
     default: true
+
+  - key: max_images
+    type: string
+    label: 每篇最多发送图片数
+    description: 单篇文章最多发送的图片张数（0 = 不限制，按正文顺序全发）
+    default: "0"
 
   - key: group_only
     type: bool

@@ -164,6 +164,7 @@ local function extract_meta(html)
     local cover = html:match('property="og:image" content="([^"]*)"') or ""
     local account = html:match('var nickname = htmlDecode%("([^"]*)"%)')
         or html:match('var nickname = "([^"]*)"')
+        or html:match("nick_name: '([^']*)'")
         or ""
     account = account:gsub("^%s+", ""):gsub("%s+$", "")
     return title, desc, cover, account
@@ -211,27 +212,82 @@ local function html_to_text(html)
     return text:gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+-- 提取正文容器内的图片 URL（经典格式：<img data-src>，回退 src），按文档顺序去重
+local function extract_images(html)
+    local imgs, seen = {}, {}
+    local function add(u)
+        local norm = u:gsub("^http://", "https://")
+        -- 解码 HTML/JS 转义：\x26→&、&amp;→&（微信 URL 常带 \x26amp;from=appmsg）
+        norm = norm:gsub("\\x26", "&"):gsub("&amp;", "&")
+        if norm ~= "" and not seen[norm] then
+            seen[norm] = true
+            imgs[#imgs + 1] = norm
+        end
+    end
+    for u in html:gmatch('data%-src="([^"]+)"') do add(u) end
+    if #imgs == 0 then
+        for u in html:gmatch('src="(https?://[^"]+)"') do add(u) end
+    end
+    return imgs
+end
+
+-- 提取整页图片（新格式无 js_content：图片在 JS 配置里），按页序去重并排除作者头像
+local function extract_page_images(html)
+    local avatar = html:match('jump_author_avatar[^>]*src="(https?://[^"]+)"') or ""
+    local avatar_base = avatar:match("^https?://[^/]+/[^/]+/[^/]+/[^/]+") or ""
+    local imgs, seen = {}, {}
+    for u in html:gmatch("https?://mmbiz%.qpic%.cn/[^\"%s'>]+") do
+        local norm = u:gsub("^http://", "https://")
+        -- 解码 HTML/JS 转义：\x26→&、&amp;→&
+        norm = norm:gsub("\\x26", "&"):gsub("&amp;", "&")
+        -- 去 query（wx_fmt 等）与 /0 尺寸后缀，避免同一图重复
+        local base = norm:match("^(.-)[?/]0") or norm
+        local is_avatar = avatar_base ~= "" and base:sub(1, #avatar_base) == avatar_base
+        if not is_avatar and not seen[base] then
+            seen[base] = true
+            imgs[#imgs + 1] = norm
+        end
+    end
+    return imgs
+end
+
 -- 解析文章页：成功返回 meta 表，失败返回 nil + 错误文案
 local function parse_article(body)
     if not body or body == "" then return nil, "抓取失败：空响应" end
-    -- 风控验证页：无正文容器且含"环境异常"
-    if not body:find('id="js_content"', 1, true) then
-        if body:find("环境异常", 1, true) then
-            return nil, "微信风控拦截，请稍后再试"
-        end
-        return nil, "文章内容解析失败"
-    end
     local title, desc, cover, account = extract_meta(body)
-    local content = html_to_text(extract_body(body))
-    if content == "" then
+    -- 经典格式：id="js_content" 容器 → 纯文本 + 有序图片（data-src）
+    local body_html = extract_body(body)
+    if body_html ~= "" then
+        local content = html_to_text(body_html)
+        if content == "" then
+            return nil, "文章内容为空"
+        end
+        return {
+            title = title,
+            desc = desc,
+            cover = cover,
+            account = account,
+            content = truncate(content),
+            images = extract_images(body_html),
+        }, nil
+    end
+    -- 风控验证页（无 js_content 且含"环境异常"）
+    if body:find("环境异常", 1, true) then
+        return nil, "微信风控拦截，请稍后再试"
+    end
+    -- 新格式：无 js_content，正文在 meta description（字面 \x0a 为换行），图片从整页提取
+    local desc_content = body:match('<meta name="description" content="(.-)"') or ""
+    if desc_content == "" then
         return nil, "文章内容为空"
     end
+    local content = desc_content:gsub("\\x0a", "\n"):gsub("\\x0d", "")
     return {
         title = title,
         desc = desc,
         cover = cover,
         account = account,
         content = truncate(content),
+        images = extract_page_images(body),
     }, nil
 end
 
@@ -244,11 +300,12 @@ local function article_cache_get(e)
     local v = jn.cache.get(article_cache_key(e))
     if type(v) ~= "table" then return nil end
     if not v.summary then return nil end
-    -- 缓存结构升级：旧缓存无 account（曾存文章作者名）或无 cover，视为未命中重建
-    if not v.account or not v.cover then return nil end
-    -- 恢复抓取期 meta（标题/公众号名/封面图），缓存命中时输出段完整
+    -- 缓存结构升级：旧缓存无 account、无 cover 或图文支持前无 images，视为未命中重建
+    if not v.account or not v.cover or not v.images then return nil end
+    -- 恢复抓取期 meta（标题/公众号名/封面图/图片），缓存命中时输出段完整
     if (v.title or "") ~= "" or (v.account or "") ~= "" then
-        e.meta = { title = v.title or "", account = v.account or "", cover = v.cover or "", desc = "" }
+        e.meta = { title = v.title or "", account = v.account or "", cover = v.cover or "", desc = "",
+                   images = v.images or {} }
     end
     return v
 end
@@ -355,17 +412,18 @@ local function send_summary(batch, text)
     else
         segments = { { type = "text", data = { text = text } } }
     end
-    -- 封面图（og:image）放链接之后；取第一篇抓取到封面的文章
+    -- 图文图片：每篇全部图片按序附加（不再只发封面图）；max_images 限制每篇张数
     if t.send_cover then
-        local cover = nil
+        local max = cfg_num("max_images", 0) -- 0 = 不限制
         for _, e in ipairs(batch.entries) do
-            if not e.skipped and e.meta and e.meta.cover and e.meta.cover ~= "" then
-                cover = e.meta.cover
-                break
+            if not e.skipped and e.meta and e.meta.images then
+                local n = 0
+                for _, img in ipairs(e.meta.images) do
+                    if max > 0 and n >= max then break end
+                    segments[#segments + 1] = { type = "image", data = { file = img } }
+                    n = n + 1
+                end
             end
-        end
-        if cover then
-            segments[#segments + 1] = { type = "image", data = { file = cover } }
         end
     end
     if t.message_type == "group" then
@@ -525,6 +583,7 @@ function on_chat_response(req_id, content, err)
                     account = (e.meta and e.meta.account) or "",
                     cover = (e.meta and e.meta.cover) or "",
                     summary = r.summary and tostring(r.summary) or "",
+                    images = (e.meta and e.meta.images) or {},
                 }
                 e.llm = content_tbl
                 article_cache_set(e, content_tbl)
