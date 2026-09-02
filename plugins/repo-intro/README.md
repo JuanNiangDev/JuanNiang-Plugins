@@ -111,7 +111,7 @@ python3 data/rebuild-modeldb.py
 | `summary_min_chars` | string | `50` | LLM 总结的目标字数（内容稀少时可如实写短或留空） |
 | `summary_max_chars` | string | `150` | LLM 总结的最多字数 |
 | `card_enabled` | bool | `true` | 发送仓库卡片图（走主程序 T2I 服务渲染 HTML 模板） |
-| `card_template` | string | `5` | 卡片模板编号（当前仅有 5；`random` 每次随机选一个） |
+| `card_template` | string | `5` | 卡片模板编号（仅用于 GitHub 卡片；`random` 在 1~5 间随机选一个；HF/MS 模型卡固定用 card-6） |
 | `card_width` | string | `900` | 卡片渲染宽度像素（模板 900×450） |
 | `card_height` | string | `450` | 卡片渲染高度像素（模板 900×450） |
 | `github_token` | string | 空 | GitHub Personal Access Token：限流 60→5000 次/小时并可访问私有仓库；留空走匿名免费层级 |

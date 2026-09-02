@@ -121,7 +121,11 @@ def collect_llmrates():
 
 # ---------------- 2/3. models.dev / newapiratio ----------------
 def collect_catalog(url, cache_name):
-    data = json.loads(fetch(url, cache_name, 60).decode('utf-8', 'replace'))
+    resp = fetch(url, cache_name, 60)
+    if not resp:
+        print(f"!! {url.split('/')[2]} 空响应，跳过该来源")
+        return {}
+    data = json.loads(resp.decode('utf-8', 'replace'))
     out = {}
     for pid, p in data.items():
         for mid, m in (p.get('models') or {}).items():
@@ -140,7 +144,11 @@ def collect_catalog(url, cache_name):
 
 # ---------------- 4. openrouter ----------------
 def collect_openrouter():
-    data = json.loads(fetch("https://openrouter.ai/api/v1/models", "openrouter.json", 60).decode('utf-8', 'replace'))
+    resp = fetch("https://openrouter.ai/api/v1/models", "openrouter.json", 60)
+    if not resp:
+        print("!! openrouter 空响应，跳过该来源")
+        return {}
+    data = json.loads(resp.decode('utf-8', 'replace'))
     items = data.get('data', [])
     print("openrouter models:", len(items))
     out = {}
@@ -278,7 +286,9 @@ def build_db(llm, mdev, napi, ortr):
             if part != a:
                 var.add(part)
         for v in var:
-            alias_idx[norm_key(v)] = main
+            nk = norm_key(v)
+            if nk not in alias_idx:  # 不覆盖其他模型已注册的精确别名
+                alias_idx[nk] = main
     return canonical, alias_idx
 
 def emit(canonical, alias_idx):

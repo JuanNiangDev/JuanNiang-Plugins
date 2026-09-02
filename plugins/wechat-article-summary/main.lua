@@ -183,11 +183,11 @@ local function extract_body(html)
     if not start then return "" end
     local open = html:find(">", start, true)
     if not open then return "" end
-    local depth, pos = 0, open + 1
+    local depth, pos = 1, open + 1  -- 根 div(js_content) 已计入，归 0 即正文结束
     while true do
         local lt = html:find("<", pos)
         if not lt then break end
-        local tag = html:match("^([%a!/]+)", lt)
+        local tag = html:match("([%a!/]+)", lt)
         local gt = html:find(">", lt)
         if not gt then break end
         if tag == "div" then
@@ -230,9 +230,10 @@ local function extract_images(html)
             imgs[#imgs + 1] = norm
         end
     end
-    for u in html:gmatch('data%-src="([^"]+)"') do add(u) end
-    if #imgs == 0 then
-        for u in html:gmatch('src="(https?://[^"]+)"') do add(u) end
+    -- 逐个 img 标签取一次：优先 data-src，否则 src（保持文档顺序，兼容混排文章）
+    for tag in html:gmatch('<img[^>]*>') do
+        local s = tag:match('data%-src="([^"]+)"') or tag:match('src="(https?://[^"]+)"')
+        if s then add(s) end
     end
     return imgs
 end

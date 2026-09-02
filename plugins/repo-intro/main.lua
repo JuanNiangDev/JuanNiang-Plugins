@@ -515,10 +515,10 @@ local function fmt_params_bytes(n)
     if not n or n <= 0 then return nil end
     local b = n / 1e9
     if b >= 1000 then
-        return string.format("%.1fT", b / 1000):gsub("%.?0+$", "")
+        return (string.format("%.1f", b / 1000):gsub("%.?0+$", "")) .. "T"
     end
     if b >= 10 then return string.format("%.0fB", b) end
-    return string.format("%.1fB", b):gsub("%.?0+$", "")
+    return (string.format("%.1f", b):gsub("%.?0+$", "")) .. "B"
 end
 
 local function model_params(e, mi)
@@ -599,7 +599,7 @@ end
 local CN_PROVIDERS = { deepseek=true, qwen=true, alibaba=true, zhipu=true, chatglm=true, glm=true,
     kimi=true, moonshot=true, doubao=true, volc=true, volcengine=true, baidu=true, hunyuan=true,
     tencent=true, minimax=true, bytedance=true, iflytek=true, xfyun=true, stepfun=true, ernie=true,
-    spark=true, ["01ai"]=true, minimaxai=true, nvdia=true }
+    spark=true, ["01ai"]=true, minimaxai=true }
 local function is_cn_model(e, mi)
     if mi and mi.cn then return true end
     if mi and mi.pl and mi.pl ~= "" then return true end

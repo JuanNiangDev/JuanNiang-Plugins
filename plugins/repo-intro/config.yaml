@@ -105,7 +105,7 @@ configs:
   - key: card_template
     type: string
     label: 卡片模板编号
-    description: 使用 templates/ 目录下哪个模板（当前仅有 5：hello_github_card 像素级复刻样式），random 每次渲染随机选一个；默认 5
+    description: 仅用于 GitHub 卡片：templates/ 下 card-N（N=1~5）；random 在 1~5 间随机选一个；HF/MS 模型卡固定用 card-6；默认 5
     default: "5"
 
   - key: card_width
