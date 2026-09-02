@@ -322,6 +322,10 @@ local function extract_meta(e, data)
             downloads = data.downloads,
             likes = data.likes,
             params = data.safetensors and data.safetensors.total or nil,
+            -- HF 头像：t2i 渲染器网络无法直连 huggingface CDN（国内部署），走 wsrv.nl
+            -- 图片代理取组织社交缩略图并裁成方形；失败时模板 onerror 隐藏为灰圆占位
+            avatar = "https://wsrv.nl/?url=cdn-thumbnails.huggingface.co/social-thumbnails/"
+                .. e.owner .. ".png&w=280&h=280&fit=cover",
         }
     elseif e.kind == "ms" then
         local d = data.Data or data
@@ -332,6 +336,7 @@ local function extract_meta(e, data)
             downloads = d.Downloads,
             likes = d.Likes,
             readme_content = d.ReadmeContent,
+            avatar = (d.Avatar ~= nil and d.Avatar ~= "") and d.Avatar or nil,
         }
     end
 end
@@ -453,7 +458,225 @@ local function repo_input_for_llm(e, idx)
     return s
 end
 
+-- 模型信息库（modeldb.json）：参数量 / 上下文 / 输入类型 / 定价
+-- 由 data/rebuild-modeldb.py 从 llmrates + models.dev + newapiratio + openrouter 生成
 -- --------------------------------------------------------------------
+local modeldb = nil
+local function modeldb_load()
+    if modeldb then return modeldb end
+    local content = jn.file.read("data/modeldb.json")
+    if not content then
+        jn.log.warn("[repo-intro] modeldb.json 读取失败")
+        return nil
+    end
+    local ok, parsed = pcall(jn.json.decode, content)
+    if not ok or type(parsed) ~= "table" then
+        jn.log.warn("[repo-intro] modeldb.json 解析失败")
+        return nil
+    end
+    modeldb = parsed
+    return modeldb
+end
+
+local function norm_key(s)
+    if not s then return "" end
+    return (s:lower():gsub("[^%w]", ""))
+end
+
+-- 按 HF/MS 模型 id 渐进查找（精确别名 → 补/去常见后缀）
+local function modeldb_find(hf_id)
+    local db = modeldb_load()
+    if not db or not db.alias then return nil end
+    local nk = norm_key(hf_id)
+    local key = db.alias[nk]
+    if not key then
+        local suffixes = { "instruct", "chat", "base", "it", "latest", "free", "v1", "v2", "v3" }
+        for _, sfx in ipairs(suffixes) do
+            local k2 = db.alias[nk .. sfx]
+            if k2 then key = k2 break end
+            if nk:sub(-#sfx) == sfx then
+                k2 = db.alias[nk:sub(1, -#sfx - 1)]
+                if k2 then key = k2 break end
+            end
+        end
+    end
+    if not key or not db.models then return nil end
+    return db.models[key]
+end
+
+-- 参数量：HF meta safetensors.total(字节) 优先，modeldb 兜底，否则 闭源
+local function fmt_params_bytes(n)
+    n = tonumber(n)
+    if not n or n <= 0 then return nil end
+    local b = n / 1e9
+    if b >= 1000 then
+        return string.format("%.1fT", b / 1000):gsub("%.?0+$", "")
+    end
+    if b >= 10 then return string.format("%.0fB", b) end
+    return string.format("%.1fB", b):gsub("%.?0+$", "")
+end
+
+local function model_params(e, mi)
+    local p = e.meta and e.meta.params
+    if p and tonumber(p) then
+        local s = fmt_params_bytes(p)
+        if s then return s end
+    end
+    local mp = mi and mi.params
+    if mp and mp ~= "" then
+        -- 护栏：模型库异常大值（>10T）视为数据污染，按缺失处理（HF meta 更可靠）
+        local num = tonumber(mp:match("^([%d%.]+)"))
+        if mp:match("T$") and num and num > 10 then
+            return "闭源"
+        end
+        return tostring(mp)
+    end
+    return "闭源"
+end
+
+-- 上下文：1M / 262k / 32k（就近千位取整）
+local function fmt_context(n)
+    n = tonumber(n)
+    if not n or n <= 0 then return "—" end
+    if n >= 1000000 then
+        local m = n / 1000000
+        return string.format("%.1f", m):gsub("%.?0+$", "") .. "M"
+    end
+    if n >= 1000 then
+        return tostring(math.floor((n + 500) / 1000)) .. "k"
+    end
+    return tostring(n)
+end
+
+-- 输入类型 icons
+local MOD_ICONS = {
+    text   = { '<svg class="ico" viewBox="0 0 16 16"><path d="M2 1h7l4 4v10H2V1zm2 2v2h5V3H4zm0 4v1h8V7H4zm0 3v1h8v-1H4z"/></svg>', "文本" },
+    image  = { '<svg class="ico" viewBox="0 0 16 16"><path d="M2 2h12v12H2V2zm1 1v6l3-3 2 2 2-2 3 3V3H3zm2 2a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/></svg>', "图片" },
+    audio  = { '<svg class="ico" viewBox="0 0 16 16"><path d="M11 1.5v9a2.5 2.5 0 1 1-1-2.03V5.1L5 6.3v6.2a2.5 2.5 0 1 1-1-2.03V5.1L11 1.5z"/></svg>', "音频" },
+    video  = { '<svg class="ico" viewBox="0 0 16 16"><path d="M0 3h16v10H0V3zm2 2v6h12V5H2zm3 1.5v3L9 8 5 6.5z"/></svg>', "视频" },
+    pdf    = { '<svg class="ico" viewBox="0 0 16 16"><path d="M2 1h8l4 4v10H2V1zm4 3v1h4V4H6zm0 3v1h6V7H6zm0 3v1h6v-1H6z"/></svg>', "PDF" },
+    tool   = { '<svg class="ico" viewBox="0 0 16 16"><path d="M7 1h2v3h3v2H9v3H7V6H4V4h3V1zM4 9h2v2H4V9zm8 0h2v2h-2V9zm-8 4h2v2H4v-2zm8 0h2v2h-2v-2z"/></svg>', "工具" },
+}
+local function model_modality_html(e, mi)
+    local md = mi and mi.md or {}
+    local parts = {}
+    for _, mod in ipairs(md) do
+        local entry = MOD_ICONS[mod]
+        if entry then
+            parts[#parts + 1] = '<span class="mod-item">' .. entry[1] .. entry[2] .. '</span>'
+        end
+    end
+    if #parts == 0 then return "" end
+    return table.concat(parts)
+end
+
+local function fmt_price(v)
+    v = tonumber(v)
+    if not v then return nil end
+    if v == 0 then return "免费" end
+    if v < 0.01 then return string.format("%.3f", v) end
+    if v < 1 then return string.format("%.2f", v) end
+    return string.format("%.2f", v)
+end
+
+-- 价格块：币种(国产¥/国外$)、输入/输出/思考/缓存、闲时、上下文分段
+local function model_pricing_html(e, mi)
+    local pr = mi and mi.pr or {}
+    if #pr == 0 then return "" end
+    local has_cny = false
+    for _, p in ipairs(pr) do
+        if p.cur == "CNY" then has_cny = true break end
+    end
+    local sym, cur = "¥", "CNY"
+    if not has_cny then sym, cur = "$", "USD" end
+    local std, off, tiers = {}, {}, {}
+    for _, p in ipairs(pr) do
+        if p.cur == cur then
+            if p.tier == "off_peak" then
+                off[#off + 1] = p
+            elseif (p.min ~= nil and p.min ~= 0) or p.max ~= nil then
+                tiers[#tiers + 1] = p
+            else
+                std[#std + 1] = p
+            end
+        end
+    end
+    local rows = {}
+    local s = std[1]
+    if s then
+        local ii, oo = fmt_price(s.input), fmt_price(s.output)
+        local kv = {}
+        if ii and oo then
+            kv[#kv + 1] = '输入 <b>' .. sym .. ii .. '</b>'
+            kv[#kv + 1] = '输出 <b>' .. sym .. oo .. '</b>'
+        end
+        local th = fmt_price(s.thinking)
+        if th and oo and th ~= oo then
+            kv[#kv + 1] = '思考 <b class="price-think">' .. sym .. th .. '</b>'
+        end
+        local cc = fmt_price(s.cache)
+        if cc then
+            kv[#kv + 1] = '缓存 <b>' .. sym .. cc .. '</b>'
+        end
+        if #kv > 0 then
+            rows[#rows + 1] = '<div class="price-row">' .. table.concat(kv, ' · ') .. '</div>'
+        end
+    end
+    local o = off[1]
+    if o then
+        local ii, oo = fmt_price(o.input), fmt_price(o.output)
+        if ii and oo then
+            rows[#rows + 1] = '<div class="price-row price-offpeak">闲时 · 输入 <b>' .. sym .. ii
+                .. '</b> · 输出 <b>' .. sym .. oo .. '</b></div>'
+        end
+    end
+    if #tiers > 0 then
+        local tkv = {}
+        local seen = {}
+        for _, t in ipairs(tiers) do
+            local ii, oo = fmt_price(t.input), fmt_price(t.output)
+            if ii and oo then
+                local maxc = fmt_context(t.max)
+                -- 去重相同上下文分段（不同来源可能重复收录同一档）
+                local rk = tostring(t.min or 0) .. "-" .. tostring(t.max or 0)
+                if not seen[rk] then
+                    seen[rk] = true
+                    tkv[#tkv + 1] = '≤' .. maxc .. ' ctx <b>' .. sym .. ii .. '/' .. sym .. oo .. '</b>'
+                end
+            end
+        end
+        if #tkv > 0 then
+            rows[#rows + 1] = '<div class="price-row price-tier">上下文：' .. table.concat(tkv, ' · ') .. '</div>'
+        end
+    end
+    if #rows == 0 then return "" end
+    return '<div class="price-title">价格 · ' .. (cur == "CNY" and "CNY" or "USD") .. '</div>'
+        .. table.concat(rows)
+end
+
+-- 组装 HF/MS 模型卡片 HTML（复用 card-6.html 占位符）
+local GRAY_AVATAR = "data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='140'%20height='140'%3E%3Ccircle%20cx='70'%20cy='70'%20r='70'%20fill='%23d0d7de'/%3E%3C/svg%3E"
+local function fill_model_template(tpl, e)
+    local m = e.meta or {}
+    local mi = modeldb_find(m.name or (e.owner .. "/" .. e.repo))
+    local data = {
+        OWNER = e.owner,
+        REPO = e.repo,
+        AVATAR = (m.avatar ~= nil and m.avatar ~= "") and m.avatar or GRAY_AVATAR,
+        PARAMS_CHIP = '<span class="chip"><span class="lbl">参数量</span><span class="val">'
+            .. model_params(e, mi) .. '</span></span>',
+        CONTEXT_CHIP = '<span class="chip"><span class="lbl">上下文</span><span class="val">'
+            .. fmt_context(mi and mi.ctx) .. '</span></span>',
+        MODALITY_HTML = model_modality_html(e, mi),
+        PRICING_HTML = model_pricing_html(e, mi),
+    }
+    local out = tpl
+    for k, v in pairs(data) do
+        out = out:gsub("{{" .. k .. "}}", function() return tostring(v) end)
+    end
+    return out
+end
+
 -- 仓库卡片图（T2I：HTML 模板渲染，模板在 templates/ 目录，占位符 {{KEY}}）
 -- --------------------------------------------------------------------
 -- T2I 回调上下文表：req_id → batch（on_t2i_response 回调不带 batch）。
@@ -468,11 +691,12 @@ end
 -- 前向声明：finish_cards（卡片段）调用发送段末尾定义的 compose_and_send
 local compose_and_send
 
--- 加载模板（batch 内缓存，改文件后重启生效）
-local function load_template()
-    local n = cfg_string("card_template", "5")
+-- 加载模板；prefer 指定编号时直接读该模板（HF/MS 模型卡固定用 card-6），
+-- 否则读配置 card_template（可为 random）。
+local function load_template(prefer)
+    local n = prefer or cfg_string("card_template", "5")
     local tpl, err
-    if n == "random" then
+    if not prefer and n == "random" then
         n = tostring(math.random(1, 5)) -- 每次渲染随机选一个
         tpl = jn.file.read("templates/card-" .. n .. ".html")
         if tpl then return tpl end -- 随机命中即用，不再重复读取
@@ -500,8 +724,11 @@ local function fmt_count(n)
     return tostring(n)
 end
 
--- 填充模板：OWNER/REPO/DESC/URL + 统计（STARS/FORKS/ISSUES/LANG_NAME）
+-- 填充模板：GitHub 用 card-N（STARS/FORKS/ISSUES/LANG_NAME），HF/MS 走模型卡（card-6）
 local function fill_template(tpl, e)
+    if e.kind ~= "github" then
+        return fill_model_template(tpl, e)
+    end
     local m = e.meta or {}
     local llm = e.llm or {}
     local desc = (llm.desc_cn ~= nil and llm.desc_cn ~= "") and llm.desc_cn
@@ -544,7 +771,12 @@ end
 -- 触发卡片渲染（每仓库一张；全部完成后 finish_cards）
 local function start_cards(batch)
     local usable = batch.llm_usable or {}
-    local tpl = load_template()
+    -- 批次全为 HF/MS 时用 card-6 做启用判定（card-5 可能未随附）；否则用配置模板
+    local all_model = #usable > 0
+    for _, e in ipairs(usable) do
+        if e.kind == "github" then all_model = false break end
+    end
+    local tpl = all_model and load_template("6") or load_template()
     local enabled = cfg_bool("card_enabled", true)
         and tpl ~= nil and jn.t2i ~= nil and jn.t2i.is_active() and jn.t2i.generate_url_async ~= nil
     if not enabled then
@@ -554,7 +786,12 @@ local function start_cards(batch)
     local pending = 0
     for idx, e in ipairs(usable) do
         if not e.card_url or e.card_url == "" then
-            local html = fill_template(tpl, e)
+            -- HF/MS 模型卡固定用 card-6，GitHub 用配置模板
+            local etpl = tpl
+            if e.kind ~= "github" then
+                etpl = load_template("6") or tpl
+            end
+            local html = fill_template(etpl, e)
             pending = pending + 1
             -- 注意：不传 timeout。SDK 文档约定单位为秒，但 Go SDK 原样透传、
             -- T2I 服务端按 Playwright 毫秒处理，传 60 会被当成 60ms，渲染必失败（500）。

@@ -58,22 +58,30 @@ https://github.com/ericzakariasson/scandinavian-design
 - 机器人自己的消息不处理，防止自触发循环。
 - 单条消息最多处理 `max_repos` 个链接（默认 5）。
 
-## 卡片字体
+## HF / ModelScope 模型卡片
 
-卡片模板 `templates/card-5.html` 内嵌了 **Maple Mono Normal NF CN** 的 woff2 子集（base64 data URI，约 964KB）。因为 T2I 渲染服务只收到 HTML 文本、没有文件上传通道，字体必须打进模板里才能正常显示中文。
+HF/MS 仓库渲染 `templates/card-6.html`（GitHub 仍用 card-5）。模型卡展示：标题 + 仓库名、HF/MS 组织头像、**参数量 + 上下文（一行）**、**输入类型（文本/图片/音频/视频/PDF 图标，一行）**、**价格块**；去掉了 GitHub 水印图标与模型简介。
 
-- 字符集：ASCII + Latin-1 + 常用标点/符号 + **GB2312 一级汉字（3755 个）**
-- 子集字体的 family 名保持 `Maple Mono Normal NF CN` 不变，与模板 CSS 声明一致
-- 原始字体、子集文件与字符集见 `fonts/` 目录（`card-best.woff2`、`charset.txt`）
+- 参数量优先取 HF 元数据 `safetensors.total`（ModelScope 无该字段），模型库兜底，未知显示"闭源"
+- 价格按币种：国产模型（含 CNY 档）用 ¥，国外用 $；展示输入/输出、思考（不同于输出价时）、缓存、闲时档（off_peak）、不同上下文分段（tokenTier）
+- 头像：MS 直连 `resouces.modelscope.cn`；HF 走 `wsrv.nl` 图片代理（T2I 渲染器网络无法直连 huggingface CDN，失败时灰圆占位）
 
-重新生成（需要 fonttools + brotli）：
+### 模型信息收集链路（data/）
+
+模型库 `data/modeldb.json` 由 `data/rebuild-modeldb.py` 从 **4 个来源全部参与**生成：
+
+| 来源 | 贡献 |
+|------|------|
+| [llmrates.ai](https://www.llmrates.ai/zh-Hans/models) | 上下文/输入模态/provider（国产判定）+ 完整定价：CNY+USD、标准/闲时、上下文分段、思考/缓存 |
+| [models.dev](https://models.dev/api.json) | 兜底：上下文/模态/USD 价格 |
+| [newapiratio.com](https://newapiratio.com/api.json) | 交叉校验/兜底（与 models.dev 同族） |
+| [openrouter](https://openrouter.ai/api/v1/models) | `hugging_face_id` 映射 + 描述里的参数量 |
+
+按共享别名 union-find 归并同一模型的多来源数据（含 `modeldb.json` 的 `alias` 反向索引，按 HF id 渐进查找）。刷新：
 
 ```bash
-python3 -m venv /tmp/fontenv
-/tmp/fontenv/bin/pip install fonttools brotli
-
-# 在插件目录执行
-PYFTSUBSET=/tmp/fontenv/bin/pyftsubset ./fonts/rebuild.sh
+# 在插件目录执行（联网拉取 4 源，需 python3）
+python3 data/rebuild-modeldb.py
 ```
 
 ## 数据来源
