@@ -47,6 +47,12 @@ local function cfg_string(key, default)
 end
 
 -- --------------------------------------------------------------------
+-- 水印：零宽字符标记机器人输出（ZWSP+ZWNJ+ZWJ+BOM，不可见但可检测）。
+-- 他人转发本机总结时，raw 里含该水印 → on_message 忽略，避免二次总结循环。
+-- --------------------------------------------------------------------
+local WATERMARK = "\226\128\139\226\128\140\226\128\141\239\187\191"
+
+-- --------------------------------------------------------------------
 -- URL 解析（提取一条消息中的全部公众号文章链接）
 -- --------------------------------------------------------------------
 -- 短链：https://mp.weixin.qq.com/s/{id}，id 由字母数字与 - _ 组成
@@ -370,7 +376,7 @@ end
 local function compose_section(e)
     local lines = {}
     local title = (e.meta and e.meta.title) or "微信公众号文章"
-    lines[#lines + 1] = "📰 " .. title
+    lines[#lines + 1] = "📰 " .. title .. WATERMARK -- 标题尾部加水印（零宽不可见）
     -- 公众号名（来自 var nickname），抓不到则不显示该行
     local account = (e.meta and e.meta.account) or ""
     if account ~= "" then
@@ -653,6 +659,8 @@ function on_message(event)
     local raw = event.raw_message or ""
     -- 命令不处理
     if raw:sub(1, 1) == "/" then return false, false end
+    -- 识别到本机水印（他人转发本机输出）→ 忽略，避免二次总结
+    if raw:find(WATERMARK, 1, true) then return true, false end
     if not cfg_bool("enabled", true) then return false, false end
     if cfg_bool("group_only", false) and event.message_type ~= "group" then return false, false end
 

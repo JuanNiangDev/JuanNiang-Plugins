@@ -44,6 +44,12 @@ local function cfg_string(key, default)
 end
 
 -- --------------------------------------------------------------------
+-- 水印：零宽字符标记机器人输出（ZWSP+ZWNJ+ZWJ+BOM，不可见但可检测）。
+-- 他人转发本机总结时，raw 里含该水印 → on_message 忽略，避免二次总结循环。
+-- --------------------------------------------------------------------
+local WATERMARK = "\226\128\139\226\128\140\226\128\141\239\187\191"
+
+-- --------------------------------------------------------------------
 -- URL 解析（提取一条消息中的全部仓库链接）
 -- --------------------------------------------------------------------
 -- 在 raw 中定位 host 之后的两段路径（owner/repo），返回全部命中。
@@ -896,7 +902,7 @@ end
 local function compose_section(e)
     local lines = {}
     local name = (e.meta and e.meta.name) or (e.owner .. "/" .. e.repo)
-    lines[#lines + 1] = "📦 " .. name -- 平台名不显示
+    lines[#lines + 1] = "📦 " .. name .. WATERMARK -- 标题尾部加水印（零宽不可见）
 
     local llm = e.llm
     -- GitHub：模型名：官方描述（desc_cn 中文优先）；无官方描述时用 LLM 一句话标题。
@@ -1316,6 +1322,8 @@ function on_message(event)
     local raw = event.raw_message or ""
     -- 命令不处理
     if raw:sub(1, 1) == "/" then return false, false end
+    -- 识别到本机水印（他人转发本机输出）→ 忽略，避免二次总结
+    if raw:find(WATERMARK, 1, true) then return true, false end
     if cfg_bool("group_only", false) and event.message_type ~= "group" then return false, false end
 
     local entries, uncached = build_batch(event)
