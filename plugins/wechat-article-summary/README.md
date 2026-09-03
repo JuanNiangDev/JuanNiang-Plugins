@@ -41,10 +41,16 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 📖 公众号名（抓不到则不显示该行）
 核心内容总结（50~150 字；早报/新闻汇总类为前 5 条新闻标题 + "共 X 条"）
 🔗 原文链接
-[封面图]（默认附在末尾，send_cover 可关）
+[图文全部图片]（默认按正文顺序依次附在末尾，send_cover 可关，max_images 限每篇张数）
 ```
 
-（多篇时每段之间空两行，一次发送；封面图取第一篇抓取到封面的文章。）
+（多篇时每段之间空两行，一次发送；图片按每篇的正文顺序依次附加，不再只发封面图。）
+
+## 图文支持
+
+- **经典格式**：`js_content` 容器内的 `<img data-src>` 按文档顺序提取为图片列表
+- **新格式**（部分文章无 `js_content`，正文在 `meta description`、图片在 JS 配置）：正文从 `meta description` 兜底（`\x0a` 解码为换行），图片按页序提取（去重、排除作者头像、解码 `\x26`/`&amp;` 实体）
+- 图片 URL 统一 http→https；`max_images`（默认 0 = 不限制）可限制每篇发送张数，避免长图文刷屏
 
 ## 抓取说明
 
@@ -57,7 +63,8 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 | enabled | 总开关 | true |
 | enable_summary | LLM 总结开关（关闭只发标题与公众号名） | true |
 | reply_quote | 回复时引用原消息 | true |
-| send_cover | 发送封面图（og:image） | true |
+| send_cover | 发送图文全部图片（按正文顺序依次） | true |
+| max_images | 每篇最多发送图片数（0 = 不限制） | 0 |
 | group_only | 仅群聊生效 | false |
 | cache_ttl | 总结结果缓存秒数 | 604800（7 天） |
 | max_content_chars | 送入 LLM 的正文最大字数 | 10000 |
