@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-modeldb-rebuild.py — repo-intro 模型信息收集链路
+rebuild-modeldb.py — repo-intro 模型信息收集链路
 =================================================
 从 4 个来源收集模型信息（上下文/参数量/输入类型/定价），按共享别名
 union-find 归并成规范条目，生成紧凑 modeldb.json 供插件卡片渲染：
@@ -14,8 +14,8 @@ union-find 归并成规范条目，生成紧凑 modeldb.json 供插件卡片渲�
   4. openrouter   /api/v1/models    hugging_face_id 映射 + 描述里的参数量
 
 用法:
-  python3 modeldb-rebuild.py            # 拉取全部并写 modeldb.json
-  python3 modeldb-rebuild.py --offline  # 只用本地缓存重生成
+  python3 rebuild-modeldb.py            # 拉取全部并写 modeldb.json
+  python3 rebuild-modeldb.py --offline  # 只用本地缓存重生成
 """
 import json, os, re, sys, time, urllib.request
 

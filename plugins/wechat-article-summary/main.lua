@@ -248,7 +248,7 @@ local function extract_page_images(html)
         -- 解码 HTML/JS 转义：\x26→&、&amp;→&
         norm = norm:gsub("\\x26", "&"):gsub("&amp;", "&")
         -- 去 query（wx_fmt 等）与 /0 尺寸后缀，避免同一图重复
-        local base = norm:match("^(.-)[?/]0") or norm
+        local base = (norm:match("^([^?]+)") or norm):gsub("/0$", "")
         local is_avatar = avatar_base ~= "" and base:sub(1, #avatar_base) == avatar_base
         if not is_avatar and not seen[base] then
             seen[base] = true
@@ -310,10 +310,8 @@ local function article_cache_get(e)
     -- 缓存结构升级：旧缓存无 account、无 cover 或图文支持前无 images，视为未命中重建
     if not v.account or not v.cover or not v.images then return nil end
     -- 恢复抓取期 meta（标题/公众号名/封面图/图片），缓存命中时输出段完整
-    if (v.title or "") ~= "" or (v.account or "") ~= "" then
-        e.meta = { title = v.title or "", account = v.account or "", cover = v.cover or "", desc = "",
-                   images = v.images or {} }
-    end
+    e.meta = { title = v.title or "", account = v.account or "", cover = v.cover or "", desc = "",
+               images = v.images or {} }
     return v
 end
 
