@@ -213,11 +213,13 @@ jn.command.register("rank", function(args, event)
 
     -- 仅按 user_id 分组（旧写法 GROUP BY user_id, user_name 会把改过名的
     -- 用户拆成多行、积分被分散，导致其掉出榜单）；
-    -- 显示名取自该用户最近一条签到记录，消除改名对排行信息的影响
+    -- 显示名取自该用户最近一条签到记录，消除改名对排行信息的影响。
+    -- 子查询内 group_id 用绑定参数而非引用外层 r1.group_id：
+    -- Postgres 要求相关子查询引用的外层列必须出现在 GROUP BY 中（42803）
     local sql = [[
         SELECT user_id,
                (SELECT user_name FROM pluggin_checkin_records r2
-                WHERE r2.user_id = r1.user_id AND r2.group_id = r1.group_id
+                WHERE r2.user_id = r1.user_id AND r2.group_id = ?
                 ORDER BY id DESC
                 LIMIT 1) AS user_name,
                COALESCE(SUM(score), 0) AS total,
@@ -228,7 +230,7 @@ jn.command.register("rank", function(args, event)
         ORDER BY total DESC
         LIMIT ?
     ]]
-    local rows, err = jn.database.query(sql, { group_id, rank_limit })
+    local rows, err = jn.database.query(sql, { group_id, group_id, rank_limit })
     if err then
         jn.log.error("签到插件：查询排名失败: " .. err)
         reply(event, "查询排名失败，请稍后再试~")
