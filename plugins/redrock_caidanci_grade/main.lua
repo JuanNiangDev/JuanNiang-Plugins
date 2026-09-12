@@ -245,7 +245,7 @@ local function get_encouragement(attempt_num, max_attempts, feedback, hint_used)
     end
 
     if green_count >= 3 then
-        local cheers = { "超对！就这样继续～💪", "很棒！大部分都对了！", "卷娘觉得你离答案越来越近了！", "厉害呀，方向完全正确！" }
+        local cheers = { "超对！就这样继续～💪", "很棒！大部分都对了！", "感觉你离答案越来越近了！", "厉害呀，方向完全正确！" }
         return cheers[math.random(#cheers)]
     elseif green_count >= 1 then
         local cheers = { "有好几个字母对了！加油～", "开头不错，再想想后面的～", "方向是对的，继续尝试！", "很不错，再调整一下就好！" }
@@ -254,7 +254,7 @@ local function get_encouragement(attempt_num, max_attempts, feedback, hint_used)
 
     local remaining = max_attempts - attempt_num
     if remaining <= 1 then
-        return "最后一次机会啦！卷娘相信你一定能猜出来✨"
+        return "最后一次机会啦！相信你一定能猜出来✨"
     elseif remaining <= 2 then
         if hint_used then
             return "还有" .. remaining .. "次机会，加油～"
@@ -263,7 +263,7 @@ local function get_encouragement(attempt_num, max_attempts, feedback, hint_used)
     else
         local encouragements = {
             "别急，慢慢来～",
-            "加油，卷娘觉得你可以的！",
+            "加油，相信你可以的！",
             "再试一个试试，说不定就对啦～",
             "猜单词就像 debug，多试几次总能找到问题所在😜",
         }
@@ -417,6 +417,7 @@ local function reply(event, text)
 end
 
 local render_board -- 前向声明（reply_with_board 中使用）
+local submit_guess -- 前向声明（on_message 中 /猜<单词> 触发猜测使用）
 
 --- 回复文本 + 棋盘图片；T2I 不可用时降级为 emoji 文本
 local function reply_with_board(event, text, game)
@@ -643,10 +644,10 @@ jn.command.register("猜单词", function(args, event)
 
     local group_id = event.group_id
 
-    -- 检查是否已有进行中的游戏
+    -- 检查是否已有进行中的游戏：附带当前进度棋盘图片，方便找回游戏进度
     local existing = get_game(group_id)
     if existing and existing.status == "playing" then
-        reply(event, "本群已有进行中的猜单词游戏啦！\n发送 /结束 可以结束当前游戏。")
+        reply_with_board(event, "本群已有进行中的猜单词游戏啦！\n发送 /结束 可以结束当前游戏。", existing)
         return true
     end
 
@@ -793,9 +794,15 @@ jn.command.register("提示", function(args, event)
         return true
     end
 
-    -- 每局只能提示一次
+    -- 每局只能提示一次：已提示过则复述之前的提示
     if game.hint_used or (game.hints and #game.hints >= 1) then
-        reply(event, "本局只能提示一次哦～提示已经用掉啦，卷娘相信大家能猜出来的💪")
+        local text = "本局只能提示一次哦～已经提示过啦"
+        if game.hint_msg then
+            text = text .. "，之前给你的提示：" .. game.hint_msg
+        else
+            text = text .. "，卷娘相信大家能猜出来的💪"
+        end
+        reply(event, text)
         return true
     end
 
@@ -804,8 +811,9 @@ jn.command.register("提示", function(args, event)
         local pos_name, meaning = pick_pos_meaning(game.word)
         if pos_name then
             game.hint_used = true
+            game.hint_msg = "词性是" .. pos_name .. "，一个意思是「" .. meaning .. "」"
             save_game(group_id, game)
-            reply(event, "💡 提示：词性是" .. pos_name .. "，一个意思是「" .. meaning .. "」")
+            reply(event, "💡 提示：" .. game.hint_msg)
             return true
         end
     end
@@ -818,11 +826,12 @@ jn.command.register("提示", function(args, event)
 
     local letter = string.sub(game.word, pos, pos)
     game.hints[#game.hints + 1] = { pos = pos, letter = letter }
+    game.hint_msg = "第 " .. pos .. " 位是 " .. string.upper(letter)
     save_game(group_id, game)
 
     -- 字母提示只发文字：渲染进棋盘会随轮次移动到最近一行，与猜测字母混淆，
     -- 用户无法判断单词中该字母的真实数量（如两个 T 时只提示出一个 T）
-    reply(event, "💡 提示：第 " .. pos .. " 位是 " .. string.upper(letter))
+    reply(event, "💡 提示：" .. game.hint_msg)
     return true
 end, {
     description = "查看当前猜单词游戏的提示",
@@ -838,6 +847,17 @@ function on_message(event)
 
     local raw = (event.raw_message or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if raw == "" then return false, nil end
+
+    -- /猜<单词>（无空格）也触发猜测，如 /猜admit
+    -- （/猜、/猜单词 等已注册命令由命令系统先行消费，不会走到这里）
+    -- 注意：/猜 是 4 字节（/ + UTF-8 三字节的「猜」），sub 按字节切分
+    if raw:sub(1, 4) == "/猜" then
+        local rest = raw:sub(5)
+        if rest ~= "" and rest:match("^[a-zA-Z]+$") then
+            submit_guess(event, event.group_id, rest:lower())
+            return true
+        end
+    end
 
     -- 引导触发开关
     local enable_trigger = jn.config.get("enable_trigger") ~= false
@@ -858,49 +878,38 @@ function on_message(event)
 end
 
 -- ====================================================================
--- 命令: /猜 —— 提交猜测
+-- 提交猜测（/猜 <单词> 与 /猜<单词> 共用）
 -- ====================================================================
-jn.command.register("猜", function(args, event)
-    -- 仅群聊可用
-    if event.message_type ~= "group" then return true end
-    local group_id = event.group_id
-
+submit_guess = function(event, group_id, guess)
     local game = get_game(group_id)
     if not game or game.status ~= "playing" then
         reply(event, "本群还没有进行中的游戏哦～发送 /猜单词 来一局吧！")
-        return true
+        return
     end
-
-    if #args == 0 then
-        reply(event, "请输入要猜的单词，例如：/猜 apple")
-        return true
-    end
-
-    local guess = args[1]:lower()
 
     -- 长度检查
     if #guess ~= game.length then
         reply(event, "单词长度不对哦～当前单词有 " .. game.length .. " 个字母")
-        return true
+        return
     end
 
     -- 纯字母检查
     if not guess:match("^[a-z]+$") then
         reply(event, "请输入纯英文字母的单词～")
-        return true
+        return
     end
 
     -- 词典校验：不在全部词库并集中的词
     if not union_words[guess] then
         reply(event, "你确定 " .. guess .. " 是一个单词吗")
-        return true
+        return
     end
 
     -- 检查是否已猜过
     for _, att in ipairs(game.attempts) do
         if att.guess == guess then
             reply(event, "这个单词已经猜过啦～换一个试试吧！")
-            return true
+            return
         end
     end
 
@@ -913,7 +922,7 @@ jn.command.register("猜", function(args, event)
         game.status = "won"
         save_game(group_id, game)
         reply_with_board(event, append_meaning(get_victory_msg(game.word, attempt_num), game.word), game)
-        return true
+        return
     end
 
     -- 次数用完了
@@ -921,7 +930,7 @@ jn.command.register("猜", function(args, event)
         game.status = "lost"
         save_game(group_id, game)
         reply_with_board(event, append_meaning(get_defeat_msg(game.word), game.word), game)
-        return true
+        return
     end
 
     -- 还没结束
@@ -940,6 +949,19 @@ jn.command.register("猜", function(args, event)
         end
     end
     reply_with_board(event, table.concat(lines, "\n"), game)
+end
+
+-- ====================================================================
+-- 命令: /猜 —— 提交猜测
+-- ====================================================================
+jn.command.register("猜", function(args, event)
+    -- 仅群聊可用
+    if event.message_type ~= "group" then return true end
+    if #args == 0 then
+        reply(event, "请输入要猜的单词，例如：/猜 apple")
+        return true
+    end
+    submit_guess(event, event.group_id, args[1]:lower())
     return true
 end, {
     description = "提交猜单词的猜测",
