@@ -689,9 +689,7 @@ jn.command.register("猜单词", function(args, event)
 
     local lines = {
         "🎮 猜单词游戏开始！",
-        "难度：" .. game.difficulty_name,
-        "单词长度：" .. length .. " 个字母",
-        "最多 " .. MAX_ATTEMPTS .. " 次机会",
+        game.difficulty_name .. "难度，单词" .. length .. "位，共有" .. MAX_ATTEMPTS .. "次尝试机会！",
         "本局只能提示一次，请谨慎使用～",
     }
     -- 开局给出一张空白棋盘（全部为空表格）；T2I 不可用/渲染失败时降级为下划线占位
@@ -707,9 +705,9 @@ jn.command.register("猜单词", function(args, event)
         lines[#lines + 1] = table.concat(placeholders, " ")
         lines[#lines + 1] = ""
     end
-    lines[#lines + 1] = "发送 /提示 获取帮助"
+    lines[#lines + 1] = "/提示 获取帮助"
     lines[#lines + 1] = "/结束 退出游戏"
-    lines[#lines + 1] = "发送 /怎么猜单词 了解如何指定难度和长度"
+    lines[#lines + 1] = "/怎么猜单词 了解如何指定难度和长度"
 
     local segments = { { type = "text", data = { text = table.concat(lines, "\n") } } }
     if board_url then
