@@ -410,6 +410,16 @@ local function get_defeat_msg(word)
     return msgs[math.random(#msgs)]
 end
 
+--- 无进行中游戏的提示（随机预设）
+local function get_no_game_msg()
+    local msgs = {
+        "本群还没有进行中的游戏哦～发送 /猜单词 来一局吧！",
+        "还没有游戏在进行呢，发送 /猜单词 开局吧～",
+        "当前没有进行中的猜单词，来一局 /猜单词 试试？",
+    }
+    return msgs[math.random(#msgs)]
+end
+
 --- emoji 兜底反馈（T2I 不可用时）
 local function emoji_feedback(states)
     return states:gsub("G", "🟩"):gsub("Y", "🟨"):gsub("X", "⬜")
@@ -780,7 +790,7 @@ jn.command.register("结束", function(args, event)
 
     local game = get_game(group_id)
     if not game then
-        reply(event, "本群还没有进行中的游戏哦～发送 /猜单词 来一局吧！")
+        reply(event, get_no_game_msg())
         return true
     end
 
@@ -805,7 +815,7 @@ jn.command.register("提示", function(args, event)
 
     local game = get_game(group_id)
     if not game or game.status ~= "playing" then
-        reply(event, "本群还没有进行中的游戏哦～发送 /猜单词 来一局吧！")
+        reply(event, get_no_game_msg())
         return true
     end
 
@@ -898,32 +908,52 @@ end
 submit_guess = function(event, group_id, guess)
     local game = get_game(group_id)
     if not game or game.status ~= "playing" then
-        reply(event, "本群还没有进行中的游戏哦～发送 /猜单词 来一局吧！")
+        reply(event, get_no_game_msg())
         return
     end
 
     -- 长度检查
     if #guess ~= game.length then
-        reply(event, "单词长度不对哦～当前单词有 " .. game.length .. " 个字母")
+        local msgs = {
+            "单词长度不对哦～当前单词有 " .. game.length .. " 个字母",
+            "长度不对啦，当前单词是 " .. game.length .. " 个字母哦",
+            "哎呀，单词是 " .. game.length .. " 位，不是这个长度哦～",
+        }
+        reply(event, msgs[math.random(#msgs)])
         return
     end
 
     -- 纯字母检查
     if not guess:match("^[a-z]+$") then
-        reply(event, "请输入纯英文字母的单词～")
+        local msgs = {
+            "请输入纯英文字母的单词～",
+            "只能猜英文字母组成的单词哦～",
+            "单词里只能有英文字母，再试试～",
+        }
+        reply(event, msgs[math.random(#msgs)])
         return
     end
 
     -- 词典校验：不在全部词库并集中的词
     if not union_words[guess] then
-        reply(event, "你确定 " .. guess .. " 是一个单词吗")
+        local msgs = {
+            "你确定 " .. guess .. " 是一个单词吗",
+            guess .. " 不在词库里哦，换一个试试？",
+            "词典里没有 " .. guess .. " 哦，是单词吗？",
+        }
+        reply(event, msgs[math.random(#msgs)])
         return
     end
 
     -- 检查是否已猜过
     for _, att in ipairs(game.attempts) do
         if att.guess == guess then
-            reply(event, "这个单词已经猜过啦～换一个试试吧！")
+            local msgs = {
+                "这个单词已经猜过啦～换一个试试吧！",
+                guess .. " 刚才猜过啦，换个新的吧～",
+                guess .. " 已经猜过咯，再想想别的词！",
+            }
+            reply(event, msgs[math.random(#msgs)])
             return
         end
     end
@@ -964,7 +994,12 @@ jn.command.register("猜", function(args, event)
     -- 仅群聊可用
     if event.message_type ~= "group" then return true end
     if #args == 0 then
-        reply(event, "请输入要猜的单词，例如：/猜 apple")
+        local msgs = {
+            "请输入要猜的单词，例如：/猜 apple",
+            "要猜单词的话，发送 /猜 <单词> 哦～",
+            "忘了输入单词啦，试试 /猜 apple？",
+        }
+        reply(event, msgs[math.random(#msgs)])
         return true
     end
     submit_guess(event, event.group_id, args[1]:lower())
