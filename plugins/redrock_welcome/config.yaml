@@ -28,3 +28,15 @@ configs:
     label: 欢迎图片
     description: 欢迎消息附带的海报图片（相对插件目录路径）
     default: "welcome.png"
+
+  - key: batch_size
+    type: string
+    label: 攒批人数
+    description: 攒满多少名新成员后立即统一发送欢迎（一条消息 @ 全部）；发送窗口内未攒满则按窗口发送
+    default: "15"
+
+  - key: flush_seconds
+    type: string
+    label: 发送窗口（秒）
+    description: 首名新成员进入缓冲后开始计时，窗口到点无论攒了几人都统一发送
+    default: "3"
