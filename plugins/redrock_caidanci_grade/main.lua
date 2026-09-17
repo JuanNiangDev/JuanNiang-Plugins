@@ -236,56 +236,80 @@ local function compare_guess(guess, target)
     return table.concat(result, "")
 end
 
---- 获取第 N 次猜测的鼓励语：结合本次猜中的字母数与剩余次数，
---- 具体指出几个字母位置正确、几个字母猜出但位置不对
+--- 获取第 N 次猜测的鼓励语：结合猜中程度与剩余次数随机挑选（不具体指出位置）
 ---@param attempt_num number 当前是第几次猜测
 ---@param max_attempts number 最大猜测次数
 ---@param feedback string 本次猜测反馈（G=位置正确 / Y=位置不对 / X=没有）
 ---@param hint_used boolean 本局提示是否已用（已用则不再引导 /提示）
 local function get_encouragement(attempt_num, max_attempts, feedback, hint_used)
     local green_count = 0
-    local yellow_count = 0
-    for ch in feedback:gmatch(".") do
-        if ch == "G" then
-            green_count = green_count + 1
-        elseif ch == "Y" then
-            yellow_count = yellow_count + 1
-        end
+    for _ in string.gmatch(feedback, "G") do
+        green_count = green_count + 1
     end
 
-    -- 对错细节：具体指出几个字母猜中、几个字母位置不对
-    local detail
-    if green_count > 0 and yellow_count > 0 then
-        detail = green_count .. " 个字母位置正确，" .. yellow_count .. " 个字母位置不对"
-    elseif green_count > 0 then
-        detail = green_count .. " 个字母位置正确"
-    elseif yellow_count > 0 then
-        detail = yellow_count .. " 个字母位置不对，但都在单词里"
-    else
-        detail = "暂时没有猜中的字母"
+    if green_count >= 3 then
+        local cheers = {
+            "超对！就这样继续～💪",
+            "很棒！大部分都对了！",
+            "卷娘觉得你离答案越来越近了！",
+            "厉害呀，方向完全正确！",
+            "哇，答案呼之欲出了！",
+            "太接近了！就差临门一脚！",
+            "卷娘看到胜利的曙光了！",
+        }
+        return cheers[math.random(#cheers)]
+    elseif green_count >= 1 then
+        local cheers = {
+            "有好几个字母对了！加油～",
+            "开头不错，再想想后面的～",
+            "方向是对的，继续尝试！",
+            "很不错，再调整一下就好！",
+            "已经摸到门道啦！",
+            "进展不错，继续深挖！",
+            "这几个字母给力，再接再厉！",
+        }
+        return cheers[math.random(#cheers)]
     end
 
     local remaining = max_attempts - attempt_num
     if remaining <= 1 then
-        return "第 " .. attempt_num .. " 次，" .. detail .. "，最后一次机会啦！相信你一定能猜出来✨"
-    end
-
-    local msg = "第 " .. attempt_num .. " 次，" .. detail .. "，还剩 " .. remaining .. " 次机会"
-    if remaining <= 2 and not hint_used then
-        return msg .. "，用 /提示 获取帮助哦～"
-    end
-
-    local tail
-    if green_count >= 3 then
-        tail = { "超对！就这样继续～💪", "很棒！大部分都对了！", "感觉你离答案越来越近了！", "厉害呀，方向完全正确！" }
-    elseif green_count >= 1 then
-        tail = { "有好几个字母对了！加油～", "开头不错，再想想后面的～", "方向是对的，继续尝试！", "很不错，再调整一下就好！" }
-    elseif yellow_count >= 1 then
-        tail = { "字母都在，就差位置啦！", "调整下位置说不定就对了～", "就差临门一脚，再挪一挪！" }
+        local last = {
+            "最后一次机会啦！卷娘相信你一定能猜出来✨",
+            "就剩最后一次啦，卷娘给你加油！",
+            "最后一把！稳住，一定能行！",
+            "最后一击，卷娘相信你！",
+        }
+        return last[math.random(#last)]
+    elseif remaining <= 2 then
+        local msgs
+        if hint_used then
+            msgs = {
+                "还有" .. remaining .. "次机会，加油～",
+                "还有" .. remaining .. "次机会，坚持住！",
+                "还有" .. remaining .. "次机会，卷娘看好你！",
+                "还有" .. remaining .. "次机会，冷静分析一下～",
+            }
+        else
+            msgs = {
+                "还有" .. remaining .. "次机会，用 /提示 获取帮助哦～",
+                "还有" .. remaining .. "次机会，需要帮助就 /提示 哦～",
+                "还有" .. remaining .. "次机会，卡住了可以 /提示 一下！",
+                "还有" .. remaining .. "次机会，想想 /提示 能帮到你～",
+            }
+        end
+        return msgs[math.random(#msgs)]
     else
-        tail = { "别急，慢慢来～", "加油，相信你可以的！", "再试一个试试，说不定就对啦～", "猜单词就像 debug，多试几次总能找到问题所在😜" }
+        local encouragements = {
+            "别急，慢慢来～",
+            "加油，卷娘觉得你可以的！",
+            "再试一个试试，说不定就对啦～",
+            "猜单词就像 debug，多试几次总能找到问题所在😜",
+            "换个角度想想看～",
+            "卷娘陪你一起想！",
+            "多积累几个字母就离答案更近啦～",
+        }
+        return encouragements[math.random(#encouragements)]
     end
-    return msg .. "，" .. tail[math.random(#tail)]
 end
 
 --- 获胜时的庆祝语
