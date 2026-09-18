@@ -45,6 +45,22 @@ local function b64_sub(buf, lo, hi)
 end
 
 --- 纯 Lua base64 编码（封面图转 data URI 用，渲染环境无外网）
+-- 注意：gopher-lua 的 table.concat 会把所有元素压入 Lua 栈（registry 默认仅 5120
+-- 且不可扩容），大表一次性 concat 会报 "registry overflow"，必须分块合并。
+local CONCAT_CHUNK = 512
+
+local function concat_chunked(t)
+    local parts = {}
+    local n = #t
+    local i = 1
+    while i <= n do
+        local j = math.min(i + CONCAT_CHUNK - 1, n)
+        parts[#parts + 1] = table.concat(t, "", i, j)
+        i = j + 1
+    end
+    return table.concat(parts)
+end
+
 local function b64encode(data)
     local out = {}
     local i, n = 1, #data
@@ -56,7 +72,7 @@ local function b64encode(data)
             .. (c and b64_sub(buf, 0, 5) or "=")
         i = i + 3
     end
-    return table.concat(out)
+    return concat_chunked(out)
 end
 
 local function fmt_duration(ms)
@@ -110,12 +126,18 @@ local function get_template()
     return template_cache ~= "" and template_cache or nil
 end
 
--- 封面下载转 base64（渲染环境无外网，外链图不可用）；失败返回 nil 走占位样式
+-- 封面下载转 base64（渲染环境无外网，外链图不可用）；失败/超大返回 nil 走占位样式
+local MAX_COVER_BYTES = 512 * 1024
+
 local function fetch_cover_b64(pic_url)
     if type(pic_url) ~= "string" or pic_url == "" then return nil end
     local resp, err = jn.http.get(pic_url)
     if err or not resp or resp.status ~= 200 or resp.body == "" then
         jn.log.warn("[MeT_Music] 封面下载失败: " .. tostring(pic_url))
+        return nil
+    end
+    if #resp.body > MAX_COVER_BYTES then
+        jn.log.warn("[MeT_Music] 封面过大跳过内嵌: " .. tostring(pic_url) .. " " .. tostring(#resp.body) .. "B")
         return nil
     end
     local mime = pic_url:find("%.png", 1, true) and "image/png" or "image/jpeg"
