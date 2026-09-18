@@ -22,7 +22,7 @@
 
 - 音乐卡片为 OneBot11 `music` 自定义分享段（`audio` 为 MeT Music 取流直链），是否渲染成卡片取决于 OneBot 实现端（NapCat / SnowLuma / Lagrange 等均支持）。
 - `fee=1` 的歌曲为付费内容，取流直链可能只有试听片段，结果图中会以 `VIP` 标识。
-- 结果图由 T2I 渲染：封面已转为 base64 内嵌，不依赖渲染环境外网。
+- 结果图由 T2I 渲染：封面以原始 URL 交给渲染环境下载（参照 repo-intro 的做法，常见 CDN 可直连），个别加载失败的封面显示为占位底色。
 
 ## 支持 MeT Music
 
