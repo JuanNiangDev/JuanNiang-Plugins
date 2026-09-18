@@ -38,43 +38,6 @@ local function html_escape(s)
         :gsub('"', "&quot;"))
 end
 
-local B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-local function b64_sub(buf, lo, hi)
-    local v = math.floor(buf / 2 ^ lo) % 2 ^ (hi - lo + 1)
-    return B64_CHARS:sub(v + 1, v + 1)
-end
-
---- 纯 Lua base64 编码（封面图转 data URI 用，渲染环境无外网）
--- 注意：gopher-lua 的 table.concat 会把所有元素压入 Lua 栈（registry 默认仅 5120
--- 且不可扩容），大表一次性 concat 会报 "registry overflow"，必须分块合并。
-local CONCAT_CHUNK = 512
-
-local function concat_chunked(t)
-    local parts = {}
-    local n = #t
-    local i = 1
-    while i <= n do
-        local j = math.min(i + CONCAT_CHUNK - 1, n)
-        parts[#parts + 1] = table.concat(t, "", i, j)
-        i = j + 1
-    end
-    return table.concat(parts)
-end
-
-local function b64encode(data)
-    local out = {}
-    local i, n = 1, #data
-    while i <= n do
-        local a, b, c = data:byte(i) or 0, data:byte(i + 1), data:byte(i + 2)
-        local buf = a * 65536 + (b or 0) * 256 + (c or 0)
-        out[#out + 1] = b64_sub(buf, 18, 23) .. b64_sub(buf, 12, 17)
-            .. (b and b64_sub(buf, 6, 11) or "=")
-            .. (c and b64_sub(buf, 0, 5) or "=")
-        i = i + 3
-    end
-    return concat_chunked(out)
-end
-
 local function fmt_duration(ms)
     local total = math.floor((tonumber(ms) or 0) / 1000)
     return string.format("%d:%02d", math.floor(total / 60), total % 60)
@@ -126,23 +89,8 @@ local function get_template()
     return template_cache ~= "" and template_cache or nil
 end
 
--- 封面下载转 base64（渲染环境无外网，外链图不可用）；失败/超大返回 nil 走占位样式
-local MAX_COVER_BYTES = 512 * 1024
-
-local function fetch_cover_b64(pic_url)
-    if type(pic_url) ~= "string" or pic_url == "" then return nil end
-    local resp, err = jn.http.get(pic_url)
-    if err or not resp or resp.status ~= 200 or resp.body == "" then
-        jn.log.warn("[MeT_Music] 封面下载失败: " .. tostring(pic_url))
-        return nil
-    end
-    if #resp.body > MAX_COVER_BYTES then
-        jn.log.warn("[MeT_Music] 封面过大跳过内嵌: " .. tostring(pic_url) .. " " .. tostring(#resp.body) .. "B")
-        return nil
-    end
-    local mime = pic_url:find("%.png", 1, true) and "image/png" or "image/jpeg"
-    return "data:" .. mime .. ";base64," .. b64encode(resp.body)
-end
+-- 封面直接以 URL 交给 T2I 渲染环境下载（参照 repo-intro：常见 CDN 可直连；
+-- 若个别封面加载失败，模板的 CSS 背景会自然兜底为占位样式）
 
 local function build_rows_html(songs)
     local rows = {}
@@ -153,13 +101,10 @@ local function build_rows_html(songs)
         local badge = tonumber(song.fee) == 1
             and '<span class="vip">VIP</span>'
             or '<span class="free">免费</span>'
-        local cover_html
-        local b64 = fetch_cover_b64(song.al and song.al.picUrl)
-        if b64 then
-            cover_html = string.format('<img class="cover" src="%s">', b64)
-        else
-            cover_html = '<div class="cover"></div>'
-        end
+        local pic = (song.al and type(song.al) == "table") and tostring(song.al.picUrl or "") or ""
+        local cover_html = pic ~= ""
+            and string.format('<img class="cover" src="%s">', html_escape(pic))
+            or '<div class="cover"></div>'
         rows[#rows + 1] = table.concat({
             '<div class="song">',
             '<div class="idx">' .. i .. '</div>',
