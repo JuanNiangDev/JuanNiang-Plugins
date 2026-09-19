@@ -20,6 +20,16 @@
     "has_readme": true
   },
   {
+    "name": "MeT_Music",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "MeT Music 点歌：/music search 搜索（T2I 渲染结果图）、/music play 播放音乐卡片",
+    "path": "MeT_Music",
+    "image": "MeT_Music/avatar.png",
+    "has_config": true,
+    "has_readme": true
+  },
+  {
     "name": "ping",
     "version": "1.1.1",
     "author": "JuanNiang",
@@ -66,6 +76,16 @@
     "description": "定时发送消息到指定群",
     "path": "redrock_cron_msg",
     "image": "redrock_cron_msg/avatar.png",
+    "has_config": true,
+    "has_readme": true
+  },
+  {
+    "name": "redrock_delicious",
+    "version": "1.0.0",
+    "author": "Redrock",
+    "description": "定时随机发送一条吃饭语录（中心食堂/校外觅食推荐，CronJob 触发）",
+    "path": "redrock_delicious",
+    "image": "redrock_delicious/avatar.png",
     "has_config": true,
     "has_readme": true
   },
