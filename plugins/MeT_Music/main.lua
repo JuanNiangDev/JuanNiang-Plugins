@@ -259,6 +259,7 @@ jn.command.register("music", function(args, event)
     else
         reply(event, HELP)
     end
+    return true -- 命令已消费，事件不再透传给 Agent
 end)
 
 jn.log.info("[MeT_Music] 点歌插件已加载：/music search | /music play")
