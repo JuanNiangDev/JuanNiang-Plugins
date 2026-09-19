@@ -130,6 +130,7 @@ local function render_result(songs, keywords)
         :gsub("__ROWS__", function() return build_rows_html(songs) end)
     local url, err = jn.t2i.generate_url(html, {
         viewport_width = 560,
+        viewport_height = 120, -- 小视口 + full_page：截图高度贴合内容，避免底部大片空白
         full_page = true,
     })
     if not url then
@@ -213,23 +214,13 @@ local function do_play(args, event)
     end
 
     local base = api_base()
-    local pic = (song.al and type(song.al) == "table") and tostring(song.al.picUrl or "") or ""
-    local segments = {
-        { type = "music", data = {
-            type = "custom",
-            url = "https://y.qq.com/n/ryqq/songDetail/" .. tostring(song.id or ""),
-            audio = base .. "/api/meting/?type=url&id=" .. tostring(song.id or ""),
-            title = tostring(song.name or "未知曲目"),
-            image = pic,
-            content = join_artists(song),
-        } },
-    }
-    local ok = reply(event, segments)
+    -- 语音发送：file 传 MeT 取流直链（302 跳转到实际音频），
+    -- 由 OneBot 实现端下载并自动转码为 silk 语音
+    local audio = base .. "/api/meting/?type=url&id=" .. tostring(song.id or "")
+    local ok = reply(event, { { type = "record", data = { file = audio } } })
     if not ok then
-        -- 卡片发送失败降级为文本直链
-        reply(event, string.format("▶ %s - %s\n%s",
-            song.name or "?", join_artists(song),
-            base .. "/api/meting/?type=url&id=" .. tostring(song.id or "")))
+        -- 语音发送失败降级为文本直链
+        reply(event, string.format("▶ %s - %s\n%s", song.name or "?", join_artists(song), audio))
     end
 end
 
