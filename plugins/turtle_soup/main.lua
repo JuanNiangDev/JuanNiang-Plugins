@@ -149,22 +149,91 @@ local function chat_json(system, user, ctx)
     local rid = jn.llm.chat_async({
         { role = "system", content = system },
         { role = "user", content = user },
-    }, { timeout = 90 }) -- 不设 max_tokens：glm-5.3-flash 是思考模型，
-    -- max_tokens 过小会被 reasoning_content 吃光导致 content 为空；缺省回退 Bot Provider 配置
+    }, { timeout = 90 }) -- 不设 max_tokens：glm-5.3-flash 是思考模型，max_tokens 过小会被
+    -- reasoning_content 吃光导致 content 为空；缺省回退 Bot Provider 配置
     if not rid or rid == 0 then return false end
     llm_ctx[rid] = ctx
     return true
 end
 
 -- --------------------------------------------------------------------
--- LLM 提示词（与 lanmei-dream 逐句对齐）
+-- 汤底风格（/开汤 可指定；不指定则从安全池随机）
 -- --------------------------------------------------------------------
-local function prompt_generate()
-    return [[你是一个海龟汤（情境推理谜题）出题人。请生成一个经典风格的海龟汤谜题：
+-- 安全风格池：随机汤底只从这里选
+local SOUP_STYLES = {
+  { alias = "清汤", names = { "清汤", "白汤" },
+    desc = "日常生活细节、误会、冷知识或视线盲区，完全不涉及暴力或死伤" },
+  { alias = "暖汤", names = { "暖汤", "甜汤", "粉汤" },
+    desc = "结局温馨治愈或浪漫，核心是亲情、默默的爱意、善意的谎言或可爱的巧合，无恐怖元素" },
+  { alias = "沙雕汤", names = { "沙雕汤", "搞笑汤", "绿汤" },
+    desc = "幽默荒诞、无厘头反转或谐音梗，猜中后令人会心一笑" },
+  { alias = "硬核逻辑汤", names = { "硬核逻辑汤", "推理汤" },
+    desc = "严密的因果链与本格推理，注重物理机关、时间差、视角盲区或精确动线" },
+  { alias = "脑洞汤", names = { "脑洞汤", "奇幻汤", "科幻汤" },
+    desc = "超现实设定，如超能力、时空穿越、AI 觉醒、规则怪谈，需跳出现实常理还原世界观" },
+  { alias = "文字游戏汤", names = { "文字游戏汤", "梗汤", "双关汤" },
+    desc = "谜底依托汤面的字面陷阱、同音错觉、歧义修辞或行业黑话" },
+  { alias = "悬疑汤", names = { "悬疑汤", "惊悚汤" },
+    desc = "悬念铺设与反常情境，允许适当的紧张氛围与轻度恐怖，但不得出现血腥、暴力或死亡描写" },
+}
+
+-- 违禁风格：用户点名这些直接拒绝（扭曲伦理/人性、精神摧残、血腥、暴力、色情、敏感时政）
+local FORBIDDEN_WORDS = {
+  "红汤", "黑汤", "暗黑汤", "变态汤", "猎奇汤", "重口",
+  "血腥", "暴力", "凶杀", "杀人", "自杀", "尸体", "虐杀",
+  "色情", "擦边", "性爱", "情色",
+  "扭曲", "精神污染", "精神摧残", "反伦理", "伦理禁忌",
+  "时政", "政治", "敏感话题",
+}
+
+-- 归一化用户输入：去空白、去掉尾部"汤"以外的冗余后再比对
+local function normalize_style(input)
+  local s = tostring(input or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  return s
+end
+
+-- 判断是否违禁：整词与别名（含不带"汤"字的简称，如 /开汤 红）都拦
+local function is_forbidden_style(raw)
+  local s = normalize_style(raw)
+  if s == "" then return false end
+  local bare = s:gsub("汤$", "")
+  for _, w in ipairs(FORBIDDEN_WORDS) do
+    if s == w or s:find(w, 1, true) then return true end
+    local wbare = w:gsub("汤$", "")
+    if #wbare > 0 and (bare == wbare or s == w) then return true end
+  end
+  return false
+end
+
+-- 按别名/别名简称找安全风格（清汤/白/暖/甜/粉/沙雕/搞笑/绿/推理/脑洞/梗/悬疑…）
+local function find_safe_style(raw)
+  local s = normalize_style(raw)
+  if s == "" then return nil end
+  local bare = s:gsub("汤$", "")
+  for _, st in ipairs(SOUP_STYLES) do
+    for _, name in ipairs(st.names) do
+      local nbare = name:gsub("汤$", "")
+      if s == name or bare == nbare then return st end
+    end
+  end
+  return nil
+end
+
+local function pick_random_style()
+  return SOUP_STYLES[math.random(#SOUP_STYLES)]
+end
+
+-- 出题提示词：style 为已解析的风格描述（安全池条目 desc 或用户自定义文本）
+local function prompt_generate(style)
+    local style_line = ""
+    if style and style ~= "" then
+        style_line = "\n本局汤底风格要求（必须贴合）：" .. style .. "\n"
+    end
+    return [[你是一个海龟汤（情境推理谜题）出题人。请生成一个经典风格的海龟汤谜题：]] .. style_line .. [[
 - 汤面（soup_face）：简短、离奇、让人困惑的情境描述（1-3 句话），只陈述现象，不含任何解释
 - 汤底（soup_base）：完整合理的真相（1-3 句话），能自洽解释汤面
 - 判定要点（hints）：供主持人回答"是/否/无关"时参考的关键事实列表（2-4 条，严禁出现完整答案）
-要求：情境不得涉及血腥、暴力、色情、违法或不适内容，适合校园群聊；谜题要有趣且逻辑自洽；全部字段使用纯文本，不要使用任何 Markdown 标记。
+内容红线（任何风格都必须遵守）：不得涉及血腥、暴力、凶杀、自杀、扭曲伦理或人性、精神摧残或污染、色情或擦边、敏感时政；适合校园群聊；可以有适当的悬念与轻度惊悚。谜题要有趣且逻辑自洽；全部字段使用纯文本，不要使用任何 Markdown 标记。
 仅输出 JSON，不要其他内容：{"soup_face":"...","soup_base":"...","hints":["...","..."]}]]
 end
 
@@ -290,7 +359,28 @@ end
 -- --------------------------------------------------------------------
 -- 命令
 -- --------------------------------------------------------------------
-local function cmd_open(event)
+local function cmd_open(args, event)
+    local style_arg = table.concat(args, " ")
+    local style_desc, style_label
+
+    if style_arg ~= "" then
+        -- 违禁汤底：直接拒绝（点名红汤/黑汤/变态汤等或包含血腥/暴力/色情/时政等字样）
+        if is_forbidden_style(style_arg) then
+            return true, "🚫 这个汤底不接：血腥、暴力、扭曲伦理、精神污染、色情、敏感时政类统统不煮。\n"
+                .. "可以试试：清汤、暖汤、沙雕汤、悬疑汤、推理汤、脑洞汤、梗汤，或任意自定义安全风格～"
+        end
+        local known = find_safe_style(style_arg)
+        if known then
+            style_desc, style_label = known.desc, known.alias
+        else
+            -- 自定义风格：原文交给 LLM，红线由出题提示词的内容约束兜底
+            style_desc, style_label = style_arg, style_arg
+        end
+    else
+        local known = pick_random_style()
+        style_desc, style_label = known.desc, known.alias
+    end
+
     local key = chat_key(event)
     if game_load(key) ~= nil then
         return true, "本群已有进行中的海龟汤，用 /问 /猜 继续，或 /认输 结束"
@@ -302,14 +392,14 @@ local function cmd_open(event)
         return true, "需要 LLM 才能开汤，请先在面板启用文本模型"
     end
     in_flight[key] = true
-    local ok = chat_json(prompt_generate(), "请生成一局海龟汤。",
-        { kind = "open", key = key, message_type = event.message_type,
+    local ok = chat_json(prompt_generate(style_desc), "请生成一局海龟汤。",
+        { kind = "open", key = key, style = style_label, message_type = event.message_type,
           group_id = event.group_id, user_id = event.user_id })
     if not ok then
         in_flight[key] = nil
         return true, "起汤任务提交失败，请稍后重试"
     end
-    return true, "🔮 正在起汤，稍等片刻…"
+    return true, "🔮 正在起一锅「" .. style_label .. "」，稍等片刻…"
 end
 
 local function cmd_ask(args, event)
@@ -380,13 +470,13 @@ local function cmd_give_up(event)
         .. "再开一局请 /开汤"
 end
 
-jn.command.register("开汤", function(_, event) return cmd_open(event) end, {
+jn.command.register("开汤", function(args, event) return cmd_open(args, event) end, {
     description = "海龟汤：开一局新汤（LLM 出题，汤底保密）",
-    usage = "/开汤",
+    usage = "/开汤 [汤底类型]（不指定则随机；如 /开汤 暖汤 /开汤 推理汤）",
 })
-jn.command.register("海龟汤", function(_, event) return cmd_open(event) end, {
+jn.command.register("海龟汤", function(args, event) return cmd_open(args, event) end, {
     description = "/开汤 的别名：开一局海龟汤",
-    usage = "/海龟汤",
+    usage = "/海龟汤 [汤底类型]",
 })
 jn.command.register("问", function(args, event) return cmd_ask(args, event) end, {
     description = "海龟汤：向主持人提问，只答 是/否/无关",
