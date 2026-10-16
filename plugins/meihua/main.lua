@@ -236,7 +236,8 @@ jn.command.register("梅花", function(args, event)
     local rid = jn.llm.chat_async({
         { role = "system", content = prompt },
         { role = "user", content = text },
-    }, { max_tokens = 1024, timeout = 90 })
+    }, { timeout = 90 }) -- 不设 max_tokens：glm-5.3-flash 是思考模型，
+    -- max_tokens 过小会被 reasoning_content 吃光导致 content 为空；缺省回退 Bot Provider 配置
     if not rid or rid == 0 then
         return true, text .. "\n（断卦任务提交失败，请稍后重试）"
     end
