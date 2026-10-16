@@ -1,0 +1,10 @@
+name: "meihua"
+version: "1.0.0"
+author: "Nailoong"
+description: "梅花易数占卜：/梅花 <问题> 起卦并用主程序 LLM 断卦（移植自 astrbot_plugin_meihua）"
+entry: "main.lua"
+permissions:
+  - onebot11
+  - llm
+system: false
+enabled: true

@@ -1,0 +1,11 @@
+name: "turtle_soup"
+version: "1.0.0"
+author: "Nailoong"
+description: "海龟汤情境推理游戏：/开汤 开局，/问 /猜 /认输 对局（移植自 lanmei-dream）"
+entry: "main.lua"
+permissions:
+  - onebot11
+  - llm
+  - cache
+system: false
+enabled: true
