@@ -1,9 +1,10 @@
 name: "redrock_poke"
-version: "1.0.2"
 author: "Redrock"
-description: "卷娘戳一戳回复插件"
+version: "1.1.0"
+description: "戳一戳回复插件（支持图床表情包回复）"
 entry: "main.lua"
 permissions:
   - onebot11
+  - image
 system: false
 enabled: true

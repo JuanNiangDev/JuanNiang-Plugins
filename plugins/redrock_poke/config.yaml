@@ -28,3 +28,33 @@ configs:
     label: 戳一戳回复语
     description: 被戳时随机选用的一条回复语（留空则使用内置默认回复库）
     default: []
+
+  - key: emoji_folder
+    type: string
+    label: 表情包图床目录
+    description: 图床虚拟文件夹名（如 表情包），作为表情包来源；留空则不使用表情包。需要 Bot 侧 jn.images API（image 权限）
+    default: 表情包
+
+  - key: emoji_files
+    type: list
+    label: 指定表情包文件
+    description: 图床内指定文件名（需在上方目录内存在）；非空时只在其中随机，留空则用整个目录
+    default: []
+
+  - key: emoji_rate
+    type: string
+    label: 表情包频率（%）
+    description: 文本回复时附带一张表情包的概率，0~100；0 表示文本回复永不带图
+    default: "30"
+
+  - key: emoji_weight
+    type: string
+    label: 表情包回复权重
+    description: 表情包回复 vs 文本回复的权重比（如 1:2 表示约 1/3 概率只发表情包）
+    default: "1"
+
+  - key: text_weight
+    type: string
+    label: 文本回复权重
+    description: 与表情包回复权重对应；权重均为 0 时回退纯文本
+    default: "2"
