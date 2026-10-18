@@ -1,0 +1,12 @@
+name: "pig_party"
+version: "1.0.0"
+author: "Churnie HXCN"
+description: "猪猪派对：今日小猪（每人每天固定一只，直接发送图床/PigHub 原图）、随机猪图（群内去重防刷屏）、普通消息含猪字自动回复（默认关闭，带白名单/概率/冷却），图池支持卷娘图床多目录与自定义外链（复刻自 astrbot_plugin_pig_party）"
+entry: "main.lua"
+permissions:
+  - onebot11
+  - cache
+  - image
+  - file
+system: false
+enabled: true
