@@ -60,6 +60,12 @@ configs:
     description: "开启后机器人自身的回复消息不纳入总结分析，避免死循环自我总结"
     default: true
 
+  - key: filter_keywords
+    type: list
+    label: "排除关键词"
+    description: "消息中命中任一关键词即不纳入总结分析（如戳一戳回复语、机器人固定话术）"
+    default: []
+
   - key: enable_progress_feedback
     type: bool
     label: "启用生成进度提示"

@@ -25,6 +25,7 @@ local state = {
 local check_manual_trigger
 local check_daily_timer
 local prune_expired_messages
+local strip_cq_noise
 
 -- ============================================================================
 -- 1. 数据库初始化
@@ -138,10 +139,20 @@ local function clean_message_text(raw)
     if is_command_or_noise(raw) then
         return ""
     end
-    -- 移除回复引用 CQ 码
-    local cleaned = raw:gsub("%[CQ:reply,id=%-?%d+%]", "")
-    -- 去除首尾空白
-    cleaned = cleaned:gsub("^%s+", ""):gsub("%s+$", "")
+    -- 戳一戳事件（CQ:poke）不入库
+    if raw:find("[CQ:poke", 1, true) then
+        return ""
+    end
+    -- 剥离非文本 CQ 码（图片/表情/@ 等），仅保留纯文本；纯图片消息将被丢弃
+    local cleaned = strip_cq_noise(raw)
+    -- 命中自定义关键词黑名单（如戳一戳回复语）不入库
+    local kws = jn.config.get("filter_keywords")
+    if cleaned ~= "" and type(kws) == "table" then
+        for _, k in pairs(kws) do
+            local ks = tostring(k or "")
+            if ks ~= "" and cleaned:find(ks, 1, true) then return "" end
+        end
+    end
     return cleaned
 end
 
@@ -208,7 +219,7 @@ end
 local function fetch_group_messages(group_id, hours)
     hours = hours or 24
     local sql = [[
-        SELECT id, user_id, nickname, content, created_at
+        SELECT id, user_id, nickname, content, raw_message, created_at
         FROM ]] .. TABLE_MESSAGES .. [[
         WHERE group_id = ?
           AND created_at >= NOW() - (INTERVAL '1 hour' * ?)
@@ -223,12 +234,46 @@ local function fetch_group_messages(group_id, hours)
     return rows or {}
 end
 
+-- 剥离非文本 CQ 码（图片/表情/语音/视频/卡片/合并转发/@），图片等内容不参与总结。
+-- 同时剥离动辄数百字符的图片外链 URL，避免 LLM prompt 被无意义 URL 撑爆导致超时。
+-- 保留换行/空行原貌（不折叠空白），以维持金句排版。
+strip_cq_noise = function(s)
+    if not s or s == "" then return "" end
+    s = s:gsub("%[CQ:[^%]]*%]", "")
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    return s
+end
+
+-- 判断单条库内消息是否为噪音（指令/机器人交互/纯非文本/戳一戳回复/自定义关键词）。
+-- 注意：raw_message 可能因查询未选取而为 nil，此时不可据此判噪，只以 content 为准。
+local function msg_is_noise(msg)
+    local content = msg.content
+    if content == nil or content == "" then return true end
+    local raw = msg.raw_message or ""
+    -- 戳一戳相关（CQ:poke 事件 / 机器人的戳一戳回复语）一律不参与总结
+    if content:find("[CQ:poke", 1, true) or raw:find("[CQ:poke", 1, true) then return true end
+    if is_command_or_noise(content) then return true end
+    if strip_cq_noise(content) == "" then return true end
+    if raw ~= "" and is_command_or_noise(raw) then return true end
+    -- 自定义关键词黑名单（如戳一戳回复语：猴辣 / 嘎嘎滴辣虾～ / 安迪！）
+    local kws = jn.config.get("filter_keywords")
+    if type(kws) == "table" then
+        for _, k in pairs(kws) do
+            local ks = tostring(k or "")
+            if ks ~= "" and content:find(ks, 1, true) then return true end
+        end
+    elseif type(kws) == "string" and kws ~= "" then
+        for item in kws:gmatch("[^,，%s]+") do
+            if item ~= "" and content:find(item, 1, true) then return true end
+        end
+    end
+    return false
+end
+
 local function analyze_statistics(messages)
     local valid_messages = {}
     for _, msg in ipairs(messages) do
-        local content = msg.content or ""
-        local raw = msg.raw_message or ""
-        if not is_command_or_noise(content) and not is_command_or_noise(raw) then
+        if not msg_is_noise(msg) then
             table.insert(valid_messages, msg)
         end
     end
@@ -302,10 +347,9 @@ local function format_chat_stream(messages)
 
     local valid_idx = 0
     for _, msg in ipairs(messages) do
-        local content = msg.content or ""
-        local raw = msg.raw_message or ""
-        if not is_command_or_noise(content) and not is_command_or_noise(raw) then
+        if not msg_is_noise(msg) then
             valid_idx = valid_idx + 1
+            local content = strip_cq_noise(msg.content)
             local uid = tostring(msg.user_id)
             if not participant_map[uid] then
                 participant_counter = participant_counter + 1
@@ -384,7 +428,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
     if max_topics > 0 then
         topics_rule = string.format("提取 1 到不多于 %d 个今日核心热门话题。对零散讨论进行合理聚类归纳，严禁碎片化流水账！", max_topics)
     elseif max_topics == -1 then
-        topics_rule = "全面覆盖今日群聊，但严禁碎片化琐碎堆砌！必须对讨论内容进行【合理归类与合并整合】，将同类问题、相似探讨归纳整合为精炼的主题板块，做到【全面覆盖、高度凝练、结构清晰】，提炼出 5~10 个最具代表性的综合核心话题板块！"
+        topics_rule = "对讨论内容进行【合理归类与合并整合】，将同类问题、相似探讨归纳为凝练的主题板块，做到【全面覆盖、高度凝练、结构清晰】，提炼 4~8 个最具代表性的综合核心话题板块（严禁碎片化琐碎堆砌）"
     else
         topics_rule = "无需提取话题（本项已关闭）"
     end
@@ -393,7 +437,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
     if max_quotes > 0 then
         quotes_rule = string.format("甄选不多于 %d 句最具神人冲击力的高光金句", max_quotes)
     elseif max_quotes == -1 then
-        quotes_rule = "全面甄选今日最具代表性、反差感、槽点拉满的精华高光金句，严禁平庸废话流水账，做到宁缺毋滥、全面且凝练（精选 3~8 句最具神人气质的精彩发言）！"
+        quotes_rule = "甄选今日最具反差感、槽点拉满的精华高光金句，宁缺毋滥（精选 3~6 句最具神人气质的精彩发言，严禁平庸废话流水账）"
     else
         quotes_rule = "无需提取金句（本项已关闭）"
     end
@@ -402,14 +446,14 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
     if max_titles > 0 then
         titles_rule = string.format("为不多于 %d 位发言活跃群友评选极具特色的荣誉头衔与行为特征画像", max_titles)
     elseif max_titles == -1 then
-        titles_rule = "为今日主要活跃群友评选极具特色的专属荣誉头衔与行为特征画像，画像精辟凝练、幽默切中要害，覆盖核心活跃群友（5~10 位），避免泛滥流水账！"
+        titles_rule = "为今日主要活跃群友评选极具特色的专属荣誉头衔与行为特征画像，画像精辟凝练、幽默切中要害，覆盖核心活跃群友（5~8 位），避免泛滥流水账！"
     else
         titles_rule = "无需评选头衔（本项已关闭）"
     end
 
     local critique_rule = ""
     if max_critiques ~= 0 then
-        local count_text = (max_critiques > 0) and string.format("不多于 %d 个", max_critiques) or "3~6 个"
+        local count_text = (max_critiques > 0) and string.format("不多于 %d 个", max_critiques) or "3~5 个"
         if use_persona == "none" then
             critique_rule = string.format("将今日聊天合理抽象归纳为 %s 【高层级、泛化】的宏观维度（如技术探讨、职业规划、日常摸鱼、抽象整活等），严禁在维度名称中包含具体人名或琐碎小事，计算大致占比百分比（总和小于等于 100%%），并给出客观严谨的分析点评与全天综合表现总结！", count_text)
         else
@@ -439,6 +483,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
 ## ⚠️【绝对禁止事项·重中之重】：
 1. 严禁总结任何机器人指令或插件触发命令（例如：/今日老婆、今日老婆、/qd、签到、/help、@机器人 等一切指令交互）！所有机器人调用与回复均为系统噪音，直接彻底忽略，严禁作为话题、金句、头衔或点评内容！
 2. 严禁碎片化流水账堆砌！-1 选项代表全面覆盖群聊各方面，但必须【合理归类、聚类整合与高度凝练】，严禁无上限罗列散碎信息。
+3. 整体输出务必精炼控制篇幅：各字段点到为止，不要冗长铺陈，确保 JSON 体积适中。
 
 ## 返回 JSON 数据结构规范（严禁包含 markdown 代码块包裹之外的杂质，必须是合法 JSON）：
 ```json
@@ -446,7 +491,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
   "topics": [
     {
       "title": "话题标题（2-10字）",
-      "summary": "核心脉络与要点概述（50-100字，凝练精辟）",
+      "summary": "核心脉络与要点概述（40字以内，精炼）",
       "participants": "主要讨论者（使用真实昵称，逗号分隔）"
     }
   ],
@@ -742,6 +787,15 @@ local function do_group_analysis(group_id, send_target_id, is_private_target, fo
             jn.log.info(string.format("[%s] 群 %d 今日 (%s) 已完成过群总结报告，跳过重复执行", PLUGIN_NAME, group_id, cur_date))
             return true, "今日已完成"
         end
+
+        -- 立即占位并落库当日标记，确保同一群同一日仅执行一次
+        -- （覆盖消息不足、LLM 失败、发送失败等所有分支，彻底杜绝双触发重复推送）
+        state.last_analyzed_date = state.last_analyzed_date or {}
+        state.last_analyzed_date[group_id] = cur_date
+        state.last_daily_date = cur_date
+        if jn.cache and jn.cache.set then
+            jn.cache.set(cache_key, cur_date, 86400 * 2)
+        end
     end
 
     state.is_analyzing = state.is_analyzing or {}
@@ -828,10 +882,11 @@ local function do_group_analysis(group_id, send_target_id, is_private_target, fo
         end
 
         jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 模型: %s)...", PLUGIN_NAME, group_id, #prompt, active_model_desc))
+        -- 群总结属重任务：必须显式放宽超时（默认 60s 会被长报告生成击穿导致 context deadline exceeded）
         local resp_text, err = jn.llm.chat({
             { role = "system", content = persona_prompt },
             { role = "user", content = prompt },
-        })
+        }, { timeout = 300 })
 
         -- 若之前临时切换了 Provider，切回原 Provider 保持全局环境纯净
         if target_provider_str ~= "" and old_provider_id and jn.agent and jn.agent.switch_provider then
