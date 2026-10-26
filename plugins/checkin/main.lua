@@ -54,26 +54,63 @@ local function today()
 end
 
 -- --------------------------------------------------------------------
--- 辅助函数：获取一句金句 (from vv314/quotes -> hitokoto API)
+-- 金句池：quotes.txt 为权威来源，加载时读入并整体覆盖 Redis
 -- --------------------------------------------------------------------
-local function get_quote()
-    local resp = jn.http.get("https://v1.hitokoto.cn/?c=a&c=b&c=c&c=d&c=e&c=f&c=g&c=h&c=i&c=j&c=k&c=l")
-    if resp and resp.status == 200 and resp.body then
-        local data = jn.json.decode(resp.body)
-        if data and data.hitokoto then
-            local from = data.from and ("—— " .. data.from) or ""
-            return data.hitokoto .. " " .. from
+
+-- 内置兜底（quotes.txt 缺失或为空时使用）
+local FALLBACK_QUOTES = {
+    "今天也是充满希望的一天！",
+    "努力不一定会成功，但不努力一定很轻松——开个玩笑，还是要加油！",
+    "生活不止眼前的苟且，还有明天的苟且。",
+    "每一天都是新的一天，今天也要元气满满！",
+    "人生没有白走的路，每一步都算数。",
+}
+
+-- 从 quotes.txt 加载金句池：跳过空行与 # 注释，按内容去重
+local function load_quotes()
+    local lines, err = jn.file.read_lines("quotes.txt")
+    if not lines then
+        jn.log.warn("签到插件：金句文件读取失败，使用内置兜底: " .. tostring(err))
+        return FALLBACK_QUOTES
+    end
+    local out, seen = {}, {}
+    for _, line in ipairs(lines) do
+        local s = line:gsub("^%s+", ""):gsub("%s+$", "")
+        if s ~= "" and s:sub(1, 1) ~= "#" and not seen[s] then
+            seen[s] = true
+            out[#out + 1] = s
         end
     end
-    -- 兜底金句
-    local fallbacks = {
-        "今天也是充满希望的一天！",
-        "努力不一定会成功，但不努力一定很轻松——开个玩笑，还是要加油！",
-        "生活不止眼前的苟且，还有明天的苟且。",
-        "每一天都是新的一天，今天也要元气满满！",
-        "人生没有白走的路，每一步都算数。",
-    }
-    return fallbacks[math.random(#fallbacks)]
+    if #out == 0 then
+        jn.log.warn("签到插件：金句文件为空，使用内置兜底")
+        return FALLBACK_QUOTES
+    end
+    return out
+end
+
+local QUOTES = load_quotes()
+
+-- 加载时整体覆盖写入 Redis（幂等：固定 key + SET 覆盖，不依赖 exists 判断）。
+-- 必须包一层 map：引擎的 cache.get 固定反序列化为 map[string]any，
+-- 裸数组经 Redis 往返后读不回来（set 成功但 get 恒为 nil）。
+local ok, err = jn.cache.set("quotes", { items = QUOTES })
+if not ok then
+    jn.log.warn("签到插件：金句写入 Redis 失败，改用内存副本: " .. tostring(err))
+end
+
+-- --------------------------------------------------------------------
+-- 辅助函数：获取一句金句
+-- --------------------------------------------------------------------
+local function get_quote()
+    local pool = QUOTES
+    local cached = jn.cache.get("quotes")
+    if type(cached) == "table" and type(cached.items) == "table" and #cached.items > 0 then
+        pool = cached.items
+    end
+    if #pool == 0 then
+        return nil
+    end
+    return pool[math.random(#pool)]
 end
 
 -- --------------------------------------------------------------------
@@ -191,10 +228,13 @@ jn.command.register("qd", function(args, event)
         string.format("签到成功！%s", user_name),
         string.format("本次获得 +%d 分 | 累计 %d 分", score, total),
     }
-    -- 是否附带每日金句
+    -- 是否附带每日金句（句子池为空时整段跳过，不追加空行）
     if jn.config.get("enable_quote") then
-        lines[#lines + 1] = ""
-        lines[#lines + 1] = get_quote()
+        local quote = get_quote()
+        if quote then
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = quote
+        end
     end
     reply(event, table.concat(lines, "\n"))
     return true
