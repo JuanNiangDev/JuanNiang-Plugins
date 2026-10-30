@@ -17,12 +17,15 @@ local state = {
     last_daily_date = "",
     manual_running = false,
     manual_triggered_once = false,
+    is_analyzing = {},
+    last_analyzed_date = {},
 }
 
 -- 前向声明
 local check_manual_trigger
 local check_daily_timer
 local prune_expired_messages
+local strip_cq_noise
 
 -- ============================================================================
 -- 1. 数据库初始化
@@ -92,16 +95,64 @@ local function is_target_group(group_id)
     return targets[tonumber(group_id)] == true
 end
 
+local function is_command_or_noise(raw)
+    if not raw or raw == "" then return true end
+    -- 1. 移除回复引用 CQ 码
+    local s = raw:gsub("%[CQ:reply,id=%-?%d+%]", "")
+    -- 2. 移除合并转发 CQ 码
+    s = s:gsub("%[CQ:forward,id=[^%]]+%]", "")
+    -- 3. 移除所有 @ 提及 (包括 CQ:at 与文本 @)
+    s = s:gsub("%[CQ:at,qq=[^%]]+%]", "")
+    s = s:gsub("@%S+", "")
+    -- 4. 移除多余空白
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "" then return true end
+
+    -- 5. 过滤以常规指令前缀开头的消息 (/ 或 # 或 ! 或 ！ 或 ／)
+    if s:match("^[/#!#！／]%S*") then
+        return true
+    end
+
+    -- 6. 过滤常见机器人与插件触发词（如今日老婆系列、签到等）
+    local lower_s = s:lower()
+    local command_prefixes = {
+        "今日老婆", "查老婆", "我的老婆", "随机老婆", "娶老婆", "抽老婆",
+        "强娶", "离婚", "休妻", "所有人都是我老婆", "全都要",
+        "强娶全体成员", "全员老婆", "全部离婚", "净身出户",
+        "老婆关系网", "绿帽图", "本群关系", "固定老婆",
+        "同意固定老婆", "拒绝固定老婆", "解除固定老婆", "同意解除固定老婆",
+        "签到", "打卡", "qd", "帮助", "菜单", "help", "ping", "美化", "运势", "重置"
+    }
+
+    for _, prefix in ipairs(command_prefixes) do
+        local p_lower = prefix:lower()
+        if lower_s == p_lower or lower_s:find("^" .. p_lower .. "%s") or lower_s:find("^" .. p_lower .. "$") then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function clean_message_text(raw)
     if not raw or raw == "" then return "" end
-    -- 移除回复引用 CQ 码
-    local cleaned = raw:gsub("%[CQ:reply,id=%-?%d+%]", "")
-    -- 过滤常规以 / 或 # 或 ! 开头的控制命令
-    if cleaned:match("^%s*[/#%!]%S+") then
+    if is_command_or_noise(raw) then
         return ""
     end
-    -- 去除首尾空白
-    cleaned = cleaned:gsub("^%s+", ""):gsub("%s+$", "")
+    -- 戳一戳事件（CQ:poke）不入库
+    if raw:find("[CQ:poke", 1, true) then
+        return ""
+    end
+    -- 剥离非文本 CQ 码（图片/表情/@ 等），仅保留纯文本；纯图片消息将被丢弃
+    local cleaned = strip_cq_noise(raw)
+    -- 命中自定义关键词黑名单（如戳一戳回复语）不入库
+    local kws = jn.config.get("filter_keywords")
+    if cleaned ~= "" and type(kws) == "table" then
+        for _, k in pairs(kws) do
+            local ks = tostring(k or "")
+            if ks ~= "" and cleaned:find(ks, 1, true) then return "" end
+        end
+    end
     return cleaned
 end
 
@@ -168,7 +219,7 @@ end
 local function fetch_group_messages(group_id, hours)
     hours = hours or 24
     local sql = [[
-        SELECT id, user_id, nickname, content, created_at
+        SELECT id, user_id, nickname, content, raw_message, created_at
         FROM ]] .. TABLE_MESSAGES .. [[
         WHERE group_id = ?
           AND created_at >= NOW() - (INTERVAL '1 hour' * ?)
@@ -183,14 +234,58 @@ local function fetch_group_messages(group_id, hours)
     return rows or {}
 end
 
+-- 剥离非文本 CQ 码（图片/表情/语音/视频/卡片/合并转发/@），图片等内容不参与总结。
+-- 同时剥离动辄数百字符的图片外链 URL，避免 LLM prompt 被无意义 URL 撑爆导致超时。
+-- 保留换行/空行原貌（不折叠空白），以维持金句排版。
+strip_cq_noise = function(s)
+    if not s or s == "" then return "" end
+    s = s:gsub("%[CQ:[^%]]*%]", "")
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    return s
+end
+
+-- 判断单条库内消息是否为噪音（指令/机器人交互/纯非文本/戳一戳回复/自定义关键词）。
+-- 注意：raw_message 可能因查询未选取而为 nil，此时不可据此判噪，只以 content 为准。
+local function msg_is_noise(msg)
+    local content = msg.content
+    if content == nil or content == "" then return true end
+    local raw = msg.raw_message or ""
+    -- 戳一戳相关（CQ:poke 事件 / 机器人的戳一戳回复语）一律不参与总结
+    if content:find("[CQ:poke", 1, true) or raw:find("[CQ:poke", 1, true) then return true end
+    if is_command_or_noise(content) then return true end
+    if strip_cq_noise(content) == "" then return true end
+    if raw ~= "" and is_command_or_noise(raw) then return true end
+    -- 自定义关键词黑名单（如戳一戳回复语：猴辣 / 嘎嘎滴辣虾～ / 安迪！）
+    local kws = jn.config.get("filter_keywords")
+    if type(kws) == "table" then
+        for _, k in pairs(kws) do
+            local ks = tostring(k or "")
+            if ks ~= "" and content:find(ks, 1, true) then return true end
+        end
+    elseif type(kws) == "string" and kws ~= "" then
+        for item in kws:gmatch("[^,，%s]+") do
+            if item ~= "" and content:find(item, 1, true) then return true end
+        end
+    end
+    return false
+end
+
 local function analyze_statistics(messages)
-    local total_count = #messages
+    local valid_messages = {}
+    for _, msg in ipairs(messages) do
+        if not msg_is_noise(msg) then
+            table.insert(valid_messages, msg)
+        end
+    end
+
+    local total_count = #valid_messages
     if total_count == 0 then
         return {
             total_count = 0,
             user_count = 0,
             peak_period = "无活跃记录",
             top_users = {},
+            valid_messages = {},
         }
     end
 
@@ -199,7 +294,7 @@ local function analyze_statistics(messages)
     local hour_counts = {}
     for h = 0, 23 do hour_counts[h] = 0 end
 
-    for _, msg in ipairs(messages) do
+    for _, msg in ipairs(valid_messages) do
         local uid = msg.user_id
         user_counts[uid] = (user_counts[uid] or 0) + 1
         user_names[uid] = msg.nickname or ("群友" .. uid)
@@ -238,6 +333,7 @@ local function analyze_statistics(messages)
         user_count = unique_users,
         peak_period = peak_period,
         top_users = sorted_users,
+        valid_messages = valid_messages,
     }
 end
 
@@ -249,31 +345,36 @@ local function format_chat_stream(messages)
     local participant_map = {}
     local participant_counter = 0
 
-    for idx, msg in ipairs(messages) do
-        local uid = tostring(msg.user_id)
-        if not participant_map[uid] then
-            participant_counter = participant_counter + 1
-            participant_map[uid] = {
-                id = participant_counter,
-                label = string.format("参与者%d[%s]", participant_counter, uid),
-                name = msg.nickname or ("群友" .. uid),
-            }
+    local valid_idx = 0
+    for _, msg in ipairs(messages) do
+        if not msg_is_noise(msg) then
+            valid_idx = valid_idx + 1
+            local content = strip_cq_noise(msg.content)
+            local uid = tostring(msg.user_id)
+            if not participant_map[uid] then
+                participant_counter = participant_counter + 1
+                participant_map[uid] = {
+                    id = participant_counter,
+                    label = string.format("参与者%d[%s]", participant_counter, uid),
+                    name = msg.nickname or ("群友" .. uid),
+                }
+            end
+
+            local p_info = participant_map[uid]
+            local created = tostring(msg.created_at or "")
+            local time_str = created:match("(%d%d:%d%d)") or "未知时间"
+
+            -- 关键防空行拆分设计：使用 <msg> 标签包裹单条消息全部内容（含内部所有空行与换行）
+            local item_text = string.format(
+                '<msg id="%d" time="%s" user="%s" nickname="%s">\n%s\n</msg>',
+                valid_idx,
+                time_str,
+                p_info.label,
+                p_info.name,
+                content
+            )
+            table.insert(formatted, item_text)
         end
-
-        local p_info = participant_map[uid]
-        local created = tostring(msg.created_at or "")
-        local time_str = created:match("(%d%d:%d%d)") or "未知时间"
-
-        -- 关键防空行拆分设计：使用 <msg> 标签包裹单条消息全部内容（含内部所有空行与换行）
-        local item_text = string.format(
-            '<msg id="%d" time="%s" user="%s" nickname="%s">\n%s\n</msg>',
-            idx,
-            time_str,
-            p_info.label,
-            p_info.name,
-            msg.content or ""
-        )
-        table.insert(formatted, item_text)
     end
 
     return table.concat(formatted, "\n"), participant_map
@@ -322,20 +423,21 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
     local max_titles = tonumber(jn.config.get("max_user_titles") or "6") or 6
     local max_critiques = tonumber(jn.config.get("max_critiques") or "4") or 4
     local use_persona = jn.config.get("use_bot_persona") or "deep"
+
     local topics_rule = ""
     if max_topics > 0 then
-        topics_rule = string.format("提取不多于 %d 个今日核心热门话题", max_topics)
+        topics_rule = string.format("提取 1 到不多于 %d 个今日核心热门话题。对零散讨论进行合理聚类归纳，严禁碎片化流水账！", max_topics)
     elseif max_topics == -1 then
-        topics_rule = "提取今日出现的所有核心热门话题，不限数量上限"
+        topics_rule = "对讨论内容进行【合理归类与合并整合】，将同类问题、相似探讨归纳为凝练的主题板块，做到【全面覆盖、高度凝练、结构清晰】，提炼 4~8 个最具代表性的综合核心话题板块（严禁碎片化琐碎堆砌）"
     else
         topics_rule = "无需提取话题（本项已关闭）"
     end
 
     local quotes_rule = ""
     if max_quotes > 0 then
-        quotes_rule = string.format("甄选不多于 %d 句最具冲击力、反差感、神反转的「群圣经/高光金句」", max_quotes)
+        quotes_rule = string.format("甄选不多于 %d 句最具神人冲击力的高光金句", max_quotes)
     elseif max_quotes == -1 then
-        quotes_rule = "甄选今日所有的逆天、反差、高光「群圣经/金句」，不限数量上限"
+        quotes_rule = "甄选今日最具反差感、槽点拉满的精华高光金句，宁缺毋滥（精选 3~6 句最具神人气质的精彩发言，严禁平庸废话流水账）"
     else
         quotes_rule = "无需提取金句（本项已关闭）"
     end
@@ -344,18 +446,18 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
     if max_titles > 0 then
         titles_rule = string.format("为不多于 %d 位发言活跃群友评选极具特色的荣誉头衔与行为特征画像", max_titles)
     elseif max_titles == -1 then
-        titles_rule = "为今日所有活跃群友评选极具特色的头衔与行为特征画像，不限数量上限"
+        titles_rule = "为今日主要活跃群友评选极具特色的专属荣誉头衔与行为特征画像，画像精辟凝练、幽默切中要害，覆盖核心活跃群友（5~8 位），避免泛滥流水账！"
     else
         titles_rule = "无需评选头衔（本项已关闭）"
     end
 
     local critique_rule = ""
     if max_critiques ~= 0 then
-        local count_text = (max_critiques > 0) and string.format("不多于 %d 个", max_critiques) or "不限数量"
+        local count_text = (max_critiques > 0) and string.format("不多于 %d 个", max_critiques) or "3~5 个"
         if use_persona == "none" then
-            critique_rule = string.format("将今日聊天划分为 %s 抽象维度（如技术研讨、职业焦虑、日常摸鱼），为每个维度计算大致占比百分比，并给出客观严谨的分析点评与全天综合表现总结！", count_text)
+            critique_rule = string.format("将今日聊天合理抽象归纳为 %s 【高层级、泛化】的宏观维度（如技术探讨、职业规划、日常摸鱼、抽象整活等），严禁在维度名称中包含具体人名或琐碎小事，计算大致占比百分比（总和小于等于 100%%），并给出客观严谨的分析点评与全天综合表现总结！", count_text)
         else
-            critique_rule = string.format("将今日聊天划分为 %s 抽象维度（如技术研讨、职业焦虑、日常摸鱼），为每个维度计算大致占比百分比，并【结合你的人格设定】给出贴合你性格与口吻的精彩、幽默或生动点评，最后附一句全天综合表现总结！", count_text)
+            critique_rule = string.format("将今日聊天合理抽象归纳为 %s 【高层级、泛化】的宏观维度（如技术探讨、职业规划、日常摸鱼、抽象整活等），严禁在维度名称中包含具体人名或琐碎小事，计算大致占比百分比（总和小于等于 100%%），并【结合你的人格设定】给出贴合你性格与口吻的精彩、犀利或幽默点评，最后附一句全天综合表现终极金句总结！", count_text)
         end
     else
         critique_rule = "无需进行聊天质量点评（本项已关闭）"
@@ -368,14 +470,20 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
 请根据下方给出的【群聊记录数据流】，按规则完成分析，并以严格的纯 JSON 格式返回。
 
 ## 核心任务要求：
-1. 话题分析：%s。具体总结中，提及发言人时必须使用其真实的【QQ昵称】（nickname属性），严禁只写参与者编号或纯QQ号。
+1. 话题分析：%s。具体总结中，提及发言人时必须使用其真实的【QQ昵称】（nickname属性），严禁只写参与者编号或纯QQ号。话题描述请简述讨论背景、核心观点、关键分歧或结论（50~100字），做到凝练精辟，突出讨论深度。
 2. 群圣经甄选：%s。
+   【金句核心标准】：逆天的神人发言，具备颠覆常识的脑洞、逻辑跳脱的表达或强烈反差感的原创发言；包含夸张类比、反常规结论、一本正经的「胡说八道」或突破语境的清奇思路。严禁选择日常平庸碎语或无厘头水群文字！
    ⚠️【核心防拆分规则·重中之重】：
    在聊天记录中，每一个 `<msg id="...">` 标签内的内容代表单条完整发言。
    无论该发言内部包含多少个空行、换行或段落，必须作为一个完整的金句段落提取，绝对严禁按空行截断拆分成多条！
    content 字段必须完整保留原作者的换行与空行原貌（在 JSON 字符串中使用 \n 转义表示），sender 必须为发言人真实昵称。
-3. 群友头衔：%s。user 必须填群友真实昵称。
+3. 群友头衔：%s。user 必须填群友真实昵称，画像描述简练幽默、切中人物特征。
 4. 质量锐评与人设点评：%s。
+
+## ⚠️【绝对禁止事项·重中之重】：
+1. 严禁总结任何机器人指令或插件触发命令（例如：/今日老婆、今日老婆、/qd、签到、/help、@机器人 等一切指令交互）！所有机器人调用与回复均为系统噪音，直接彻底忽略，严禁作为话题、金句、头衔或点评内容！
+2. 严禁碎片化流水账堆砌！-1 选项代表全面覆盖群聊各方面，但必须【合理归类、聚类整合与高度凝练】，严禁无上限罗列散碎信息。
+3. 整体输出务必精炼控制篇幅：各字段点到为止，不要冗长铺陈，确保 JSON 体积适中。
 
 ## 返回 JSON 数据结构规范（严禁包含 markdown 代码块包裹之外的杂质，必须是合法 JSON）：
 ```json
@@ -383,7 +491,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
   "topics": [
     {
       "title": "话题标题（2-10字）",
-      "summary": "核心脉络与要点概述（50字以内）",
+      "summary": "核心脉络与要点概述（40字以内，精炼）",
       "participants": "主要讨论者（使用真实昵称，逗号分隔）"
     }
   ],
@@ -405,7 +513,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
   "critique": {
     "dimensions": [
       {
-        "name": "抽象维度名称（如职业焦虑/技术交锋/深夜水群）",
+        "name": "抽象维度名称（如职业焦虑/技术交锋/深夜摸鱼）",
         "percentage": 30,
         "comment": "深度还原你人设口吻的犀利点评"
       }
@@ -421,6 +529,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
 
     return prompt
 end
+
 
 -- ============================================================================
 -- 8. JSON 解析与健壮清洗 (消除循环 sub 造成的 registry overflow)
@@ -652,135 +761,195 @@ local function match_text_provider(input_str, providers)
     return nil
 end
 
-local function do_group_analysis(group_id, send_target_id, is_private_target)
+local function do_group_analysis(group_id, send_target_id, is_private_target, force)
     group_id = tonumber(group_id)
     if not group_id then return false, "非法群号" end
 
-    -- 发送即时进度反馈提示（让触发者立即感知任务已启动）
-    local tip = "📊 正在提取分析近24小时群聊记录，大模型正在生成报告，请稍候..."
-    if is_private_target then
-        jn.onebot11.send_private_msg(send_target_id, tip)
-    else
-        jn.onebot11.send_group_msg(group_id, tip)
-    end
-    local start_time = os.time()
+    local cur_date = os.date("%Y-%m-%d")
+    local cache_key = "last_analyzed:" .. tostring(group_id)
 
-    -- 1. 查询 24h 历史消息
-    local messages = fetch_group_messages(group_id, 24)
-    if #messages < 3 then
-        local msg = string.format("📊 今日群聊发言较少（当前仅 %d 条，不足 3 条），暂无足够数据生成分析报告。", #messages)
-        jn.log.warn(string.format("[%s] 群 %d 消息数不足 (%d < 3)，取消生成报告", PLUGIN_NAME, group_id, #messages))
-        if is_private_target then
-            jn.onebot11.send_private_msg(send_target_id, msg)
-        else
-            jn.onebot11.send_group_msg(group_id, msg)
+    -- 非强制触发（自动定时器或 CronJob）时，执行防并发与防重复检查
+    if not force then
+        if state.is_analyzing and state.is_analyzing[group_id] then
+            jn.log.warn(string.format("[%s] 群 %d 正在执行分析中，跳过并发调用", PLUGIN_NAME, group_id))
+            return false, "正在执行中"
         end
-        return false, "消息过少"
+
+        local last_date = nil
+        if jn.cache and jn.cache.get then
+            last_date = jn.cache.get(cache_key)
+        end
+        if not last_date and state.last_analyzed_date then
+            last_date = state.last_analyzed_date[group_id]
+        end
+
+        if last_date == cur_date then
+            jn.log.info(string.format("[%s] 群 %d 今日 (%s) 已完成过群总结报告，跳过重复执行", PLUGIN_NAME, group_id, cur_date))
+            return true, "今日已完成"
+        end
+
+        -- 立即占位并落库当日标记，确保同一群同一日仅执行一次
+        -- （覆盖消息不足、LLM 失败、发送失败等所有分支，彻底杜绝双触发重复推送）
+        state.last_analyzed_date = state.last_analyzed_date or {}
+        state.last_analyzed_date[group_id] = cur_date
+        state.last_daily_date = cur_date
+        if jn.cache and jn.cache.set then
+            jn.cache.set(cache_key, cur_date, 86400 * 2)
+        end
     end
 
-    -- 2. 统计概况
-    local stats = analyze_statistics(messages)
+    state.is_analyzing = state.is_analyzing or {}
+    state.is_analyzing[group_id] = true
 
-    -- 3. 构建聊天流
-    local chat_stream = format_chat_stream(messages)
-    stats.total_chars = #chat_stream
-
-    -- 4. 组装人设与 Prompt
-    local persona_prompt = get_bot_persona_prompt()
-    local prompt = build_analysis_prompt(chat_stream, stats, persona_prompt)
-
-    -- 5. 调用 LLM（支持通过服务商名称、模型名或组合指定模型，留空默认使用激活模型）
-    local target_provider_str = jn.config.get("text_provider_id") or ""
-    local old_provider_id = nil
-    local active_model_desc = "默认主模型"
-
-    if jn.agent and jn.agent.get_providers then
-        local providers, _ = jn.agent.get_providers()
-        if providers and type(providers) == "table" then
-            for _, p in ipairs(providers) do
-                local p_type = tostring(p.Type or p.type or "")
-                local p_active = (p.IsActive == true) or (p.is_active == true) or (p.active == true)
-                local p_id = tostring(p.ID or p.id or "")
-                local p_name = tostring(p.Name or p.name or "")
-                local p_model = tostring(p.Model or p.model or "")
-
-                if p_active and p_type == "text_model" then
-                    old_provider_id = p_id
-                    active_model_desc = p_model ~= "" and p_model or p_name
-                    break
-                end
+    local function run_task()
+        -- 发送即时进度反馈提示（仅在后台开启 enable_progress_feedback 时发送）
+        local show_progress = jn.config.get("enable_progress_feedback")
+        if show_progress == true or show_progress == "true" then
+            local tip = "📊 正在提取分析近24小时群聊记录，大模型正在生成报告，请稍候..."
+            if is_private_target then
+                jn.onebot11.send_private_msg(send_target_id, tip)
+            else
+                jn.onebot11.send_group_msg(group_id, tip)
             end
+        end
 
-            if target_provider_str ~= "" then
-                local chosen_p = match_text_provider(target_provider_str, providers)
-                if chosen_p and jn.agent.switch_provider then
-                    local chosen_id = tostring(chosen_p.ID or chosen_p.id or "")
-                    local chosen_name = tostring(chosen_p.Name or chosen_p.name or "")
-                    local chosen_model = tostring(chosen_p.Model or chosen_p.model or "")
-                    if old_provider_id ~= chosen_id then
-                        jn.agent.switch_provider(chosen_id)
-                        active_model_desc = chosen_model ~= "" and chosen_model or chosen_name
-                        jn.log.info(string.format("[%s] 临时挂载指定总结模型: %s", PLUGIN_NAME, active_model_desc))
-                    else
-                        active_model_desc = chosen_model ~= "" and chosen_model or chosen_name
+        local start_time = os.time()
+
+        -- 1. 查询 24h 历史消息
+        local messages = fetch_group_messages(group_id, 24)
+        -- 2. 统计概况并过滤消息
+        local stats = analyze_statistics(messages)
+
+        if stats.total_count < 3 then
+            local msg = string.format("📊 今日有效发言较少（当前仅 %d 条有效消息，不足 3 条），暂无足够数据生成分析报告。", stats.total_count)
+            jn.log.warn(string.format("[%s] 群 %d 有效消息数不足 (%d < 3)，取消生成报告", PLUGIN_NAME, group_id, stats.total_count))
+            if is_private_target then
+                jn.onebot11.send_private_msg(send_target_id, msg)
+            else
+                jn.onebot11.send_group_msg(group_id, msg)
+            end
+            return false, "消息过少"
+        end
+
+        -- 3. 构建聊天流
+        local chat_stream = format_chat_stream(stats.valid_messages)
+        stats.total_chars = #chat_stream
+
+        -- 4. 组装人设与 Prompt
+        local persona_prompt = get_bot_persona_prompt()
+        local prompt = build_analysis_prompt(chat_stream, stats, persona_prompt)
+
+        -- 5. 调用 LLM（支持通过服务商名称、模型名或组合指定模型，留空默认使用激活模型）
+        local target_provider_str = jn.config.get("text_provider_id") or ""
+        local old_provider_id = nil
+        local active_model_desc = "默认主模型"
+
+        if jn.agent and jn.agent.get_providers then
+            local providers, _ = jn.agent.get_providers()
+            if providers and type(providers) == "table" then
+                for _, p in ipairs(providers) do
+                    local p_type = tostring(p.Type or p.type or "")
+                    local p_active = (p.IsActive == true) or (p.is_active == true) or (p.active == true)
+                    local p_id = tostring(p.ID or p.id or "")
+                    local p_name = tostring(p.Name or p.name or "")
+                    local p_model = tostring(p.Model or p.model or "")
+
+                    if p_active and p_type == "text_model" then
+                        old_provider_id = p_id
+                        active_model_desc = p_model ~= "" and p_model or p_name
+                        break
                     end
-                elseif not chosen_p then
-                    jn.log.warn(string.format("[%s] 未找到匹配的文本模型: %q，回退使用系统激活模型: %s", PLUGIN_NAME, target_provider_str, active_model_desc))
+                end
+
+                if target_provider_str ~= "" then
+                    local chosen_p = match_text_provider(target_provider_str, providers)
+                    if chosen_p and jn.agent.switch_provider then
+                        local chosen_id = tostring(chosen_p.ID or chosen_p.id or "")
+                        local chosen_name = tostring(chosen_p.Name or chosen_p.name or "")
+                        local chosen_model = tostring(chosen_p.Model or chosen_p.model or "")
+                        if old_provider_id ~= chosen_id then
+                            jn.agent.switch_provider(chosen_id)
+                            active_model_desc = chosen_model ~= "" and chosen_model or chosen_name
+                            jn.log.info(string.format("[%s] 临时挂载指定总结模型: %s", PLUGIN_NAME, active_model_desc))
+                        else
+                            active_model_desc = chosen_model ~= "" and chosen_model or chosen_name
+                        end
+                    elseif not chosen_p then
+                        jn.log.warn(string.format("[%s] 未找到匹配的文本模型: %q，回退使用系统激活模型: %s", PLUGIN_NAME, target_provider_str, active_model_desc))
+                    end
                 end
             end
         end
-    end
 
-    jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 模型: %s)...", PLUGIN_NAME, group_id, #prompt, active_model_desc))
-    local resp_text, err = jn.llm.chat({
-        { role = "system", content = persona_prompt },
-        { role = "user", content = prompt },
-    })
+        jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 模型: %s)...", PLUGIN_NAME, group_id, #prompt, active_model_desc))
+        -- 群总结属重任务：必须显式放宽超时（默认 60s 会被长报告生成击穿导致 context deadline exceeded）
+        local resp_text, err = jn.llm.chat({
+            { role = "system", content = persona_prompt },
+            { role = "user", content = prompt },
+        }, { timeout = 300 })
 
-    -- 若之前临时切换了 Provider，切回原 Provider 保持全局环境纯净
-    if target_provider_str ~= "" and old_provider_id and jn.agent and jn.agent.switch_provider then
-        jn.agent.switch_provider(old_provider_id)
-    end
-    if err or not resp_text or resp_text == "" then
-        jn.log.error("[" .. PLUGIN_NAME .. "] LLM 分析失败: " .. tostring(err))
-        return false, "LLM 调用失败: " .. tostring(err)
-    end
-
-    -- 6. 解析结构化数据
-    local analysis_data = parse_llm_json(resp_text) or {}
-
-    -- 7. 计算耗时与 Token
-    local dur_sec = os.difftime(os.time(), start_time)
-    if dur_sec < 1 then dur_sec = 1 end
-    local est_tokens = math.floor((#prompt + #resp_text) / 2)
-    local model_name = active_model_desc
-    -- 获取群信息
-    local group_name = "本群"
-    if jn.onebot11.get_group_info then
-        local ginfo = jn.onebot11.get_group_info(group_id)
-        if ginfo and ginfo.group_name and ginfo.group_name ~= "" then
-            group_name = ginfo.group_name
+        -- 若之前临时切换了 Provider，切回原 Provider 保持全局环境纯净
+        if target_provider_str ~= "" and old_provider_id and jn.agent and jn.agent.switch_provider then
+            jn.agent.switch_provider(old_provider_id)
         end
+        if err or not resp_text or resp_text == "" then
+            jn.log.error("[" .. PLUGIN_NAME .. "] LLM 分析失败: " .. tostring(err))
+            return false, "LLM 调用失败: " .. tostring(err)
+        end
+
+        -- 6. 解析结构化数据
+        local analysis_data = parse_llm_json(resp_text) or {}
+
+        -- 7. 计算耗时与 Token
+        local dur_sec = os.difftime(os.time(), start_time)
+        if dur_sec < 1 then dur_sec = 1 end
+        local est_tokens = math.floor((#prompt + #resp_text) / 2)
+        local model_name = active_model_desc
+        -- 获取群信息
+        local group_name = "本群"
+        if jn.onebot11.get_group_info then
+            local ginfo = jn.onebot11.get_group_info(group_id)
+            if ginfo and ginfo.group_name and ginfo.group_name ~= "" then
+                group_name = ginfo.group_name
+            end
+        end
+
+        -- 8. 组装 6 大板块合并转发节点
+        local nodes = build_forward_nodes(stats, analysis_data, group_id, group_name, dur_sec, est_tokens, model_name)
+
+        -- 9. 发送结果
+        local target_type = is_private_target and "private" or "group"
+        local dest_id = send_target_id or group_id
+        local ok, send_err = send_summary_nodes(target_type, dest_id, nodes)
+        if not ok then
+            jn.log.error(string.format("[%s] 发送分析报告失败 (target=%s:%d): %s", PLUGIN_NAME, target_type, dest_id, tostring(send_err)))
+            return false, send_err
+        end
+
+        jn.log.info(string.format("[%s] 成功发送群 %d 日常分析报告到 %s:%d (节点数: %d)", PLUGIN_NAME, group_id, target_type, dest_id, #nodes))
+
+        -- 记录成功执行日期，防止当日重复执行
+        state.last_analyzed_date = state.last_analyzed_date or {}
+        state.last_analyzed_date[group_id] = cur_date
+        state.last_daily_date = cur_date
+        if jn.cache and jn.cache.set then
+            jn.cache.set(cache_key, cur_date, 86400 * 2)
+        end
+
+        -- 10. 自动清理过期历史
+        prune_expired_messages()
+
+        return true, nil
     end
 
-    -- 8. 组装 6 大板块合并转发节点
-    local nodes = build_forward_nodes(stats, analysis_data, group_id, group_name, dur_sec, est_tokens, model_name)
+    local ok, res, err_msg = pcall(run_task)
+    state.is_analyzing[group_id] = nil
 
-    -- 9. 发送结果
-    local target_type = is_private_target and "private" or "group"
-    local dest_id = send_target_id or group_id
-    local ok, send_err = send_summary_nodes(target_type, dest_id, nodes)
     if not ok then
-        jn.log.error(string.format("[%s] 发送分析报告失败 (target=%s:%d): %s", PLUGIN_NAME, target_type, dest_id, tostring(send_err)))
-        return false, send_err
+        jn.log.error(string.format("[%s] 群 %d 总结执行异常: %s", PLUGIN_NAME, group_id, tostring(res)))
+        return false, tostring(res)
     end
-
-    jn.log.info(string.format("[%s] 成功发送群 %d 日常分析报告到 %s:%d (节点数: %d)", PLUGIN_NAME, group_id, target_type, dest_id, #nodes))
-
-    -- 10. 自动清理过期历史
-    prune_expired_messages()
-
-    return true, nil
+    return res, err_msg
 end
 
 -- ============================================================================
@@ -790,8 +959,8 @@ function run_manual_trigger()
     if state.manual_running then return end
     state.manual_running = true
 
-    local target_grp_str = jn.config.get("manual_target_group") or ""
-    local send_target_str = jn.config.get("manual_send_target") or ""
+    local target_grp_str = tostring(jn.config.get("manual_target_group") or "")
+    local send_target_str = tostring(jn.config.get("manual_send_target") or "")
 
     local target_groups = {}
     if target_grp_str ~= "" then
@@ -813,7 +982,7 @@ function run_manual_trigger()
     end
 
     for _, gid in ipairs(target_groups) do
-        do_group_analysis(gid, send_target or gid, is_private)
+        do_group_analysis(gid, send_target or gid, is_private, true)
     end
 
     state.manual_running = false
@@ -831,6 +1000,7 @@ function check_manual_trigger()
         end
     end
 end
+
 -- ============================================================================
 -- 14. 异步定时器回调响应 (引擎级 on_timer_response)
 -- ============================================================================
@@ -865,13 +1035,13 @@ function on_cronjob(event)
 
     if specific_group and specific_group > 0 then
         jn.log.info(string.format("[%s] CronJob 指定目标群 %d，执行总结...", PLUGIN_NAME, specific_group))
-        do_group_analysis(specific_group, specific_group, false)
+        do_group_analysis(specific_group, specific_group, false, false)
         return
     end
 
     local targets = get_target_groups()
     for gid, _ in pairs(targets) do
-        do_group_analysis(gid, gid, false)
+        do_group_analysis(gid, gid, false, false)
     end
 end
 
@@ -888,7 +1058,7 @@ function check_daily_timer()
         jn.log.info(string.format("[%s] 内部定时器触发每日总结 (时间: %s)...", PLUGIN_NAME, cur_hm))
         local targets = get_target_groups()
         for gid, _ in pairs(targets) do
-            do_group_analysis(gid, gid, false)
+            do_group_analysis(gid, gid, false, false)
         end
     end
 
@@ -910,3 +1080,4 @@ check_manual_trigger()
 if jn.timer and jn.timer.after then
     state.timer_id = jn.timer.after(10, { action = "daily_check" })
 end
+

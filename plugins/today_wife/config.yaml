@@ -1,0 +1,90 @@
+configs:
+  - key: enable_groups
+    type: list
+    label: 启用群列表
+    description: 允许使用今日老婆功能的群号列表（留空表示所有群生效）
+    default: []
+
+  - key: group_cooldown_seconds
+    type: string
+    label: 群指令冷却时间
+    description: 同一群内任意今日老婆指令的触发间隔秒数（防刷屏，0为不限制）
+    default: "5"
+
+  - key: user_cooldown_seconds
+    type: string
+    label: 用户个人冷却时间
+    description: 同一用户连续使用指令的冷却间隔秒数（0为不限制）
+    default: "10"
+
+  - key: reset_hour
+    type: string
+    label: 每日重置时间
+    description: 每日老婆数据与次数限制重置的小时点（0-23，默认凌晨4点重置）
+    default: "4"
+
+  - key: active_days
+    type: string
+    label: 活跃群友判定天数
+    description: 从多少天内的聊天记录提取活跃成员用于随机抽取（默认3天）
+    default: "3"
+
+  - key: fixed_pairings
+    type: string
+    label: 分群固定配对配置
+    description: 'JSON 格式固定 CP：{"群号": {"用户QQ": "老婆QQ"}}，每日保留'
+    default: "{}"
+
+  - key: max_random_count
+    type: string
+    label: 每日随机老婆上限
+    description: 每人每天随机抽取老婆的最大次数（0 为无限制）
+    default: "5"
+
+  - key: max_marry_count
+    type: string
+    label: 每日强娶上限
+    description: 每人每天强娶的最大次数（0 为无限制）
+    default: "3"
+
+  - key: max_divorce_count
+    type: string
+    label: 每日离婚上限
+    description: 每人每天普通离婚的最大次数（0 为无限制）
+    default: "2"
+
+  - key: max_all_marry_count
+    type: string
+    label: 每日全员老婆上限
+    description: 每天使用「所有人都是我老婆」的次数限制
+    default: "1"
+
+  - key: max_force_all_marry_count
+    type: string
+    label: 每日强娶全体上限
+    description: 每天使用「强娶全体成员」的次数限制
+    default: "1"
+
+  - key: max_all_divorce_count
+    type: string
+    label: 每日全部离婚上限
+    description: 每天使用「全部离婚」的次数限制
+    default: "1"
+
+  - key: max_relationship_graph_count
+    type: string
+    label: 每日关系网上限
+    description: 每个群每天允许生成「老婆关系网」的次数上限（保护渲染性能）
+    default: "3"
+
+  - key: enable_cat_tone
+    type: bool
+    label: 开启猫娘尾缀
+    description: 所有交互回复结尾是否自动附带可爱语气词「喵~」
+    default: true
+
+  - key: not_in_group_text
+    type: string
+    label: 固定老婆不在群提示语
+    description: 当固定绑定的永恒老婆已不在当前群时的提示文案
+    default: "你绑定的永恒老婆今天不在这个群里哦~"
