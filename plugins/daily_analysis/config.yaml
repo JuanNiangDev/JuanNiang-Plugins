@@ -2,10 +2,8 @@ configs:
   - key: target_groups
     type: list
     label: "总结群列表"
-    description: "参与每日分析与消息收集的目标群聊列表（在后台添加/删除群号）"
-    default:
-      - "641370366"
-      - "822169910"
+    description: "参与每日分析与消息收集的目标群聊列表（在后台添加/删除群号）。默认空：未配置时不会总结任何群"
+    default: []
   - key: text_provider_id
     type: string
     label: "指定总结文本模型"
@@ -66,11 +64,46 @@ configs:
     description: "开启后在生成分析时会发送「正在生成分析中」的提示，关闭则完全静默仅发送最终转发"
     default: false
 
+  - key: report_mode
+    type: string
+    label: "发送模式"
+    description: "forward=整份做成一条合并转发（默认）；per_section=每个板块合成一条；per_item=每条目一条消息（会刷屏）"
+    default: "forward"
+
+  - key: sections
+    type: list
+    label: "板块：顺序 | 标题 | 条数上限"
+    description: "每行 key|标题|上限。key 可取 overview/topics/quotes/titles/critique/projects/news/stats；上限 0 关闭该板块，-1 不限；行的先后即发送顺序"
+    default:
+      - "overview|📊 群聊概况|1"
+      - "top|🔥 发言主力军|1"
+      - "topics|🔥 今日核心话题|5"
+      - "quotes|📖 群圣经 / 高光发言|5"
+      - "titles|👑 群友特色头衔 / 画像|6"
+      - "critique|🎭 聊天质量分析与人设点评|4"
+      - "projects|🧪 开源项目列表|20"
+      - "news|📰 今日新闻|70"
+      - "stats|📈 本次分析统计|1"
+
+  - key: news_feeds
+    type: list
+    label: "新闻数据源"
+    description: "第一项填 RSS 地址；第二项填当期页面模板（{date} 会替换成当天日期）。当天页面抓不到时回退 RSS 最新一期"
+    default:
+      - "https://daily.juya.uk/rss.xml"
+      - "https://daily.juya.uk/issues/{date}/"
+
+  - key: news_event_merge
+    type: bool
+    label: "新闻按事件合并"
+    description: "开启后用 LLM 把描述同一事件的公众号文章与今日早报条目合并成一条，并保留全部来源链接（公众号原文 + 早报来源）"
+    default: true
+
   - key: custom_sender_name
     type: string
     label: "转发卡片展示昵称"
-    description: "合并转发卡片内各消息节点展示的自定义昵称"
-    default: "奶蛙·群聊日报"
+    description: "合并转发卡片内各消息节点展示的昵称；留空则自动用「机器人昵称·群聊日报」"
+    default: ""
 
   - key: manual_trigger
     type: bool
