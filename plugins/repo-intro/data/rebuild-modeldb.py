@@ -161,14 +161,22 @@ def collect_openrouter():
         aliases = {(m.get('id') or '').strip().lower()}
         if hid:
             aliases.add(hid.lower())
+        # openrouter 的 pricing 单位是「每 token」，其余来源是「每百万 token」，
+        # 统一乘 1e6，否则兜底价会渲染成 0.000
+        def per_m(v):
+            try:
+                return float(v) * 1000000 if v is not None else None
+            except (TypeError, ValueError):
+                return None
+        _p = m.get('pricing') or {}
         out.setdefault(m.get('id', '').strip().lower(), {
             "name": m.get('name'), "provider": None, "provider_local": None, "cn": None,
             "context": m.get('context_length'), "max_output": None,
             "modalities": mods, "supports_caching": None, "supports_tools": None,
             "pricing": [], "aliases": aliases, "params": params,
-            "cost": {"input": (m.get('pricing', {}) or {}).get('prompt'),
-                     "output": (m.get('pricing', {}) or {}).get('completion'),
-                     "cache": (m.get('pricing', {}) or {}).get('input_cache_read')},
+            "cost": {"input": per_m(_p.get('prompt')),
+                     "output": per_m(_p.get('completion')),
+                     "cache": per_m(_p.get('input_cache_read'))},
             "reasoning": None,
         })
     return out
