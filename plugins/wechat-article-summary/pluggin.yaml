@@ -1,5 +1,5 @@
 name: "wechat-article-summary"
-version: "1.0.0"
+version: "1.1.0"
 author: "Redrock"
 description: "发送微信公众号文章链接时，自动抓取正文并用主程序 LLM 按文章类型总结核心内容（新闻/观点/教程/项目介绍等），多篇合并一次输出"
 entry: "main.lua"
@@ -8,5 +8,6 @@ permissions:
   - http
   - cache
   - llm
+  - timer
 system: false
 enabled: true

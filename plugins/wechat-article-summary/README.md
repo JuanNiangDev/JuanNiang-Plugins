@@ -1,6 +1,8 @@
 # wechat-article-summary 公众号文章总结插件
 
-识别群聊/私聊中发送的微信公众号文章链接（`mp.weixin.qq.com/s/...` 短链与长链均支持），自动抓取文章正文，由主程序 LLM 按文章类型总结核心内容，一条消息可含多篇（合并为一次 LLM 调用、一条消息输出，每篇一段、段间空两行、各自附链接）。
+识别群聊/私聊中发送的微信公众号文章链接（`mp.weixin.qq.com/s/...` 短链与长链均支持），自动抓取文章正文，由主程序 LLM 按文章类型总结核心内容。
+
+跨消息攒批（防刷屏）：同群同一人的公众号链接进入缓冲区，首条起算 `batch_window` 秒（默认 60）内的链接并入同一批，攒满 `batch_threshold` 条（默认 3）立即发送；一批默认合并成**一条合并转发**，每条链接一个节点（标题 + 公众号 + 摘要 + 原文链接 + 正文封面一张），转发不可用时降级为 ≤1500 字文本，绝不逐条刷屏。只识别 `mp.weixin.qq.com`，GitHub 等其它链接不参与攒批。
 
 ## 文件结构
 
@@ -39,9 +41,9 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 ```
 📰 标题
 📖 公众号名（抓不到则不显示该行）
-核心内容总结（50~150 字；早报/新闻汇总类为前 5 条新闻标题 + "共 X 条"）
+核心内容总结（50~200 字；早报/新闻汇总类为前 5 条新闻标题 + "共 X 条"）
 🔗 原文链接
-[图文全部图片]（默认按正文顺序依次附在末尾，send_cover 可关，max_images 限每篇张数）
+[封面图]（每篇一张，og:image 优先，其次正文第一张；send_cover 可关）
 ```
 
 （多篇时每段之间空两行，一次发送；图片按每篇的正文顺序依次附加，不再只发封面图。）
@@ -50,7 +52,7 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 
 - **经典格式**：`js_content` 容器内的 `<img data-src>` 按文档顺序提取为图片列表
 - **新格式**（部分文章无 `js_content`，正文在 `meta description`、图片在 JS 配置）：正文从 `meta description` 兜底（`\x0a` 解码为换行），图片按页序提取（去重、排除作者头像、解码 `\x26`/`&amp;` 实体）
-- 图片 URL 统一 http→https；`max_images`（默认 0 = 不限制）可限制每篇发送张数，避免长图文刷屏
+- 图片 URL 统一 http→https；每篇只发一张封面（og:image 优先），避免多图刷屏
 
 ## 抓取说明
 
@@ -64,14 +66,13 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 | enable_summary | LLM 总结开关（关闭只发标题与公众号名） | true |
 | reply_quote | 回复时引用原消息 | true |
 | send_cover | 发送图文全部图片（按正文顺序依次） | true |
-| max_images | 每篇最多发送图片数（0 = 不限制） | 0 |
 | group_only | 仅群聊生效 | false |
 | cache_ttl | 总结结果缓存秒数 | 604800（7 天） |
 | max_content_chars | 送入 LLM 的正文最大字数 | 10000 |
 | llm_timeout | LLM 超时秒数 | 60 |
 | max_articles | 单条消息最多处理链接数 | 5 |
 | summary_min_chars | LLM 总结的最少字数 | 50 |
-| summary_max_chars | LLM 总结的最多字数 | 150 |
+| summary_max_chars | LLM 总结的最多字数 | 200 |
 | ua | 抓取 User-Agent（勿改回非浏览器 UA） | Chrome 126 UA |
 
 ## 依赖

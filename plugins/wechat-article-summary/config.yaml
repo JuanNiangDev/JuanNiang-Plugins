@@ -33,14 +33,8 @@ configs:
   - key: send_cover
     type: bool
     label: 发送图文图片
-    description: 总结输出末尾附带文章全部图片（按正文顺序依次发送，支持图文）；关闭则不发送
+    description: 每篇总结附一张封面图（og:image 优先，其次正文第一张）；关闭则不发送
     default: true
-
-  - key: max_images
-    type: string
-    label: 每篇最多发送图片数
-    description: 单篇文章最多发送的图片张数（0 = 不限制，按正文顺序全发）
-    default: "0"
 
   - key: group_only
     type: bool
@@ -87,5 +81,29 @@ configs:
   - key: summary_max_chars
     type: string
     label: 总结最大字数
-    description: LLM 总结的最多字数，默认 150
-    default: "150"
+    description: LLM 总结的最多字数，默认 200
+    default: "200"
+
+  - key: batch_window
+    type: string
+    label: 攒批窗口（秒）
+    description: 同一人首条公众号链接起算的等待秒数，窗口内收到的新链接继续并入同一批；0 = 不攒批立即发送
+    default: "60"
+
+  - key: batch_threshold
+    type: string
+    label: 攒批阈值（条）
+    description: 窗口内攒满这么多条链接立即发送（不再等窗口到点）
+    default: "3"
+
+  - key: merge_forward
+    type: bool
+    label: 合并转发投递
+    description: 开启后一批链接合并成一条转发（每条链接一个节点），不再逐条刷屏；关闭则逐条发送
+    default: true
+
+  - key: forward_sender_name
+    type: string
+    label: 转发节点昵称
+    description: 合并转发内各节点展示的昵称；留空则用机器人自己的昵称
+    default: ""
