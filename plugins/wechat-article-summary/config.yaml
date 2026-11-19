@@ -93,13 +93,19 @@ configs:
   - key: batch_threshold
     type: string
     label: 攒批阈值（条）
-    description: 窗口内攒满这么多条链接立即发送（不再等窗口到点）
+    description: 窗口内攒满这么多条链接立即发送；同时是「合并转发」的门槛，条数 ≥ 该值才合并转发，否则每篇一条普通消息
     default: "3"
+
+  - key: single_window
+    type: string
+    label: 单篇等待（秒）
+    description: 只有 1 篇链接时的等待秒数，期间来第 2 篇会自动延长到攒批窗口；默认 10
+    default: "10"
 
   - key: merge_forward
     type: bool
-    label: 合并转发投递
-    description: 开启后一批链接合并成一条转发（每条链接一个节点），不再逐条刷屏；关闭则逐条发送
+    label: 合并转发投递（总开关）
+    description: 开启后，一批链接数量 ≥ 攒批阈值（默认 3）才合并成一条转发；不足阈值或关闭本开关时，每篇发一条普通消息（文本 + 封面）
     default: true
 
   - key: forward_sender_name
