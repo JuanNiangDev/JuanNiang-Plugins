@@ -180,6 +180,25 @@ local function chunk_text(text, max)
     return out
 end
 
+-- 解析推送目标列表：list 或逗号分隔字符串，去重、仅保留正整数 ID
+local function get_targets()
+    local raw = jn.config.get("target_groups")
+    local list, seen = {}, {}
+    local function push(v)
+        local id = tonumber(v)
+        if id and id > 0 and not seen[id] then
+            seen[id] = true
+            list[#list + 1] = id
+        end
+    end
+    if type(raw) == "table" then
+        for _, v in ipairs(raw) do push(v) end
+    elseif type(raw) == "string" and raw ~= "" then
+        for item in raw:gmatch("[^,,%s]+") do push(item) end
+    end
+    return list
+end
+
 local function send_to_target(target_type, target_id, nodes)
     if #nodes == 0 then return false, "节点为空" end
     local forward = cfg_bool("forward", true)
@@ -224,9 +243,14 @@ function push_briefing(force)
     if not force and not cfg_bool("enabled", true) then return false, "已关闭" end
 
     local target_type = cfg_string("target_type", "group")
-    local group_id = tonumber(cfg_string("target_group", ""))
-    if not group_id then
-        return false, "未配置推送目标（target_group 为空）"
+    local targets = get_targets()
+    if #targets == 0 then
+        -- 兼容旧配置键
+        local legacy = tonumber(cfg_string("target_group", ""))
+        if legacy then targets = { legacy } end
+    end
+    if #targets == 0 then
+        return false, "未配置推送目标（target_groups 为空）"
     end
 
     if not juya then
@@ -249,7 +273,14 @@ function push_briefing(force)
         end
 
         local cache_key = "sent:" .. (issue_date ~= "" and issue_date or url)
-        if not force and jn.cache.get(cache_key) then
+        -- 按群去重：部分群已发过时，重试只补发未发的群
+        local pending = {}
+        for _, gid in ipairs(targets) do
+            if force or not jn.cache.get(cache_key .. ":" .. gid) then
+                pending[#pending + 1] = gid
+            end
+        end
+        if #pending == 0 then
             jn.log.info("[" .. PLUGIN_NAME .. "] 本期已发送过: " .. cache_key)
             return false, "已发送"
         end
@@ -270,16 +301,27 @@ function push_briefing(force)
             issue_date,
             bili
         )
-        local sent, send_err = send_to_target(target_type, group_id, nodes)
-        if not sent then
-            jn.log.error("[" .. PLUGIN_NAME .. "] 发送失败: " .. tostring(send_err))
-            return false, send_err
+        local ok_list, fail_list = {}, {}
+        for _, gid in ipairs(pending) do
+            local sent, send_err = send_to_target(target_type, gid, nodes)
+            if sent then
+                ok_list[#ok_list + 1] = tostring(gid)
+                jn.cache.set(cache_key .. ":" .. gid, os.time(), 7 * 86400)
+            else
+                fail_list[#fail_list + 1] = tostring(gid) .. "(" .. tostring(send_err) .. ")"
+            end
+        end
+        if #ok_list == 0 then
+            jn.log.error("[" .. PLUGIN_NAME .. "] 全部目标发送失败: " .. table.concat(fail_list, ", "))
+            return false, table.concat(fail_list, ", ")
+        end
+        if #fail_list > 0 then
+            jn.log.warn("[" .. PLUGIN_NAME .. "] 部分目标失败: " .. table.concat(fail_list, ", "))
         end
 
-        jn.cache.set(cache_key, os.time(), 7 * 86400)
         state.last_sent_date = issue_date
-        jn.log.info(string.format("[%s] 早报已发送到 %s:%d（来源=%s，节点=%d，新闻=%d）",
-            PLUGIN_NAME, target_type, group_id, tostring(source), #nodes, count))
+        jn.log.info(string.format("[%s] 早报已发送到 %s（来源=%s，节点=%d，新闻=%d）",
+            PLUGIN_NAME, table.concat(ok_list, ","), tostring(source), #nodes, count))
         return true, nil
     end)
     state.running = false

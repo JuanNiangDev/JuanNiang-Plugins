@@ -11,11 +11,11 @@ configs:
     description: "group=发到群；private=发给个人 QQ（测试用）"
     default: "group"
 
-  - key: target_group
-    type: string
-    label: "推送目标（群号或QQ）"
-    description: "推送目标的 ID：target_type=group 时填群号，private 时填 QQ 号。默认空，未配置时不发送"
-    default: ""
+  - key: target_groups
+    type: list
+    label: "推送目标列表"
+    description: "target_type=group 时为群号列表（可配多个，逐群发送）；private 时取第一项作为 QQ 号。默认空，未配置时不发送"
+    default: []
 
   - key: send_time
     type: string

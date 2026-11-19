@@ -43,7 +43,7 @@ https://mp.weixin.qq.com/s/xxxx           ← 同一事件的多家来源都会�
 | 配置项 | 说明 |
 |---|---|
 | `enabled` | 总开关 |
-| `target_group` | 推送目标群号 |
+| `target_groups` | 推送目标群号列表（可多个，逐群发送；private 取第一项） |
 | `send_time` | 每日发送时间，默认 `11:30` |
 | `feeds` | 数据源列表（RSS + 期号模板） |
 | `max_items` | 单期最多推送条数，默认 70 |
