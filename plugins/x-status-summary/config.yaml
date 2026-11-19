@@ -1,0 +1,145 @@
+# ====================================================================
+# x-status-summary 插件配置（X / 推特 链接总结）
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# 插件通过 jn.config.get("key") 读取；改配置后无需重启。
+# ====================================================================
+
+configs:
+  - key: enabled
+    type: bool
+    label: 启用 X（推特）总结
+    description: 发送 x.com / twitter.com 状态链接时自动抓取并总结；关闭则完全不处理
+    default: true
+
+  - key: enable_summary
+    type: bool
+    label: 启用 LLM 总结
+    description: 关闭后只发原文与图片，不调用 LLM
+    default: true
+
+  - key: group_only
+    type: bool
+    label: 仅群聊生效
+    description: 开启后只在群聊中处理，私聊忽略
+    default: false
+
+  - key: reply_quote
+    type: bool
+    label: 引用原消息
+    description: 回复时引用触发的那条消息
+    default: true
+
+  - key: send_media
+    type: bool
+    label: 附带图片
+    description: 按推文里的图片顺序附在消息后（X 单推最多 4 张）
+    default: true
+
+  - key: max_images
+    type: string
+    label: 每条推文最多图片数
+    description: 0 表示不限制（默认 4）
+    default: "4"
+
+  - key: video_enabled
+    type: bool
+    label: 发送视频
+    description: 时长与体积都在限制内的视频以视频消息发送，否则只发链接
+    default: true
+
+  - key: video_max_seconds
+    type: string
+    label: 视频最大时长（秒）
+    description: 超过则不发送视频，只发链接（默认 600 = 10 分钟）
+    default: "600"
+
+  - key: video_max_mb
+    type: string
+    label: 视频最大体积（MB）
+    description: 按码率×时长估算，超过则只发链接（默认 50）
+    default: "50"
+
+  - key: repo_card
+    type: bool
+    label: 仓库卡片
+    description: 推文里的 GitHub 链接单独发一条仓库消息，并附 card-5 卡片图
+    default: true
+
+  - key: github_token
+    type: string
+    label: GitHub API Token（可选）
+    description: 填写后 GitHub API 限流从 60 次/小时提升到 5000 次/小时；留空使用匿名
+    default: ""
+
+  - key: max_links
+    type: string
+    label: 单条消息最多处理链接数
+    description: 一条消息里最多处理几个 X 链接（默认 5）
+    default: "5"
+
+  - key: max_content_chars
+    type: string
+    label: 正文最大输入字数
+    description: 送入 LLM 的正文上限，默认 10000
+    default: "10000"
+
+  - key: summary_min_chars
+    type: string
+    label: 总结最小字数
+    description: 默认 40；内容稀少时允许如实写短
+    default: "40"
+
+  - key: summary_max_chars
+    type: string
+    label: 总结最大字数
+    description: 默认 140
+    default: "140"
+
+  - key: llm_timeout
+    type: string
+    label: LLM 超时（秒）
+    description: 调用主程序 LLM 的超时秒数，默认 60
+    default: "60"
+
+  - key: cache_ttl
+    type: string
+    label: 结果缓存时长（秒）
+    description: 同一条推文的总结缓存秒数，默认 604800（7 天）
+    default: "604800"
+
+  - key: api_base
+    type: string
+    label: 推文解析接口
+    description: 默认 api.fxtwitter.com（只读公开 JSON）；失败时自动尝试 api.vxtwitter.com
+    default: "https://api.fxtwitter.com"
+
+  - key: proxy
+    type: string
+    label: 抓取代理
+    description: 服务器直连 X/GitHub/HF 不通时填代理，如 socks5://172.27.0.1:20170；留空直连
+    default: ""
+
+  - key: proxy_image_rewrite
+    type: string
+    label: 图片 URL 改写前缀（可选）
+    description: 如 https://wsrv.nl/?url= —— 发送图片时把原图 URL 包一层代理，让 OneBot 能拉到；留空原样发送
+    default: ""
+
+  - key: manual_trigger
+    type: bool
+    label: 上线验证（发 14 条测试链接到 1007385018）
+    description: 打开后插件重载时自动把 14 条测试链接的总结发到指定群验证；发完请关闭，避免重启重复发送
+    default: false
+
+  - key: video_url_rewrite
+    type: string
+    label: 视频 URL 改写前缀
+    description: 如 http://172.27.0.1:5284/video?url= —— 视频经本地媒体代理（走 socks5）供 OneBot 拉取；留空原样发送
+    default: ""
+
+  - key: test_video_only
+    type: bool
+    label: 仅发视频（测试用）
+    description: 打开后只发送视频段（独占一条消息），不发文本总结与仓库卡片；测完请关闭
+    default: false
