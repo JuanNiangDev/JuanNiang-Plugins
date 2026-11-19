@@ -16,6 +16,12 @@ configs:
     description: "每日自动触发分析的时间点（HH:MM 格式，例如 23:00），将总结此前 24 小时的群聊记录"
     default: "23:00"
 
+  - key: report_retention_days
+    type: string
+    label: 历史报告保留天数
+    description: 成功生成的日报会落库保存，可跨容器/插件重启查询；默认保留 90 天
+    default: "90"
+
   - key: retention_days
     type: string
     label: "消息保留天数"
@@ -122,3 +128,45 @@ configs:
     label: "立即触发发送目标"
     description: "总结结果发送的目标群号或好友QQ号（留空则发回被总结群本身）"
     default: ""
+
+  - key: expand_forward
+    type: bool
+    label: 展开合并转发内容
+    description: 分析前用 get_forward_msg 读取合并转发内层消息，按「昵称：正文」并入语料
+    default: true
+
+  - key: forward_node_limit
+    type: string
+    label: 转发最多展开条数
+    description: 单条合并转发最多展开几条内层消息，默认 10
+    default: "10"
+
+  - key: forward_node_chars
+    type: string
+    label: 转发每条字数上限
+    description: 合并转发内层每条最多取多少字，默认 120
+    default: "120"
+
+  - key: vision_describe
+    type: bool
+    label: 图片内容描述
+    description: 用 image_model Provider 描述图片内容，让总结能覆盖围绕图片展开的讨论
+    default: true
+
+  - key: vision_provider
+    type: string
+    label: 图片描述模型
+    description: image_model Provider 名称，留空用系统当前启用的图像模型
+    default: "wb-api-image"
+
+  - key: vision_image_limit
+    type: string
+    label: 每份报告图片描述上限
+    description: 超过上限的图片只记「[图片]」，默认 10，防止总结耗时过长
+    default: "10"
+
+  - key: expand_reply
+    type: bool
+    label: 展开回复引用
+    description: 把被回复消息的前 80 字作为上下文并入语料
+    default: true

@@ -40,3 +40,23 @@
 ## 权限
 
 `onebot11` `database` `llm` `agent` `timer` `cache` `http`（http 用于抓取橘鸦早报）
+
+
+## 搬运消息语料展开（合并转发 / 图片 / 回复）
+
+群里不少讨论围绕转发的文章或图片展开，原始 CQ 码（`[CQ:forward,id=...]`、
+`[CQ:image,url=...]`、`[CQ:reply,id=...]`）对总结模型没有语义。生成语料前会：
+
+- **合并转发**：调用 `jn.onebot11.get_forward_msg_sync(id)` 读取内层节点，
+  按「昵称：正文」展开（默认最多 10 条、每条 120 字），按 ID 缓存 7 天。
+- **图片**：调用 `jn.llm.vision_url("wb-api-image", url, prompt)`，由图像模型
+  给出一句话描述（默认每份报告最多 10 张），按 URL 缓存 7 天；失败或超限记 `[图片]`。
+- **回复**：查本地消息库，把被回复消息的前 80 字作为上下文拼进语料。
+- **语音 / 视频 / 文件**：只留 `[语音] / [视频] / [文件]` 占位，内容不入库。
+
+相关配置：`expand_forward`、`forward_node_limit`、`forward_node_chars`、
+`vision_describe`、`vision_provider`、`vision_image_limit`、`expand_reply`。
+
+## 报告持久化
+
+每次成功发送后，日报会写入 PostgreSQL 表 `pluggin_daily_analysis_reports`（来源群、投递目标、日期、模式、板块数、节点数、板块 JSON、正文），跨容器/插件重启可查；`report_retention_days` 默认保留 90 天。群消息表 `pluggin_daily_analysis_messages` 同样持久化（默认 7 天）。

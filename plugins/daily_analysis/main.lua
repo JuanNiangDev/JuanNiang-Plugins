@@ -23,6 +23,7 @@ if not juya then jn.log.error("juya 模块加载失败: " .. tostring(juya_err))
 -- 全局常量
 local PLUGIN_NAME = "daily_analysis"
 local TABLE_MESSAGES = "pluggin_daily_analysis_messages"
+local TABLE_REPORTS = "pluggin_daily_analysis_reports"
 
 -- 内部运行状态
 local state = {
@@ -54,6 +55,19 @@ local function init_db()
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_pdam_group_created ON ]] .. TABLE_MESSAGES .. [[ (group_id, created_at);
+        CREATE TABLE IF NOT EXISTS ]] .. TABLE_REPORTS .. [[ (
+            id BIGSERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            target_id BIGINT NOT NULL DEFAULT 0,
+            report_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            mode TEXT NOT NULL DEFAULT '',
+            section_count INT NOT NULL DEFAULT 0,
+            node_count INT NOT NULL DEFAULT 0,
+            sections TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_pdar_group_date ON ]] .. TABLE_REPORTS .. [[ (group_id, report_date);
     ]]
     local _, err = jn.database.exec(sql)
     if err then
@@ -253,6 +267,147 @@ local function analyze_statistics(messages)
         peak_period = peak_period,
         top_users = sorted_users,
     }
+end
+
+-- ============================================================================
+-- 5a. CQ 码展开：合并转发 / 图片 / 语音视频文件 / 回复引用 → 可读文本
+-- 群里大量讨论是围绕搬运内容展开的，原文里的 [CQ:forward,id=...] 与
+-- [CQ:image,url=...] 对总结模型毫无语义，这里在生成语料前展开。
+-- ============================================================================
+local function da_bool(key, default)
+    local v = jn.config.get(key)
+    if v == nil then return default end
+    return v ~= false and v ~= "false" and v ~= "0"
+end
+
+local function da_num(key, default)
+    local n = tonumber(jn.config.get(key))
+    return n or default
+end
+
+local function da_string(key, default)
+    local v = jn.config.get(key)
+    if v == nil or v == "" then return default end
+    return tostring(v)
+end
+
+local function da_clip(text, max)
+    text = tostring(text or "")
+    if #text <= max then return text end
+    return text:sub(1, max) .. "…"
+end
+
+-- 合并转发：jn.onebot11.get_forward_msg_sync 拉取内层节点，按昵称+正文拼接
+local function da_forward_text(fid)
+    local cached = jn.cache.get("da:fwd:" .. fid)
+    if type(cached) == "string" then return cached end
+    if not jn.onebot11 or not jn.onebot11.get_forward_msg_sync then
+        return "【合并转发】"
+    end
+    local ok, nodes, err = pcall(jn.onebot11.get_forward_msg_sync, fid)
+    if not ok or err or type(nodes) ~= "table" or #nodes == 0 then
+        jn.log.warn("[daily_analysis] 合并转发展开失败 id=" .. tostring(fid) .. " err=" .. tostring(err or ok))
+        return "【合并转发】"
+    end
+
+    local limit = da_num("forward_node_limit", 10)
+    local width = da_num("forward_node_chars", 120)
+    local parts, inner = {}, #nodes
+    for i, n in ipairs(nodes) do
+        if i > limit then break end
+        local texts = {}
+        local content = n.content
+        if type(content) == "table" then
+            for _, seg in ipairs(content) do
+                if type(seg) == "table" and seg.type == "text" and type(seg.data) == "table" then
+                    local t = seg.data.text
+                    if type(t) == "string" and t ~= "" then texts[#texts + 1] = t end
+                elseif type(seg) == "table" and seg.type == "image" then
+                    texts[#texts + 1] = "[图]"
+                elseif type(seg) == "table" and seg.type == "xml" and type(seg.data) == "table" then
+                    -- NapCat 把嵌套的聊天记录当成 xml 段，摘要在 <title> 里
+                    local xml = tostring(seg.data.data or "")
+                    local titles = {}
+                    for title in xml:gmatch("<title[^>]*>([^<]*)</title>") do
+                        local v = title:gsub("^%s+", ""):gsub("%s+$", "")
+                        if v ~= "" then titles[#titles + 1] = v end
+                    end
+                    if #titles > 0 then texts[#texts + 1] = table.concat(titles, " / ") end
+                end
+            end
+        elseif type(content) == "string" and content ~= "" then
+            texts[#texts + 1] = content
+        end
+        local who = tostring(n.name or ("群友" .. tostring(n.uin or "")))
+        parts[#parts + 1] = who .. "：" .. da_clip(table.concat(texts, " "), width)
+    end
+    local out = "【合并转发 " .. inner .. " 条】" .. table.concat(parts, " / ")
+    if inner > limit then out = out .. " …（另 " .. (inner - limit) .. " 条）" end
+    jn.cache.set("da:fwd:" .. fid, out, 7 * 86400)
+    return out
+end
+
+-- 图片：image_model Provider 描述（每份报告限量，避免总结时间爆炸）
+local da_vision_used = 0
+local function da_image_text(url)
+    local key = "da:img:" .. url
+    local cached = jn.cache.get(key)
+    if type(cached) == "string" then return cached end
+    if not da_bool("vision_describe", true)
+        or not jn.llm or not jn.llm.vision_url
+        or da_vision_used >= da_num("vision_image_limit", 10) then
+        return "[图片]"
+    end
+    da_vision_used = da_vision_used + 1
+    local ok, text, err = pcall(jn.llm.vision_url,
+        da_string("vision_provider", "wb-api-image"),
+        url,
+        "用一句中文描述这张图片的内容，最多30字，只写图中明确可见的内容，不要编造",
+        { timeout = 30 })
+    if ok and not err and type(text) == "string" and text ~= "" then
+        local out = "【图片：" .. da_clip(text, 60) .. "】"
+        jn.cache.set(key, out, 7 * 86400)
+        return out
+    end
+    jn.log.warn("[daily_analysis] 图片描述失败 url=" .. da_clip(url, 80) .. " err=" .. tostring(err or text))
+    return "[图片]"
+end
+
+-- 回复引用：把被回复消息的前 80 字作为上下文带进语料
+local function da_reply_text(id)
+    local rows, err = jn.database.query([[
+        SELECT nickname, content FROM ]] .. TABLE_MESSAGES .. [[
+        WHERE message_id = ? LIMIT 1
+    ]], { tonumber(id) })
+    if err or type(rows) ~= "table" or not rows[1] then return "" end
+    local src = rows[1].content or ""
+    if src == "" then return "" end
+    return "【回复 " .. tostring(rows[1].nickname or "群友") .. "：「" .. da_clip(src, 80) .. "」】"
+end
+
+local function expand_cq_content(raw, fallback)
+    if type(raw) ~= "string" or raw == "" then return fallback or "" end
+    local s = raw
+    if da_bool("expand_reply", true) then
+        s = s:gsub("%[CQ:reply,id=(%-?%d+)%]", function(id)
+            return da_reply_text(id)
+        end)
+    else
+        s = s:gsub("%[CQ:reply,id=%-?%d+%]", "")
+    end
+    if da_bool("expand_forward", true) then
+        s = s:gsub("%[CQ:forward,id=([^,%]]+)%]", function(fid)
+            return da_forward_text(fid)
+        end)
+    end
+    s = s:gsub("%[CQ:image,[^%]]*url=([^,%]]+)[^%]]*%]", function(u)
+        local url = u:gsub("&amp;", "&")
+        return da_image_text(url)
+    end)
+    s = s:gsub("%[CQ:record,[^%]]*%]", "[语音]")
+    s = s:gsub("%[CQ:video,[^%]]*%]", "[视频]")
+    s = s:gsub("%[CQ:file,[^%]]*%]", "[文件]")
+    return s
 end
 
 -- ============================================================================
@@ -1075,6 +1230,33 @@ local function send_report(sections, target_type, target_id)
 end
 
 -- ============================================================================
+-- 10a. 报告持久化：成功生成的日报落 Postgres，重启后可查历史
+-- ============================================================================
+local function persist_report(group_id, target_id, sections, mode, node_count)
+    local flat = {}
+    for _, sec in ipairs(sections or {}) do
+        flat[#flat + 1] = "## " .. tostring(sec.title or sec.key or "")
+        for _, item in ipairs(sec.items or {}) do
+            flat[#flat + 1] = tostring(item)
+        end
+    end
+    local content = table.concat(flat, "\n")
+    local ok_enc, encoded = pcall(jn.json.encode, sections)
+    if not ok_enc then encoded = "" end
+    local _, err = jn.database.exec([[INSERT INTO ]] .. TABLE_REPORTS .. [[
+        (group_id, target_id, report_date, mode, section_count, node_count, sections, content)
+        VALUES (?, ?, CURRENT_DATE, ?, ?, ?, ?, ?)
+    ]], { group_id, target_id, tostring(mode), #sections, node_count or 0,
+          tostring(encoded or ""), content })
+    if err then
+        jn.log.error("[" .. PLUGIN_NAME .. "] 日报持久化失败: " .. tostring(err))
+    else
+        jn.log.info(string.format("[%s] 日报已落库 group=%d 板块=%d 字符=%d",
+            PLUGIN_NAME, group_id, #sections, #content))
+    end
+end
+
+-- ============================================================================
 -- 11. 自动清理过期记录 (默认保留 7 天)
 -- ============================================================================
 function prune_expired_messages()
@@ -1090,6 +1272,15 @@ function prune_expired_messages()
         jn.log.warn("[" .. PLUGIN_NAME .. "] 清理过期消息历史失败: " .. tostring(err))
     elseif count and count > 0 then
         jn.log.info(string.format("[%s] 自动清理 %d 天前的过期消息: %d 条", PLUGIN_NAME, retention, count))
+    end
+
+    -- 报告保留更久（默认 90 天）
+    local report_days = tonumber(jn.config.get("report_retention_days") or "90") or 90
+    if report_days <= 0 then report_days = 90 end
+    local _, rerr = jn.database.exec("DELETE FROM " .. TABLE_REPORTS ..
+        " WHERE created_at < NOW() - (INTERVAL '1 day' * ?)", { report_days })
+    if rerr then
+        jn.log.warn("[" .. PLUGIN_NAME .. "] 清理过期报告失败: " .. tostring(rerr))
     end
 end
 
@@ -1174,7 +1365,24 @@ function do_group_analysis(group_id, send_target_id, is_private_target)
     local stats = analyze_statistics(messages)
 
     -- 3. 构建聊天流
+    -- 语料展开：转发 / 图片 / 回复 / 语音视频文件变成模型可读文本
+    -- （文件和视频只留占位，正文不入库；图片描述限量，转发按条展开）
+    da_vision_used = 0
+    local expanded = 0
+    for _, m in ipairs(messages) do
+        local before = m.content or ""
+        m.content = expand_cq_content(m.raw_message, before)
+        if m.content ~= before then expanded = expanded + 1 end
+    end
+    jn.log.info(string.format("[%s] 语料展开：%d/%d 条消息含 CQ 码，图片描述 %d 张",
+        PLUGIN_NAME, expanded, #messages, da_vision_used))
     local chat_stream = format_chat_stream(messages)
+    -- 诊断：把展开后的转发/图片行打一条样例日志，便于核对内容是否进入语料
+    for line in chat_stream:gmatch("[^\n]+") do
+        if line:find("【合并转发", 1, true) or line:find("【图片：", 1, true) then
+            jn.log.info("[" .. PLUGIN_NAME .. "] 展开样例: " .. da_clip(line, 400))
+        end
+    end
     stats.total_chars = #chat_stream
 
     -- 4. 组装人设与 Prompt
@@ -1270,6 +1478,9 @@ function do_group_analysis(group_id, send_target_id, is_private_target)
     local mode = tostring(jn.config.get("report_mode") or "forward")
     jn.log.info(string.format("[%s] 群 %d 日报已发送到 %s:%d（模式=%s，板块 %d 个，发送 %d 次 / 节点 %d）",
         PLUGIN_NAME, group_id, target_type, dest_id, mode, #sections, sent, nodes))
+
+    -- 报告落库（与消息表同库，跨重启可查）
+    pcall(persist_report, group_id, dest_id, sections, mode, nodes)
 
     -- 10. 自动清理过期历史
     prune_expired_messages()
