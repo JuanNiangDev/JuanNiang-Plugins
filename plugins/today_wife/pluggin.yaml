@@ -1,0 +1,14 @@
+name: "today_wife"
+version: "1.0.0"
+author: "Churnie HXCN"
+description: "群聊今日老婆趣味插件：支持随机配对、强娶、离婚、所有人都是我老婆、强娶全体成员、全部离婚，支持互动式固定永恒CP绑定与保护、分群隔离、每日定时重置与老婆关系网T2I拓扑渲染（复刻自 astrbot_plugin_today_wife）"
+entry: "main.lua"
+permissions:
+  - onebot11
+  - database
+  - cache
+  - timer
+  - t2i
+  - file
+system: false
+enabled: true

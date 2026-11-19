@@ -29,16 +29,23 @@ configs:
     description: 被戳时随机选用的一条回复语（留空则使用内置默认回复库）
     default: []
 
-  - key: emoji_folder
-    type: string
-    label: 表情包图床目录
-    description: 图床虚拟文件夹名（如 表情包），作为表情包来源；留空则不使用表情包。需要 Bot 侧 jn.images API（image 权限）
-    default: 表情包
+  - key: emoji_folders
+    type: list
+    label: 表情包图床目录列表
+    description: 一个或多个图床虚拟文件夹名（如 表情包、艺术创作）；留空则不使用目录池。需要 image 权限
+    default:
+      - 表情包
+
+  - key: emoji_images
+    type: list
+    label: 单独指定的表情包图片
+    description: 跨目录额外指定单张图片（按图片展示名称匹配），与目录池合并随机。可配置多个
+    default: []
 
   - key: emoji_files
     type: list
-    label: 指定表情包文件
-    description: 图床内指定文件名（需在上方目录内存在）；非空时只在其中随机，留空则用整个目录
+    label: 目录内文件名白名单
+    description: 仅针对上方目录池过滤；非空时仅保留符合该白名单的图片，留空则使用目录内全部图片
     default: []
 
   - key: emoji_rate

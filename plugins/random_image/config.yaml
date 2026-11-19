@@ -6,15 +6,36 @@ configs:
   - key: default_folder
     type: string
     label: 默认图床目录
-    description: "/随机图片 不带分类时使用的图床虚拟文件夹（如 艺术创作）"
-    default: "艺术创作"
+    description: "/随机图片 不带分类时使用的图床虚拟文件夹（如 默认）"
+    default: "默认"
 
   - key: mappings
     type: list
     label: 分类与随机命令映射
-    description: "每项格式「别名=目录」或「别名=目录1,目录2」（逗号分隔多个目录，全池合并随机）；同一别名写多行会合并。加载时为每个别名注册 /随机<别名> 命令（如 奶娃=表情包,艺术创作 → /随机奶娃 从两个目录随机）；/随机图片 <别名> 同样生效。分类也可直接写图床目录名。修改后需重载插件生效"
+    description: "每项格式「别名=目录1,目录2...」（支持多个目录合并随机池）；加载时为每个别名注册 /随机<别名> 命令；/随机图片 <别名> 同样生效。修改后需重载插件生效"
     default:
-      - "奶龙=艺术创作"
-      - "奶蛙=艺术创作"
-      - "奶娃=表情包,艺术创作"
       - "表情包=表情包"
+
+  - key: keyword_rules
+    type: list
+    label: 关键词触发图片回复规则
+    description: "配置聊天中检测到指定关键词时自动随机回复图片。每项格式：「关键词1,关键词2...=目录:目录1,目录2|图片:图片名1,图片名2」。支持包含匹配。修改后需重载插件生效"
+    default: []
+
+  - key: keyword_enable_groups
+    type: list
+    label: 关键词回复启用群列表
+    description: "允许触发关键词自动回复的群号列表（留空表示所有群生效）"
+    default: []
+
+  - key: keyword_reply_probability
+    type: string
+    label: 关键词回复概率(%)
+    description: "命中关键词后回复图片的概率（1-100，默认 100% 为必回）"
+    default: "100"
+
+  - key: keyword_cooldown_seconds
+    type: string
+    label: 关键词回复群冷却(秒)
+    description: "同一群内两次关键词自动回复的最小间隔秒数（防刷屏，0 为不限制）"
+    default: "10"

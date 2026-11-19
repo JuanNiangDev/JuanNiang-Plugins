@@ -20,12 +20,51 @@
     "has_readme": true
   },
   {
+    "name": "daily_analysis",
+    "version": "1.0.0",
+    "author": "Churnie HXCN",
+    "description": "群聊日常分析与总结：提取热门话题、群友头衔画像、群圣经高光发言与聊天质量毒舌锐评，复用系统人设并以合并转发卡片发送（复刻自 astrbot_plugin_qq_group_daily_analysis）",
+    "path": "daily_analysis",
+    "image": "daily_analysis/avatar.png",
+    "has_config": true,
+    "has_readme": true
+  },
+  {
+    "name": "furry_zan",
+    "version": "1.0.1",
+    "author": "Tichaos",
+    "description": "(QQ)智能点赞：赞我、每日定时自动点赞、取消自动、黑名单管理。",
+    "path": "furry_zan",
+    "image": "furry_zan/avatar.png",
+    "has_config": true,
+    "has_readme": true
+  },
+  {
+    "name": "meihua",
+    "version": "1.0.0",
+    "author": "Nailoong",
+    "description": "梅花易数占卜：/梅花 \u003c问题\u003e 起卦并用主程序 LLM 断卦（移植自 astrbot_plugin_meihua）",
+    "path": "meihua",
+    "image": "meihua/avatar.png",
+    "has_config": true
+  },
+  {
     "name": "MeT_Music",
     "version": "1.0.0",
     "author": "Redrock",
     "description": "MeT Music 点歌：/music search 搜索（T2I 渲染结果图）、/music play 播放音乐卡片",
     "path": "MeT_Music",
     "image": "MeT_Music/avatar.png",
+    "has_config": true,
+    "has_readme": true
+  },
+  {
+    "name": "pig_party",
+    "version": "1.0.0",
+    "author": "Churnie HXCN",
+    "description": "猪猪派对：今日小猪（每人每天固定一只，直接发送图床/PigHub 原图）、随机猪图（群内去重防刷屏）、普通消息含猪字自动回复（默认关闭，带白名单/概率/冷却），图池支持卷娘图床多目录与自定义外链（复刻自 astrbot_plugin_pig_party）",
+    "path": "pig_party",
+    "image": "pig_party/avatar.png",
     "has_config": true,
     "has_readme": true
   },
@@ -38,6 +77,15 @@
     "image": "ping/avatar.png",
     "has_config": true,
     "has_readme": true
+  },
+  {
+    "name": "random_image",
+    "version": "1.1.0",
+    "author": "Nailoong",
+    "description": "随机图片：/随机图片 [分类]，支持映射分类与自定义随机命令（/随机\u003c别名\u003e），新增普通消息关键词监听回复（支持指定多个图床文件夹与单张具体图片）（移植自 lanmei-dream 随机图片玩法）",
+    "path": "random_image",
+    "image": "random_image/avatar.png",
+    "has_config": true
   },
   {
     "name": "redrock_caidanci",
@@ -121,9 +169,9 @@
   },
   {
     "name": "redrock_poke",
-    "version": "1.0.2",
+    "version": "1.1.0",
     "author": "Redrock",
-    "description": "卷娘戳一戳回复插件",
+    "description": "戳一戳回复插件（支持图床表情包回复）",
     "path": "redrock_poke",
     "image": "redrock_poke/avatar.png",
     "has_config": true,
@@ -188,6 +236,24 @@
     "image": "t2i-example/avatar.png",
     "has_config": true,
     "has_readme": true
+  },
+  {
+    "name": "today_wife",
+    "version": "1.0.0",
+    "author": "Churnie HXCN",
+    "description": "群聊今日老婆趣味插件：支持随机配对、强娶、离婚、所有人都是我老婆、强娶全体成员、全部离婚，支持互动式固定永恒CP绑定与保护、分群隔离、每日定时重置与老婆关系网T2I拓扑渲染（复刻自 astrbot_plugin_today_wife）",
+    "path": "today_wife",
+    "image": "today_wife/avatar.png",
+    "has_config": true,
+    "has_readme": true
+  },
+  {
+    "name": "turtle_soup",
+    "version": "1.0.0",
+    "author": "Nailoong",
+    "description": "海龟汤情境推理游戏：/开汤 开局，/问 /猜 /认输 对局（移植自 lanmei-dream）",
+    "path": "turtle_soup",
+    "image": "turtle_soup/avatar.png"
   },
   {
     "name": "webhook-example",

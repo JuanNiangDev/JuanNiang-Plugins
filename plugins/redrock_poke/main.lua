@@ -1,83 +1,95 @@
 -- ====================================================================
--- redrock_poke
--- 卷娘戳一戳回复插件
--- 戳卷娘时，以卷娘的人设（18岁狮子座女生，活泼可爱俏皮）
--- 结合红岩网校信息进行多样化的俏皮回复。
+-- redrock_poke 戳一戳回复插件
+-- ====================================================================
+-- 当群聊内发生 notify.poke 戳一戳事件，且被戳目标为机器人自己时：
+-- 随机选择一条回复语发送到群聊。
+-- 优先使用 config.yaml 中配置的 poke_replies；未配置时使用插件内置默认回复库。
+--
+-- 表情包增强（需要 image 权限）：
+--   * emoji_folders 可配置多个图床虚拟文件夹合并为图片池
+--   * emoji_images 可额外跨目录指定多个具体图片名称，与目录池合并随机
+--   * emoji_files 可在目录池内做文件名白名单过滤
+--   * 按 emoji_weight:text_weight 加权随机选择「表情包回复」或「文本回复」
+--   * 文本回复时可按 emoji_rate% 概率附带一张图床表情包
+--   * 图片以 [CQ:image,file=imgs://<id>] 发送，发送层统一解析为 base64
 -- ====================================================================
 
 local jn = require("jn")
 
--- ====================================================================
--- 内置默认回复库（可在 Web 面板配置 poke_replies 覆盖）
--- ====================================================================
+---@diagnostic disable: undefined-global
+
+-- 内置默认回复库（用户未配置 poke_replies 时兜底使用）
 local DEFAULT_REPLIES = {
-    -- 俏皮傲娇类
-    "哼！别戳了，再戳狮子座可是会炸毛的哦～🦁",
-    "哎呀，戳坏了你赔吗！卷娘才18岁，很娇贵的！(〃＞＿＜;〃)",
-    "戳一戳已收到——已读不回，卷娘就是这么大牌 😎",
-    "干嘛干嘛！卷娘正在打扫卫生呢，爱干净的女生最讨厌被突然戳到了！🧹",
-    "哼哼，又戳我！身高162的可爱女生是你随便戳的吗！",
-
-    -- 红岩招新类
-    "戳卷娘不如戳 /redrock 呀！红岩网校招新了解一下？✨",
-    "戳我的时间，都够问卷娘一个问题啦～试试 @卷娘 后端介绍 吧！",
-    "诶嘿，想了解红岩网校吗？发送 /redrock 看看卷娘知道些什么～📋",
-    "戳戳戳！有这功夫不如来红岩网校写代码！发送 /redrock 开始了解～",
-
-    -- 游戏功能引导
-    "无聊的话来玩猜单词呀！发送 /猜单词 开一局～🎮",
-    "想测测你对红岩的了解吗？发送 /来一局 挑战快问快答～🧠",
-    "戳卷娘不如戳代码！发送 /code py 试试在线运行代码吧～💻",
-    "又戳我！信不信我用 Python 写个脚本自动回戳你！（并不会）🐍",
-
-    -- 性格相关 + 红岩
-    "EVER YOUTHFUL, EVER WEEPING～这是卷娘的座右铭呢！✨",
-    "卷娘是重庆南岸区土生土长的狮子座女孩，红岩网校最可爱的存在不接受反驳！🏔️",
-    "悄悄告诉你，卷娘生日是7月31号哦～记好了没！🎂",
-    "虽然卷娘很俏皮，但红岩网校的技术可是认真的！想学什么我都能指路～",
-    "卷娘今年18岁，在红岩网校等你来！这里有一群超棒的小伙伴～",
+    "不要戳我啦 >_<",
+    "戳我干嘛？",
+    "哎呀，好痒！",
+    "有什么事吗？",
+    "再戳我就生气了！",
+    "本姑娘在呢～",
+    "别戳啦，在忙呢！",
+    "呜……轻点戳！",
+    "戳脸会长皱纹的！",
+    "抓住你的小手！(｀・ω・´)",
 }
 
--- 回复库：优先使用配置的 poke_replies，否则回退内置默认库
-local REPLIES = jn.config.get("poke_replies") or DEFAULT_REPLIES
-if type(REPLIES) ~= "table" or #REPLIES == 0 then
-    REPLIES = DEFAULT_REPLIES
-end
-
--- ====================================================================
--- 表情包回复配置（图床）
--- emoji_folder: 图床虚拟文件夹（如 表情包）；emoji_files: 指定文件名列表（非空时优先）
--- emoji_rate: 文本回复时附带表情包的概率（0~100，%）
--- emoji_weight / text_weight: 表情包回复 vs 文本回复的加权随机
--- ====================================================================
+-- 解析数字配置（防御非法字符 / 缺失），回退 default
 local function num_config(key, default)
-    local n = tonumber(jn.config.get(key))
-    if n == nil then
+    local v = jn.config.get(key)
+    if v == nil or v == "" then
         return default
     end
-    return n
+    local n = tonumber(v)
+    return n or default
 end
 
-local EMOJI_FOLDER = tostring(jn.config.get("emoji_folder") or "")
-local EMOJI_FILES = jn.config.get("emoji_files")
-if type(EMOJI_FILES) ~= "table" then
-    EMOJI_FILES = {}
+-- 解析列表配置
+local function list_config(key)
+    local raw = jn.config.get(key)
+    local out = {}
+    if type(raw) == "table" then
+        for _, v in pairs(raw) do
+            local s = tostring(v or ""):match("^%s*(.-)%s*$")
+            if s ~= "" then out[#out + 1] = s end
+        end
+    elseif type(raw) == "string" then
+        for item in raw:gmatch("[^,，%s]+") do
+            out[#out + 1] = item
+        end
+    end
+    return out
 end
-local EMOJI_RATE = math.min(math.max(num_config("emoji_rate", 0), 0), 100)
+
+-- 兼容读取单个目录与多个目录
+local function get_emoji_folders()
+    local list = list_config("emoji_folders")
+    if #list == 0 then
+        local single = tostring(jn.config.get("emoji_folder") or ""):match("^%s*(.-)%s*$")
+        if single and single ~= "" then
+            list = { single }
+        end
+    end
+    return list
+end
+
+local EMOJI_FILES = list_config("emoji_files")
+local EMOJI_IMAGES = list_config("emoji_images")
+local EMOJI_RATE = math.min(math.max(num_config("emoji_rate", 30), 0), 100)
 local EMOJI_W = math.max(num_config("emoji_weight", 1), 0)
-local TEXT_W = math.max(num_config("text_weight", 1), 0)
+local TEXT_W = math.max(num_config("text_weight", 2), 0)
 
 -- 图床候选池缓存（10 分钟刷新；配置重载时本脚本重跑即重建）
 local emoji_pool = nil
 local pool_loaded_at = 0
 local POOL_TTL = 600
 
--- 表情包来源是否可用：目录非空 且 SDK 提供 images API（需 image 权限）
+-- 表情包来源是否可用：存在目录或独立图片 且 SDK 提供 images API（需 image 权限）
 local function has_emoji_source()
-    return EMOJI_FOLDER ~= "" and jn.images ~= nil
+    local folders = get_emoji_folders()
+    local images = list_config("emoji_images")
+    return (#folders > 0 or #images > 0) and jn.images ~= nil
 end
 
--- 刷新候选池：emoji_files 非空时仅保留指定名称（在目录内存在的）
+-- 刷新候选池：汇总多个目录 + 多个具体指定图片，同时支持文件名白名单过滤
 local function refresh_pool(force)
     if not has_emoji_source() then
         return nil
@@ -86,29 +98,57 @@ local function refresh_pool(force)
     if not force and emoji_pool and now - pool_loaded_at < POOL_TTL then
         return emoji_pool
     end
-    local ok, list = pcall(function()
-        return jn.images.list(EMOJI_FOLDER)
-    end)
-    if not ok or type(list) ~= "table" then
-        jn.log.warn("[redrock_poke] 图床枚举失败: " .. tostring(list))
-        return emoji_pool -- 保留旧缓存继续用
-    end
-    local want = {}
-    for _, n in ipairs(EMOJI_FILES) do
-        want[tostring(n)] = true
-    end
+
     local pool = {}
-    for _, it in ipairs(list) do
-        if type(it) == "table" and it.id then
-            if next(want) == nil or want[it.name] then
-                pool[#pool + 1] = it
+    local seen_ids = {}
+
+    -- 1. 遍历多个目录
+    local folders = get_emoji_folders()
+    local want_files = {}
+    for _, n in ipairs(list_config("emoji_files")) do
+        want_files[tostring(n)] = true
+    end
+
+    for _, folder in ipairs(folders) do
+        local ok, list = pcall(function()
+            return jn.images.list(folder)
+        end)
+        if ok and type(list) == "table" then
+            for _, it in ipairs(list) do
+                if type(it) == "table" and it.id and not seen_ids[it.id] then
+                    if next(want_files) == nil or want_files[it.name] then
+                        seen_ids[it.id] = true
+                        pool[#pool + 1] = it
+                    end
+                end
+            end
+        else
+            jn.log.warn("[redrock_poke] 图床目录枚举失败: " .. tostring(folder) .. " err=" .. tostring(list))
+        end
+    end
+
+    -- 2. 遍历额外指定的具体单张图片（跨目录模糊/精确搜索）
+    local images = list_config("emoji_images")
+    for _, img_name in ipairs(images) do
+        local ok, list = pcall(function()
+            return jn.images.search(img_name, 5)
+        end)
+        if ok and type(list) == "table" then
+            for _, it in ipairs(list) do
+                if type(it) == "table" and it.id and not seen_ids[it.id] then
+                    if tostring(it.name) == img_name or tostring(it.name):find(img_name, 1, true) then
+                        seen_ids[it.id] = true
+                        pool[#pool + 1] = it
+                    end
+                end
             end
         end
     end
+
     emoji_pool = pool
     pool_loaded_at = now
-    jn.log.info(string.format("[redrock_poke] 表情包候选池: %d 张（目录=%s，指定文件=%d）",
-        #pool, EMOJI_FOLDER, #EMOJI_FILES))
+    jn.log.info(string.format("[redrock_poke] 表情包候选池: %d 张（目录数=%d，独立图片=%d，文件白名单=%d）",
+        #pool, #folders, #images, #EMOJI_FILES))
     return pool
 end
 
@@ -128,7 +168,6 @@ local self_qq = nil
 local self_qq_warned = false
 
 -- 获取机器人自身 QQ：优先配置 bot_qq，其次自动调用 get_login_info。
--- 失败时返回 nil（不缓存，下次事件重试），避免启动时适配器未连接导致永久失效。
 local function get_self_qq()
     if self_qq then
         return self_qq
@@ -151,76 +190,77 @@ local function get_self_qq()
 end
 
 -- ====================================================================
--- on_notice: 戳一戳事件
+-- 事件入口
 -- ====================================================================
+
 function on_notice(event)
-    -- 戳一戳：notice_type = "notify", sub_type = "poke"
     if event.notice_type ~= "notify" or event.sub_type ~= "poke" then
-        return
+        return false, nil
     end
 
-    -- 启用开关
-    if jn.config.get("enabled") == false then return end
-
-    local group_id = event.group_id
-    if group_id == 0 then return end
-
-    -- 只响应"被戳对象是机器人自己"的戳一戳：
-    -- OneBot11 poke 事件中 user_id=戳人者，target_id=被戳者。
-    -- 若 target_id 缺失（=0）或不是机器人自己，直接忽略，避免误回戳别人的戳一戳。
-    local bot_qq = get_self_qq()
-    if not bot_qq then
-        return
-    end
-    local target = tonumber(event.target_id)
-    if not target or target ~= bot_qq then
-        return
+    local enabled = jn.config.get("enabled")
+    if enabled == false or enabled == "false" then
+        return false, nil
     end
 
-    local from_qq = event.user_id
-
-    -- 选一条回复，避免连续重复
-    local idx
-    repeat
-        idx = math.random(#REPLIES)
-    until idx ~= last_index or #REPLIES <= 1
-    last_index = idx
-
-    local text = REPLIES[idx]
-
-    -- 回复类型：emoji_weight : text_weight 加权随机
-    -- 文本回复再按 emoji_rate% 概率附带一张表情包
-    local use_emoji = false
-    if EMOJI_W + TEXT_W > 0 and has_emoji_source() then
-        use_emoji = math.random(EMOJI_W + TEXT_W) <= EMOJI_W
+    local my_qq = get_self_qq()
+    if not my_qq then
+        return false, nil
     end
-    local attach_to_text = (not use_emoji) and EMOJI_RATE > 0
-        and has_emoji_source()
-        and math.random(100) <= EMOJI_RATE
-
-    local img = nil
-    if use_emoji or attach_to_text then
-        img = pick_emoji()
-    end
-    if use_emoji and not img then
-        use_emoji = false -- 候选池为空，回退文本回复
+    if tonumber(event.target_id) ~= my_qq then
+        return false, nil
     end
 
-    -- 群聊 @ 戳的人 + 回复（图床引用 imgs:// 由发送层解析为 base64）
-    local msg = string.format("[CQ:at,qq=%d] ", from_qq)
-    if use_emoji and img then
-        msg = msg .. string.format("[CQ:image,file=imgs://%s]", img.id)
-    else
-        msg = msg .. text
-        if attach_to_text and img then
-            msg = msg .. string.format(" [CQ:image,file=imgs://%s]", img.id)
+    -- 决策：发纯表情包还是走文本回复路径
+    local emoji = pick_emoji()
+    local is_emoji_only = false
+    if emoji and (EMOJI_W > 0 or TEXT_W > 0) then
+        local roll = math.random(EMOJI_W + TEXT_W)
+        if roll <= EMOJI_W then
+            is_emoji_only = true
         end
     end
-    jn.onebot11.send_group_msg(group_id, msg)
 
-    jn.log.info(string.format("[redrock_poke] %d 戳了卷娘 在群 %d（%s）",
-        from_qq, group_id, (use_emoji and img) and "表情包回复" or
-        (img and "文本+表情包" or "文本回复")))
+    if is_emoji_only and emoji then
+        local msg = string.format("[CQ:image,file=imgs://%s]", emoji.id)
+        if event.group_id and tonumber(event.group_id) > 0 then
+            jn.onebot11.send_group_msg(tonumber(event.group_id), msg)
+        else
+            jn.onebot11.send_private_msg(tonumber(event.user_id), msg)
+        end
+        return false, nil
+    end
+
+    -- 文本回复分支
+    local list = jn.config.get("poke_replies")
+    local replies = (type(list) == "table" and #list > 0) and list or DEFAULT_REPLIES
+
+    local count = #replies
+    local idx
+    if count == 1 then
+        idx = 1
+    else
+        repeat
+            idx = math.random(count)
+        until idx ~= last_index
+    end
+    last_index = idx
+
+    local text = replies[idx]
+
+    -- 概率带图
+    if emoji and EMOJI_RATE > 0 and math.random(100) <= EMOJI_RATE then
+        text = text .. "\n" .. string.format("[CQ:image,file=imgs://%s]", emoji.id)
+    end
+
+    if event.group_id and tonumber(event.group_id) > 0 then
+        jn.onebot11.send_group_msg(tonumber(event.group_id), text)
+    else
+        jn.onebot11.send_private_msg(tonumber(event.user_id), text)
+    end
+
+    return false, nil
 end
 
-jn.log.info("[redrock_poke] 卷娘戳一戳插件已加载（表情包支持已启用）")
+math.randomseed(os.time())
+jn.log.info("[redrock_poke] 戳一戳回复插件已加载（支持多图床目录与独立图片指定）")

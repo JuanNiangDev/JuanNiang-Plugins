@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1200px;
+    background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    color: #333;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 20px 40px;
+  }
+  .card-container {
+    width: 1160px;
+    background: #ffffff;
+    border-radius: 20px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.06);
+    border: 1px solid rgba(255, 182, 193, 0.4);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .header {
+    width: 100%;
+    padding: 24px 30px 18px;
+    background: linear-gradient(90deg, #ff9a9e 0%, #fecfef 99%, #fecfef 100%);
+    color: #fff;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .title-box h1 {
+    font-size: 26px;
+    font-weight: 700;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .title-box p {
+    font-size: 14px;
+    opacity: 0.92;
+    margin-top: 4px;
+  }
+  .stats-badges {
+    display: flex;
+    gap: 12px;
+  }
+  .badge {
+    background: rgba(255, 255, 255, 0.25);
+    backdrop-filter: blur(8px);
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+  }
+  .svg-wrap {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 10px 0;
+  }
+  .footer {
+    width: 100%;
+    padding: 14px 30px;
+    background: #fafafa;
+    border-top: 1px solid #f0f0f0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: #888;
+  }
+  .legend {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .legend-line-single {
+    width: 24px;
+    height: 3px;
+    background: #90caf9;
+    border-radius: 2px;
+  }
+  .legend-line-bi {
+    width: 24px;
+    height: 4px;
+    background: #ff4081;
+    border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+  <div class="card-container">
+    <div class="header">
+      <div class="title-box">
+        <h1>💕 今日老婆关系网拓扑图</h1>
+        <p>群聊：__GROUP_NAME__ (__GROUP_ID__) · 日期：__DATE__</p>
+      </div>
+      <div class="stats-badges">
+        <div class="badge">👥 群友 __NODE_COUNT__ 人</div>
+        <div class="badge">🔗 配对 __EDGE_COUNT__ 条</div>
+        <div class="badge">❤️ 双向奔赴 __BI_COUNT__ 对</div>
+      </div>
+    </div>
+
+    <div class="svg-wrap">
+      __SVG_CONTENT__
+    </div>
+
+    <div class="footer">
+      <div class="legend">
+        <div class="legend-item">
+          <div class="legend-line-single"></div>
+          <span>单向钟情（箭头指向老婆）</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-line-bi"></div>
+          <span>❤️ 永恒/双向爱意（双向奔赴）</span>
+        </div>
+      </div>
+      <div>卷娘今日老婆插件 · 生成时间：__GEN_TIME__</div>
+    </div>
+  </div>
+</body>
+</html>

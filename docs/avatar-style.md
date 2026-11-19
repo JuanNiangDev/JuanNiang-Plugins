@@ -24,6 +24,8 @@
 A single cute rounded __SUBJECT__, drawn in a flat cartoon anime mascot style: pure white surfaces, soft light-pink accents, outlined with a clean deep blue bluish-purple contour line of uniform thickness, smooth rounded shapes, no cast shadows, no heavy gradients, subtle soft highlights allowed, minimal baby-cute appeal, big simple shapes, solid opaque flat fill, clean edges, no glow, no halo. Large and centered, filling most of the square frame, transparent background, single subject only, no text, no letters, no logo unless the subject itself is letter-based, no animal, no mascot, no rabbit, no character, object only.
 ```
 
+> **人物 / 群像类例外**：当主体是抽象人物或群像（如 `redrock_group_manager` 的三人群像）时，把模板结尾的 `no character, object only` 改写为 `abstract figures allowed, no detailed face`（或类似覆盖写法），与上文「抽象人物、群像允许作为主体」的规范一致。字母类例外同理，见下方写法要点。
+
 **主体描述写法要点**
 
 - 只写一个名词性主体，例如 `code repository folder showing a few code lines with a small link mark`。
@@ -31,6 +33,7 @@ A single cute rounded __SUBJECT__, drawn in a flat cartoon anime mascot style: p
 - 不要在此处写「logo / icon / avatar / app icon」等用途词，只描述这张方形插画本身。
 - 提示词本身即「画一张图」，不要让模型知道这是用作图标。
 - 字母类插件（如猜单词）在 `__SUBJECT__` 中直接写明 `showing a single capital letter A`，此即「字母作为主体」的例外，覆盖通用模板里的 `no letters`。
+- 人物 / 群像类插件（如群管理）在 `__SUBJECT__` 中写明 `cluster of three simple people figures` 之类，并把模板结尾的 `no character, object only` 覆盖为 `abstract figures allowed`（覆盖写法见上方提示词后的说明）。
 
 ### 各插件主体清单（可直接复用）
 
@@ -58,6 +61,13 @@ A single cute rounded __SUBJECT__, drawn in a flat cartoon anime mascot style: p
 | welcome | rounded open door with a small sparkle |
 | repo-intro | code repository folder showing a few code lines with a small link mark |
 | wechat-article-summary | article document card with several text lines and a small sparkle |
+| MeT_Music | rounded music note with a small play triangle beside it _(已有 avatar.png)_ |
+| furry_zan | rounded thumb-up hand with a small sparkle above it _(已有 avatar.png)_ |
+| redrock_delicious | rounded steaming rice bowl with a pair of chopsticks _(已有 avatar.png)_ |
+| daily_analysis | rounded chart board with a few rising bars and a small magnifier _(待绘制)_ |
+| meihua | rounded plum blossom flower with five petals _(待绘制)_ |
+| random_image | rounded picture frame with a small dice beside it _(待绘制)_ |
+| turtle_soup | rounded soup bowl with a small turtle shell floating above it _(待绘制)_ |
 
 > 新插件按「功能 → 一个具象元素」推导主体即可，例如定时类用时钟/信封+时钟，查询类用气泡/灯泡/盾牌等。字母类（猜单词等）允许以字母方块作为主体。
 
@@ -70,12 +80,12 @@ A single cute rounded __SUBJECT__, drawn in a flat cartoon anime mascot style: p
 ```
 
 **校验要点（四项全过才算合格）**
-   - 明显半透明像素 `0<alpha<250` 占比 **≤ 30%**（抗锯齿 / 高光边缘容差，含 250–255 近不透明柔边；超出则为大面积柔光 / 半透明，不合格）。
+
 1. **主体明确匹配**：视觉识别出的主体必须与预期 `__EXPECTED__` **完全一致**；允许同义表述，但不允许出现其他主体、误带吉祥物或无关元素，否则判不通过。
 2. **透明背景（数值规则）**：以 `alpha` 通道核实，须同时满足：
    - 完全透明像素 `alpha=0` 占比 **≥ 5%**（证明存在透明背景，而非实色底）；
    - 主体不透明像素 `alpha≥250` 占比 **≥ 5%**（证明有实体主体）；
-   - 半透明过渡像素占比 **≤ 30%**（定义同上：明显半透明为 `0<alpha<250`，250–255 视为近不透明柔边不计入）。
+   - 半透明过渡像素占比 **≤ 30%**：明显半透明像素 `0<alpha<250` 占比 ≤ 30%（抗锯齿 / 高光边缘容差；250–255 视为近不透明柔边不计入），超出则为大面积柔光 / 半透明，不合格。
    可直接运行确定性脚本核对：`python3 docs/avatar-validate.py <path-to-avatar.png>`。
 3. **无吉祥物**：不得出现兔子或任何动物形象（抽象人物 / 群像允许）。
 4. **配色合规**：主体为白 + 浅粉 + 深蓝描边的扁平卡通风；允许柔和高光，但不得出现投影、大幅渐变或体积光。

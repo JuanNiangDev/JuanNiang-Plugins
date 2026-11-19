@@ -1,0 +1,67 @@
+configs:
+  - key: enable_groups
+    type: list
+    label: 启用群列表
+    description: 允许使用猪猪派对功能的群号列表（留空表示所有群生效）
+    default: []
+
+  - key: image_bed_folders
+    type: list
+    label: 图床目录列表
+    description: 卷娘图床中存放猪图的虚拟文件夹名（可填多个，插件自动读取全部图片；可用 scripts/fetch_pighub.py 批量导入）
+    default:
+      - "pig_party"
+
+  - key: custom_pig_images
+    type: list
+    label: 自定义猪图
+    description: 额外添加的单张图片，格式「名称=图片URL」或直接填 URL（可多条）
+    default: []
+
+  - key: auto_reply_pig_messages
+    type: bool
+    label: 普通消息含猪自动回复
+    description: 群友消息包含猪相关关键词时自动回复一张随机猪图（默认关闭，避免打扰严肃群）
+    default: false
+
+  - key: pig_trigger_keywords
+    type: string
+    label: 自动回复关键词
+    description: 触发随机猪图的关键词，中英文逗号分隔
+    default: "猪,🐷,🐖,🐽"
+
+  - key: auto_reply_probability
+    type: string
+    label: 自动回复概率(%)
+    description: 命中关键词后回复的概率（1-100，100 为必定回复）
+    default: "50"
+
+  - key: auto_reply_cooldown_seconds
+    type: string
+    label: 自动回复群冷却(秒)
+    description: 同一群内两次自动回复的最小间隔秒数（0 为不限制）
+    default: "15"
+
+  - key: command_cooldown_seconds
+    type: string
+    label: 指令冷却(秒)
+    description: 主动指令（今日小猪/随机小猪）的冷却间隔秒数（0 为不限制）
+    default: "3"
+
+  - key: random_recent_limit
+    type: string
+    label: 随机猪图去重条数
+    description: 记录本群最近发送过的图片数量，随机时优先避开（0 为不去重）
+    default: "8"
+
+  - key: at_view_pig
+    type: bool
+    label: 允许查看他人今日小猪
+    description: 是否允许通过「/今日小猪 @某人」查看对方的今日小猪
+    default: true
+
+  - key: pool_cache_seconds
+    type: string
+    label: 图池缓存时长(秒)
+    description: 图池（图床目录 + 自定义外链）在内存/Redis 中的缓存时长，避免每次指令都扫图床
+    default: "300"

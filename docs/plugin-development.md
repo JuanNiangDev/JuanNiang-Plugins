@@ -79,9 +79,9 @@ end
 
 ## 4. 部署
 
-- **本地开发**：放目录进 `data/pluggins/`，重启进程或在 Web API 上 `POST /plugins/upload`（ZIP）或 `PUT /plugins/:id/toggle` 启用。
+- **本地开发**：放目录进 `data/pluggins/`，重启进程或在 Web API 上 `POST /api/v1/plugins/upload`（ZIP）或 `PUT /api/v1/plugins/:id/toggle` 启用（需 JSON body `{"is_active": true}`）。
 - **Docker 部署**：通过 `docker-compose.yaml` 的 `../data/pluggins:/app/data/pluggins` bind-mount 注入；镜像升级不丢插件（注意 `system/` 子目录由二进制在每次启动覆盖，勿修改）。
-- **热加载**：`PUT /plugins/:id/toggle` 触发 Load/Unload；改了 Lua 源码后 toggle 先停再启即可（暂无单文件 reload API，整个插件 Reload）。
+- **热加载**：`PUT /api/v1/plugins/:id/toggle` 触发 Load/Unload；也可用 `POST /api/v1/plugins/:id/reload` 单插件重载，`POST /api/v1/plugins/reload` 全量重载。
 
 ## 引入 SDK
 
@@ -93,7 +93,10 @@ jn.log.info("插件启动")    -- 推荐写法（IDE 有提示 via LuaCATS）
 log.info("插件启动")        -- 等价
 ```
 
-SDK 仅是 Go 注入全局表的再导出（`jn.log = log` 等），不引入额外行为。
+SDK 主体是 Go 注入全局表的再导出（`jn.log = log` 等），但有两处是**纯 Lua 实现**、并非再导出：
+
+- `jn.sql`（`sdk/jn.lua:152-156`）— PostgreSQL 单引号转义工具，无对应全局表；
+- `jn.command`（`sdk/jn.lua:412-419`）— 包装 `__jn_internal.register_command` 的纯 Lua 表。
 
 | SDK 字段 | 全局表 | 说明 |
 |----------|--------|------|
@@ -102,13 +105,18 @@ SDK 仅是 Go 注入全局表的再导出（`jn.log = log` 等），不引入额
 | `jn.onebot11` | `onebot11` | OneBot11 协议 |
 | `jn.http` | `http` | HTTP 请求 |
 | `jn.database` | `database` | 数据库 |
+| `jn.sql` | — | 纯 Lua：SQL 字符串字面量转义（`escape`） |
 | `jn.cache` | `cache` | Redis 缓存 |
 | `jn.t2i` | `t2i` | 文生图 |
 | `jn.sandbox` | `sandbox` | 代码沙箱 |
 | `jn.agent` | `agent` | Agent 操作接口 |
 | `jn.llm` | `llm` | LLM 调用（复用 Bot Provider 配置） |
+| `jn.timer` | `timer` | 异步延时（完成后回调 `on_timer_response`） |
+| `jn.rag` | `rag` | RAG 向量检索 |
+| `jn.config` | `config` | 动态配置（**无需权限**，默认注入） |
+| `jn.metrics` | `metrics` | 自定义 Prometheus 指标（**无需权限**，默认注入） |
 | `jn.file` | `file` | 插件目录内文本文件读写 |
-| `jn.command` | — | 命令注册 |
+| `jn.command` | — | 纯 Lua：命令注册 |
 
 ## 注册命令
 
@@ -169,7 +177,7 @@ curl -X POST http://localhost:8090/api/v1/plugins/upload \
 
 JuanNiang-Neo 暴露给 Lua 插件的 API 函数。**可用性由 `pluggin.yaml` 中 `permissions` 控制**。
 
-> **SDK 区分**：`jn.command` 是命令注册的唯一入口（内部委托到 Go 侧 `__jn_internal.register_command` 全局函数）。直接调用 `__jn_internal.*` 不被推荐，签名可能随版本调整。其他 `jn.<table>` 仅是 Go 注入全局表的再导出。
+> **SDK 区分**：`jn.command` 是命令注册的唯一入口（内部委托到 Go 侧 `__jn_internal.register_command` 全局函数）。直接调用 `__jn_internal.*` 不被推荐，签名可能随版本调整。除 `jn.sql`（纯 Lua 转义工具）与 `jn.command`（纯 Lua 包装）外，其他 `jn.<table>` 仅是 Go 注入全局表的再导出。
 
 ## 全局表: `log`
 
@@ -363,21 +371,30 @@ end
 
 ## 全局表: `cache`
 
-权限：`cache`。**键自动加 `pluggin:<name>:` 前缀**，与系统缓存严密隔离。
+权限：`cache`。**键自动加 `pluggin:<插件目录名>:` 前缀**，再叠加 Redis 全局前缀 `juan:`（`internal/core/cache/cache.go:18-25`，`REDIS_PREFIX` 默认 `juan:`），因此 Redis 里的完整 key 形如 `juan:pluggin:checkin:quotes`。
 
 | 函数 | 说明 |
 |------|------|
-| `cache.get(key) → table` | 读取（自动反序列化 JSON） |
+| `cache.get(key) → table` | 读取（按 JSON **对象**反序列化，见下方约束） |
 | `cache.set(key, value [, ttl]) → bool [, err]` | 写入；`ttl` 秒，默认 0=永不过期 |
 | `cache.del(key) → bool [, err]` | |
 | `cache.exists(key) → number` | 0 或 1 |
 
+> **⚠ 只能读回 JSON 对象（Lua 映射表）**：`get` 内部固定声明 `var result map[string]any` 后再 `json.Unmarshal`（`internal/pluggin/pluggin.go:2325`）。写入裸字符串、裸数组、数字或布尔值时 `set` 仍返回 `true`，但 `get` 永远返回 `nil`——**静默失败**。需要存数组时，把数组放进一个字段里包成对象。
+
 ```lua
-jn.cache.set("last_seen", "2026-07-26", 3600)   -- 1h TTL
-local v = jn.cache.get("last_seen")
-jn.cache.del("last_seen")
-if jn.cache.exists("last_seen") then ... end
+-- 写：顶层必须是对象（map），数组放在字段里
+jn.cache.set("state", { items = { "a", "b" }, note = "x" }, 3600)
+local v = jn.cache.get("state")
+if v and v.items then
+    local first = v.items[1]
+end
+
+jn.cache.del("state")
+if jn.cache.exists("state") then ... end
 ```
+
+> 该约束是仓库真实踩过的坑，`plugins/MeT_Music/main.lua:179` 处有对应注释（缓存搜索结果的数组时包了一层 `{ songs = songs }`）。
 
 ## 全局表: `t2i`
 
@@ -572,7 +589,7 @@ end
 
 多级命令注册。需先 `local jn = require("jn")`。
 
-`CommandRegistry` 维护一棵 `CommandNode` 树。`PluginEngine.OnMessage` 在派发到 `on_message` 之前，先检查 `event.RawMessage` 是否以 `/` 开头，若是则调 `commands.Dispatch` 最长前缀匹配：
+`CommandRegistry` 维护一棵 `CommandNode` 树。派发入口是 `PluginEngine.Dispatch`（`pluggin.go:949`），消息事件转入 `dispatchMessage`（`pluggin.go:1045`）：先检查 `event.RawMessage` 是否以 `/` 开头，若是则调 `pe.commands.Match`（`pluggin.go:1067`）做最长前缀匹配，命中后由 `pe.execCommand`（`pluggin.go:1073`）执行 handler（`CommandRegistry.Dispatch` 已标记 Deprecated）：
 
 - 命中可执行 handler → 自动回复 `reply`（非空时）+ `consumed=true` 跳过 Agent 与 `on_message`
 - 未命中 handler 但停在某个非根节点 → 自动列出该节点的子命令作为提示
@@ -607,7 +624,7 @@ end, { description = "多级命令", usage = "/myplugin subcmd1 subcmd2 [args...
 
 ### 内置 `/help` 命令
 
-`PluginEngine.registerBuiltinCommands()` 启动时注册到 `system/help`：
+`PluginEngine.registerBuiltinCommands()`（`pluggin.go:399-409`）启动时调用 `pe.commands.Register("system", []string{"help"}, ...)` 注册内置命令。注意 `"system"` 是注册方（Builtin 标记，不依赖 system 插件是否加载），`help` 才是命令路径，因此可执行命令是 `/help`：
 
 - `/help` — 列出所有顶层命令
 - `/help <cmd>` — 查看 `<cmd>` 的子命令与用法
@@ -636,7 +653,7 @@ function on_message(event) → (consumed, skip_reply)
 
 > **已移除**：`modified_event`（修改事件）不再支持——插件不得中途改写事件内容（防止上下文失真）。需要拦截/处理消息时，在 `on_message` 中直接调用 `jn.onebot11` API 产生副作用（如 `delete_msg` 撤回、`ban_group_member` 禁言）。
 
-> **命令优先**：`/` 开头的 RawMessage 会**先**进 `commands.Dispatch`，命中命令后直接 sendReply 并短路，`on_message` 不会被调用。插件应优先用 `jn.command.register` 注册命令式交互，将 `on_message` 用于纯事件监听。
+> **命令优先**：`/` 开头的 RawMessage 会**先**进 `commands.Match`（`dispatchMessage` 内），命中命令后直接 sendReply 并短路，`on_message` 不会被调用。插件应优先用 `jn.command.register` 注册命令式交互，将 `on_message` 用于纯事件监听。
 
 ## 回调: `on_webhook`
 
@@ -700,7 +717,7 @@ function on_cronjob(event)
 end
 ```
 
-完整示例见 `data/pluggins/webhook-cron/`（on_cronjob + on_webhook）。
+完整示例见 `data/pluggins/webhook-cron/`（on_cronjob + on_webhook）。⚠ 该示例的 `pluggin.yaml:7-8` 只申请了 `onebot11`，**没有 `webhook` 权限**，因此其 `on_webhook` 实际不会被调用（引擎在 `onWebhook` 中按 `HasPermission("webhook")` 过滤，`pluggin.go:1261-1263`）；`on_cronjob` 不受影响。
 
 ## 回调: `on_notice`
 
@@ -813,7 +830,12 @@ end
 | `cache` | `cache.*` |
 | `t2i` | `t2i.*` |
 | `sandbox` | `sandbox.*` |
+| `rag` | `rag.*` |
 | `agent` | `agent.*` |
+| `llm` | `llm.*` |
+| `timer` | `timer.*` |
+| `file` | `file.*` |
+| （无需权限） | `config.*` / `metrics.*` 默认注入 |
 | (webhook 调用层过滤) | `on_webhook` 会被调用 |
 | (cronjob 调用层过滤) | `on_cronjob` 会被调用 |
 
@@ -830,7 +852,7 @@ type PluginEngine struct {
     basePath   string                   // 默认 "data/pluggins"
     adapter    SendAdapter              // OneBot11 完整 API
     db         *gorm.DB                 // 共享数据库（⚠ 无真实命名空间）
-    cache      *cache.Cache             // Redis（带 pluggin:<name>: 前缀）
+    cache      *cache.Cache             // Redis（带 pluggin:<插件目录名>: 前缀）
     t2i        *t2icaller.Client        // 启动时通常 nil; 运行时通过 agentOp 取
     sandbox    *sandboxcaller.Client
     dao        *dao.Bundle              // Agent 配置查询
@@ -871,30 +893,36 @@ type Manifest struct {
 var jnSDKSource string
 ```
 
-`ensureEmbeddedAssets`（`pluggin.go:2200`）每次启动强制覆盖落盘：`<basePath>/sdk/jn.lua` 与 `system/{pluggin.yaml,main.lua}`，确保 Docker 镜像在不同 bind-mount 上一致。`injectSDK` 把 `<basePath>/sdk/?.lua` 追加到 `package.path`，使 `require("jn")` 可用。
+`ensureEmbeddedAssets`（`pluggin.go:3726`）每次启动强制覆盖落盘：`<basePath>/sdk/jn.lua` 与 `system/{pluggin.yaml,main.lua}`，确保 Docker 镜像在不同 bind-mount 上一致。`injectSDK` 把 `<basePath>/sdk/?.lua` 追加到 `package.path`，使 `require("jn")` 可用。
 
 ### 3. 按 permissions gate 注入全局表（`injectBaseAPI`）
 
 ```go
-// pluggin.go:973
+// pluggin.go:1355
 func (pe *PluginEngine) injectBaseAPI(L *lua.LState, pluginName string, permissions []string) {
     // log / json 始终
-    if plugin.HasPermission("onebot11") { ... }
-    if plugin.HasPermission("http")    { ... }
-    if plugin.HasPermission("database")&&pe.db!=nil     { ... }
-    if plugin.HasPermission("cache")&&pe.cache!=nil     { ... }
-    if plugin.HasPermission("t2i")                     { ... }
-    if plugin.HasPermission("sandbox")                 { ... }
-    if plugin.HasPermission("agent")&&pe.dao!=nil      { ... }
+    if hasPerm("onebot11")                   { ... }  // :1391
+    if hasPerm("http")                       { ... }  // :1396
+    if hasPerm("database") && pe.db != nil    { ... }  // :1401
+    if hasPerm("cache") && pe.cache != nil    { ... }  // :1406
+    if hasPerm("t2i")                         { ... }  // :1411
+    if hasPerm("sandbox")                     { ... }  // :1416
+    if hasPerm("rag")                         { ... }  // :1421
+    if hasPerm("agent") && pe.dao != nil      { ... }  // :1426
+    if hasPerm("llm") && pe.llmAccess != nil  { ... }  // :1431
+    if hasPerm("timer")                       { ... }  // :1436
+    if hasPerm("file")                        { ... }  // :1441
+    pe.injectConfigAPI(L, pluginName)                 // :1446 无需权限
+    pe.injectMetrics(L, pluginName)                   // :1449 无需权限
 }
 ```
 
-`HasPermission(perm)`（`pluggin.go:960`）支持精确匹配或 `"*"` 通配。多余申请不会注入，日志会有提示。
+`HasPermission(perm)`（接收者是 `*LoadedPlugin`，`pluggin.go:1342`）支持精确匹配或 `"*"` 通配。多余/拼错的权限不会注入，也不会报错。
 
 ### 4. 命令 API（`injectCommandAPI`）
 
 ```go
-// pluggin.go:1055
+// pluggin.go:1467
 __jn_internal.register_command(path, handlerFn, opts)
    ├─ path 转 CommandNode 路径，逐级创建
    ├─ handler 注册到全局 key __jn_cmd_handler_<plugin>_<path> 保活（防 GC）
@@ -906,7 +934,7 @@ SDK `jn.command.register` 是它的薄包装。
 ### 5. t2i / sandbox 客户端运行时获取
 
 ```go
-// pluggin.go:1587 (t2i)
+// pluggin.go:2591 (t2i)
 getCurrentClient := func() *t2icaller.Client {
     if agentOp != nil {
         if c := genT2IClient(); c != nil { return c }
@@ -933,14 +961,14 @@ Dispatch(raw, event):
 | 层 | 位置 | 作用 |
 |----|------|------|
 | Manifest.System | `pluggin.yaml` `system: true` | 标记 |
-| `PluginEngine.IsSystem(name)` | `pluggin.go:187` | 引擎层 Unload 拒绝 |
+| `PluginEngine.IsSystem(name)` | `pluggin.go:387` | 引擎层 Unload 拒绝 |
 | Service Toggle/Delete | `internal/api/service` | API 层拒绝（返回 40028 PluginIsSystem） |
 
 确保 `system` 插件不可删/停，但**可启用**（支持 idempotent 场景）。
 
 ### 8. 事件回调的 PCall 安全
 
-`OnMessage`/`OnWebhook`/`OnCronjob` 用 `L.PCall` 保护调用，handler 抛错只记录日志不影响后续插件或 Agent。
+`on_message`（`dispatchMessage`，`pluggin.go:1045`）/ `on_webhook`（`onWebhook`，`pluggin.go:1259`）/ `on_cronjob`（`onCronJob`，`pluggin.go:1137`）用 `L.PCall` 保护调用，handler 抛错只记录日志不影响后续插件或 Agent。
 
 ---
 
@@ -949,10 +977,10 @@ Dispatch(raw, event):
 1. **QQ 号是 number 而非 string**：`send_private_msg("10086", ...)` 无效，Lua 字符串无法转 Go int64
 2. **`on_message` 只有有 `onebot11` 权限的插件才被调用**
 3. **`/cmd` 路径与 `on_message` 互斥**：命令命中后不进 `on_message`
-4. **`cache` 命名空间隔离（`pluggin:<name>:`），`database` 没有** — 后者权限请谨慎使用并在插件侧加自己的表前缀
+4. **`cache` 命名空间隔离（`pluggin:<插件目录名>:`，外层还有 `juan:`），`database` 没有** — 后者权限请谨慎使用并在插件侧加自己的表前缀
 5. **改 `pluggin.yaml` 后必须 reload**（Web toggle 或重启），不重新加载不会生效
 6. **系统插件目录 `system/` 每次启动被二进制覆盖** — 不要用它存自定义命令，自建插件目录
 7. **`database` 权限声称有命名空间隔离，但 `prefixSQL` 是桩未生效** — 任意 SQL，请重度谨慎
-8. **改 Lua 文件不 reload 看不到效果**：`PUT /plugins/:id/toggle` 先停再启才会重新 `DoFile`
-9. **handler 返回值约定** `(consumed, modified_event, skip_reply)`：consumed=true 短路（不调 Agent）；skip_reply=true 跳过回复策略
+8. **改 Lua 文件不 reload 看不到效果**：`PUT /api/v1/plugins/:id/toggle` 先停再启（或 `POST /api/v1/plugins/:id/reload`）才会重新 `DoFile`
+9. **handler 返回值约定** `(consumed, skip_reply)`（`modified_event` 已移除）：`consumed=true` 表示消息不进 Agent，但**不短路**——其余插件的 `on_message` 仍会执行完；`skip_reply=true` 跳过回复策略强制进 Agent
 10. **Webhook 与 CronJob 都不走 LLM**：仅喂插件，是外部集成与定时任务的钩子。若要让 Agent 处理外部输入，插件内 `onebot11.send_*_msg` 自己转发
