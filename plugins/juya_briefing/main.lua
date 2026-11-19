@@ -336,16 +336,37 @@ end
 -- ============================================================================
 -- 3. 定时器（30s 轮询）
 -- ============================================================================
+-- "HH:MM" → 当日分钟数；非法返回 nil
+local function hhmm_to_min(v)
+    local h, m = tostring(v):match("^(%d%d?):(%d%d)$")
+    if not h then return nil end
+    return tonumber(h) * 60 + tonumber(m)
+end
+
 local function check_timer()
     local today = os.date("%Y-%m-%d")
-    local hm = os.date("%H:%M")
+    local now_min = tonumber(os.date("%H")) * 60 + tonumber(os.date("%M"))
     local target = cfg_string("send_time", "11:30")
-    if #target == 4 then target = "0" .. target end
+    local target_min = hhmm_to_min(target)
+    -- 补发窗口：错过精确分钟（重载/重启/回调阻塞）后仍能在窗口内补发，0 = 不补发
+    local catchup = cfg_num("catchup_hours", 3) * 60
 
-    if hm == target and state.last_check_date ~= today then
-        state.last_check_date = today
-        jn.log.info(string.format("[%s] 到达发送时间 %s，抓取当期早报...", PLUGIN_NAME, target))
-        push_briefing(false)
+    if target_min and state.last_check_date ~= today then
+        local late = now_min - target_min
+        if late >= 0 and (late == 0 or (catchup > 0 and late <= catchup)) then
+            state.last_check_date = today
+            if late > 0 then
+                jn.log.info(string.format("[%s] 发送时间 %s 已过 %d 分钟，仍在补发窗口内，立即补发", PLUGIN_NAME, target, late))
+            else
+                jn.log.info(string.format("[%s] 到达发送时间 %s，抓取当期早报...", PLUGIN_NAME, target))
+            end
+            push_briefing(false)
+        elseif late > catchup and catchup >= 0 then
+            -- 超出补发窗口：当天放弃，记一次避免反复判断
+            state.last_check_date = today
+            jn.log.warn(string.format("[%s] 发送时间 %s 已过 %d 分钟，超出补发窗口（%s 小时），今日不发送",
+                PLUGIN_NAME, target, late, tostring(cfg_num("catchup_hours", 3))))
+        end
     end
 
     -- 手动触发：开关打开后执行一次（force，忽略日期与去重）

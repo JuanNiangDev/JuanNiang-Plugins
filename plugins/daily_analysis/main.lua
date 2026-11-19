@@ -488,11 +488,18 @@ end
 -- ============================================================================
 -- 7. 构建 LLM 提示词
 -- ============================================================================
+-- sections 解析在后文定义，这里先声明以便 prompt 复用（单一配置源）
+local parse_sections_config
+
 local function build_analysis_prompt(chat_stream, stats, persona_prompt)
-    local max_topics = tonumber(jn.config.get("max_topics") or "5") or 5
-    local max_quotes = tonumber(jn.config.get("max_golden_quotes") or "5") or 5
-    local max_titles = tonumber(jn.config.get("max_user_titles") or "6") or 6
-    local max_critiques = tonumber(jn.config.get("max_critiques") or "4") or 4
+    -- 单一配置源：生成数量直接取 sections 的「条数上限」列
+    -- 0 = 关闭该板块（不要求生成）；-1 = 不限；>0 = 不多于 N；未配置该板块按 0 处理
+    local caps = {}
+    for _, sec in ipairs(parse_sections_config()) do caps[sec.key] = sec.cap end
+    local max_topics = caps.topics or 0
+    local max_quotes = caps.quotes or 0
+    local max_titles = caps.titles or 0
+    local max_critiques = caps.critique or 0
     local use_persona = jn.config.get("use_bot_persona") or "deep"
     local topics_rule = ""
     if max_topics > 0 then
@@ -975,10 +982,10 @@ local SECTION_DEF = {
     stats = "📈 本次分析统计",
 }
 
-local function parse_sections_config()
+parse_sections_config = function()
     local list = jn.config.get("sections")
     if type(list) ~= "table" or #list == 0 then
-        list = { "overview||1", "top||1", "topics||5", "quotes||5", "titles||6",
+        list = { "overview||1", "top||1", "topics||-1", "quotes||-1", "titles||6",
                  "critique||4", "projects||20", "news||70", "stats||1" }
     end
     local out = {}

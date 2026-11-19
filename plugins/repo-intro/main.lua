@@ -253,6 +253,17 @@ local function gh_headers()
     return h
 end
 
+-- 数据集文件树（HF: /api/datasets/../tree/main；MS: /repo/tree?Revision=master）
+local function dataset_tree_url(e)
+    if e.sub ~= "datasets" then return nil end
+    if e.kind == "hf" then
+        return "https://" .. hf_host() .. "/api/datasets/" .. e.owner .. "/" .. e.repo .. "/tree/main"
+    elseif e.kind == "ms" then
+        return "https://modelscope.cn/api/v1/datasets/" .. e.owner .. "/" .. e.repo .. "/repo/tree?Revision=master"
+    end
+    return nil
+end
+
 -- 返回下一步 README 的 (url, stage)；nil 表示直接进 LLM（数据集已内嵌 README）
 local function readme_url_for(e)
     if e.kind == "github" then
@@ -391,12 +402,38 @@ local function extract_meta(e, data)
             end
             if not param_count then param_count = tonumber(st.total) or nil end
         end
+        -- 数据集：把 tags / cardData.configs / 文件规模带上，供 LLM 描述内容
+        local ds_files, ds_configs = nil, nil
+        if e.sub == "datasets" then
+            if type(data.siblings) == "table" then
+                ds_files = #data.siblings
+            end
+            local cd = data.cardData
+            if type(cd) == "table" and type(cd.configs) == "table" then
+                ds_configs = {}
+                for i, c in ipairs(cd.configs) do
+                    if i > 6 then break end
+                    local files = {}
+                    for _, f in ipairs(c.data_files or {}) do
+                        files[#files + 1] = tostring(f.path or "")
+                    end
+                    ds_configs[#ds_configs + 1] = {
+                        name = tostring(c.config_name or ""),
+                        splits = #(c.data_files or {}),
+                        files = files,
+                    }
+                end
+            end
+        end
         return {
             name = data.id or (e.owner .. "/" .. e.repo),
             pipeline = data.pipeline_tag,
             library = data.library_name,
             downloads = data.downloads,
             likes = data.likes,
+            tags = data.tags,
+            files_count = ds_files,
+            configs = ds_configs,
             params = param_count,
             -- HF 头像在 avatar 阶段抓 org 页提取 cdn-avatars（og:image 是横幅大图，非头像），
             -- 这里不设静态头像；fetch 失败时模板灰圆兜底
@@ -410,6 +447,8 @@ local function extract_meta(e, data)
             chinese_name = d.ChineseName,
             downloads = d.Downloads,
             likes = d.Likes,
+            size = d.Size,
+            license = d.License,
             readme_content = d.ReadmeContent,
             avatar = (d.Avatar ~= nil and d.Avatar ~= "") and d.Avatar or nil,
         }
@@ -418,9 +457,9 @@ end
 
 -- 每仓库 LLM 结果缓存（值：JSON {type,title,summary,install,card_url}）
 local function repo_cache_key(e)
-    -- v3：参数量/上下文/类型 chip 与头像逻辑升级，且不再复用空结果缓存
+    -- v4：数据集总结加入文件树/字段描述，旧缓存作废
     -- （旧 key 会把 LLM 失败时写下的空摘要缓存满 7 天，表现为只发「📦 + 链接」）
-    return "intro:v3:" .. e.key
+    return "intro:v4:" .. e.key
 end
 
 local function repo_cache_get(e)
@@ -514,7 +553,7 @@ summary 要点（按子类型，均遵守零.8 反罗列、精炼）：SDK/库�
 - OCR·文档理解：语言、版面/表格/公式能力、是否端到端
 - 机器人·具身：VLA/世界模型、输入输出模态、参数量
 - Omni：输入输出模态、是否流式语音、语种数、实时交互
-- 数据集：规模、语言、领域、任务类型
+- 数据集：**必须**根据提供的 file_list（文件名/目录）、configs（配置与 split 名）、tags（format/modality/size_categories）与 README，写清：① 数据内容是什么（字段/表头/主题）；② 文件组织（有哪些文件或子集）；③ 规模（条数/文件数，有则写）；④ 语言与格式。看不到具体字段时，用文件名与 README 推断，禁止编造字段名。
 - Space：SDK、功能、能否在线使用
 
 【三、输出格式】严格只输出如下 JSON（不要输出 JSON 以外的任何内容，不要用代码块包裹）：
@@ -533,9 +572,24 @@ local function repo_input_for_llm(e, idx)
     elseif e.kind == "hf" then
         t.name = m.name; t.pipeline = m.pipeline; t.library = m.library
         t.downloads = m.downloads; t.likes = m.likes; t.params = m.params
+        if e.sub == "datasets" then
+            t.kind = "dataset"
+            t.tags = m.tags
+            t.files_count = m.files_count
+            t.configs = m.configs
+            t.file_list = e.file_list
+            t.sample = e.sample
+        end
     elseif e.kind == "ms" then
         t.name = m.name; t.description = m.desc; t.chinese_name = m.chinese_name
         t.downloads = m.downloads; t.likes = m.likes
+        if e.sub == "datasets" then
+            t.kind = "dataset"
+            t.size = m.size
+            t.license = m.license
+            t.file_list = e.file_list
+            t.sample = e.sample
+        end
     end
     local s = "【仓库 " .. idx .. "】" .. jn.json.encode(t)
     if e.readme and e.readme ~= "" then
@@ -1155,9 +1209,16 @@ local function compose_section(e)
     elseif llm and llm.title and llm.title ~= "" then
         desc_line = llm.title
     end
+    -- 数据集：📝 行统一成「xxx 数据集」，方便一眼识别
+    if e.sub == "datasets" and desc_line and desc_line ~= "" and not desc_line:find("数据集", 1, true) then
+        desc_line = desc_line .. " 数据集"
+    end
     -- 兜底：README 拉取失败/LLM 没给标题时，至少用类型名撑一行，避免只剩「📦 + 链接」
     if not desc_line and llm and llm.type and llm.type ~= "" then
         desc_line = llm.type
+    end
+    if not desc_line and e.sub == "datasets" then
+        desc_line = e.repo .. " 数据集"
     end
     if desc_line then
         lines[#lines + 1] = "📝 " .. desc_line
@@ -1318,6 +1379,17 @@ local function handle_meta(ctx, result, err)
     end
     e.meta = extract_meta(e, data)
 
+    -- 数据集：先抓文件树（必须在 README 的提前 return 之前，MS 数据集走内嵌 README 分支）
+    local dturl = dataset_tree_url(e)
+    if dturl then
+        batch.pending = batch.pending + 1
+        local ct = copy_ctx(ctx)
+        ct.stage = "dataset_tree"
+        local drid = jn.http.get_async(dturl, ct)
+        if not drid or drid == 0 then
+            batch.pending = batch.pending - 1
+        end
+    end
     local url, stage = readme_url_for(e)
     if not url then
         batch.pending = batch.pending - 1 -- 无需 README（如数据集内嵌）
@@ -1350,6 +1422,115 @@ local function handle_meta(ctx, result, err)
 end
 
 -- readme 阶段
+-- 数据集样例 URL：挑一个 csv/jsonl/json，用 Range 只取前 2KB 推字段/表头
+local function dataset_sample_url(e, files)
+    if not files then return nil end
+    local pick = nil
+    local prefer = { "%.csv$", "%.jsonl$", "%.json$" }
+    for _, pat in ipairs(prefer) do
+        for _, f in ipairs(files) do
+            if f:sub(-1) ~= "/" and f:lower():match(pat) then pick = f break end
+        end
+        if pick then break end
+    end
+    if not pick then return nil end
+    if e.kind == "hf" then
+        return "https://" .. hf_host() .. "/datasets/" .. e.owner .. "/" .. e.repo
+            .. "/resolve/main/" .. pick
+    elseif e.kind == "ms" then
+        return "https://modelscope.cn/api/v1/datasets/" .. e.owner .. "/" .. e.repo
+            .. "/repo?Revision=master&FilePath=" .. pick
+    end
+    return nil
+end
+
+-- 从样例文本推字段：csv 首行当表头；jsonl/json 取首条对象的键
+local function sample_fields(body)
+    if not body or body == "" then return nil end
+    local head = body:sub(1, 2000)
+    local first_line = head:match("^([^\n]+)")
+    if not first_line or first_line == "" then return nil end
+    if first_line:find(",", 1, true) and not first_line:find("{", 1, true) then
+        local cols = {}
+        for c in first_line:gmatch("([^,]+)") do
+            c = c:gsub('^%s*"?', ""):gsub('"%s*$', ""):gsub("%s+$", "")
+            if c ~= "" then cols[#cols + 1] = c end
+            if #cols >= 20 then break end
+        end
+        if #cols > 1 then return table.concat(cols, ", ") end
+        return nil
+    end
+    local obj = first_line:match("^{.*}") or head:match("(%b{})")
+    if obj then
+        local keys = {}
+        for k in obj:gmatch('"([%w_%-%./ ]+)"%s*:') do
+            keys[#keys + 1] = k
+            if #keys >= 20 then break end
+        end
+        if #keys > 0 then return table.concat(keys, ", ") end
+    end
+    return nil
+end
+
+-- 数据集文件树：解析出文件/目录列表，供 LLM 描述数据结构
+local function handle_dataset_tree(ctx, result, err)
+    local batch = ctx.batch
+    local e = batch.entries[ctx.idx]
+    if not err and result and result.status == 200 and result.body and result.body ~= "" then
+        local d = jn.json.decode(result.body)
+        local list = {}
+        if e.kind == "hf" and type(d) == "table" then
+            for _, x in ipairs(d) do
+                if type(x) == "table" then
+                    local p = tostring(x.path or "")
+                    if x.type == "directory" then p = p .. "/" end
+                    list[#list + 1] = p
+                end
+            end
+        elseif e.kind == "ms" and type(d) == "table" then
+            local dd = d.Data or d
+            for _, x in ipairs(dd.Files or {}) do
+                if type(x) == "table" then
+                    list[#list + 1] = tostring(x.Path or x.Name or "")
+                end
+            end
+        end
+        if #list > 0 then
+            local full = list
+            local maxn = 40
+            if #list > maxn then
+                local cut = {}
+                for i = 1, maxn do cut[i] = full[i] end
+                cut[#cut + 1] = "…(共 " .. #full .. " 项)"
+                list = cut
+            end
+            e.file_list = list
+            local surl = dataset_sample_url(e, full)
+            if surl then
+                batch.pending = batch.pending + 1
+                local cs = copy_ctx(ctx)
+                cs.stage = "dataset_sample"
+                local srid = jn.http.get_async(surl, cs, { ["Range"] = "bytes=0-2047" })
+                if not srid or srid == 0 then
+                    batch.pending = batch.pending - 1
+                end
+            end
+        end
+    end
+    batch.pending = batch.pending - 1
+end
+
+-- 数据集样例：只保留表头/字段，避免把整行数据送进 LLM
+local function handle_dataset_sample(ctx, result, err)
+    local batch = ctx.batch
+    local e = batch.entries[ctx.idx]
+    if not err and result and result.status and result.status < 400 and result.body then
+        local fields = sample_fields(result.body)
+        if fields then e.sample = fields end
+    end
+    batch.pending = batch.pending - 1
+end
+
 local function handle_readme(ctx, result, err)
     local batch = ctx.batch
     local e = batch.entries[ctx.idx]
@@ -1447,6 +1628,10 @@ function on_http_response(req_id, ctx, result, err)
         handle_readme(ctx, result, err)
     elseif ctx.stage == "readme_raw" then
         handle_readme_raw(ctx, result, err)
+    elseif ctx.stage == "dataset_tree" then
+        handle_dataset_tree(ctx, result, err)
+    elseif ctx.stage == "dataset_sample" then
+        handle_dataset_sample(ctx, result, err)
     elseif ctx.stage == "avatar" then
         handle_avatar(ctx, result, err)
     end

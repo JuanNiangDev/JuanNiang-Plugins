@@ -28,29 +28,9 @@ configs:
     description: "本地数据库历史消息保留天数，分析完成后自动清理过期记录（默认7天，可设3-30天）"
     default: "7"
 
-  - key: max_topics
-    type: string
-    label: "核心话题提取数"
-    description: "分析报告中显示的最大话题数量（-1 表示不限，0 表示关闭话题分析）"
-    default: "5"
 
-  - key: max_golden_quotes
-    type: string
-    label: "群圣经/高光金句数"
-    description: "分析报告中显示的最大金句数量（-1 表示不限，0 表示关闭金句分析）"
-    default: "5"
 
-  - key: max_user_titles
-    type: string
-    label: "群友特色头衔数"
-    description: "分析报告中评选出的活跃群友头衔数量（-1 表示不限，0 表示关闭头衔画像）"
-    default: "6"
 
-  - key: max_critiques
-    type: string
-    label: "聊天质量分析维度数"
-    description: "聊天质量划分为几个维度进行剖析（-1 表示不限，0 表示关闭质量点评板块）"
-    default: "4"
 
   - key: use_bot_persona
     type: string
@@ -89,8 +69,8 @@ configs:
     default:
       - "overview|📊 群聊概况|1"
       - "top|🔥 发言主力军|1"
-      - "topics|🔥 今日核心话题|5"
-      - "quotes|📖 群圣经 / 高光发言|5"
+      - "topics|🔥 今日核心话题|-1"
+      - "quotes|📖 群圣经 / 高光发言|-1"
       - "titles|👑 群友特色头衔 / 画像|6"
       - "critique|🎭 聊天质量分析与人设点评|4"
       - "projects|🧪 开源项目列表|20"

@@ -23,6 +23,12 @@ configs:
     description: "HH:MM 格式，默认 11:30；当天没出刊则跳过，不补发"
     default: "11:30"
 
+  - key: catchup_hours
+    type: string
+    label: "补发窗口（小时）"
+    description: "发送时间已过但没发出去（插件重载/容器重启/回调阻塞）时，在窗口内仍补发当日早报；0 = 不补发，只在发送时间当分钟发"
+    default: "3"
+
   - key: feeds
     type: list
     label: "数据源"

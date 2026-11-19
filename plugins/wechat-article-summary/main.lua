@@ -505,7 +505,8 @@ local function via_text(target, text, quote_id)
     return jn.onebot11.send_private_msg(target.target_id, segs)
 end
 
--- 投递：默认一条合并转发（每条链接一个节点）；私聊或转发不可用时逐条/分块兜底
+-- 投递：≥ merge_threshold（默认 3）篇才合并转发，否则每篇一条普通消息（文本 + 封面）
+-- merge_forward 关掉则永不合并转发；转发能力不可用时也走普通消息
 local function deliver(batch)
     local entries = {}
     for _, e in ipairs(batch.entries) do
@@ -516,7 +517,8 @@ local function deliver(batch)
     if #entries == 0 then return end -- 全部失败：静默
 
     local t = batch.target
-    local want_forward = cfg_bool("merge_forward", true)
+    local threshold = math.max(2, cfg_num("batch_threshold", 3))
+    local want_forward = cfg_bool("merge_forward", true) and #entries >= threshold
     local can_forward = (t.message_type == "group" and jn.onebot11.send_group_forward_msg_sync ~= nil)
         or (t.message_type ~= "group" and jn.onebot11.send_private_forward_msg_sync ~= nil)
 
@@ -535,37 +537,20 @@ local function deliver(batch)
             _, ferr = jn.onebot11.send_private_forward_msg_sync(t.target_id, nodes)
         end
         if ferr == nil then return end
-        jn.log.warn("[wechat-article-summary] 合并转发失败，改用文本兜底: " .. tostring(ferr))
+        jn.log.warn("[wechat-article-summary] 合并转发失败，改用普通消息: " .. tostring(ferr))
     end
 
-    -- 群聊兜底：合并成 ≤1500 字文本（多节点逐条发就是刷屏，禁止）
-    if t.message_type == "group" then
-        local parts = {}
-        for _, e in ipairs(entries) do parts[#parts + 1] = compose_section(e) end
-        local chunks = chunk_text(table.concat(parts, "\n\n\n"), 1500)
-        for i, c in ipairs(chunks) do
-            via_text(t, c, (i == 1 and t.reply_quote) and t.message_id or nil)
-        end
-        -- 封面全部跟在文本之后（每篇一张）
-        if cfg_bool("send_cover", true) then
-            for _, e in ipairs(entries) do
-                local img = cover_of(e)
-                if img then
-                    jn.onebot11.send_group_msg(t.target_id, { { type = "image", data = { file = img } } })
-                end
-            end
-        end
-        return
-    end
-
-    -- 私聊兜底：每条链接一条消息（1:1，不存在刷屏）
+    -- 普通转发：每篇一条消息（文本总结 + 封面），首条带引用
     for i, e in ipairs(entries) do
-        via_text(t, compose_section(e), (i == 1 and t.reply_quote) and t.message_id or nil)
-        if cfg_bool("send_cover", true) then
-            local img = cover_of(e)
-            if img then
-                jn.onebot11.send_private_msg(t.target_id, { { type = "image", data = { file = img } } })
-            end
+        local segs = section_segments(e)
+        if i == 1 and t.reply_quote and t.message_id ~= nil
+            and tostring(t.message_id) ~= "" and tostring(t.message_id) ~= "0" then
+            table.insert(segs, 1, { type = "reply", data = { id = tostring(t.message_id) } })
+        end
+        if t.message_type == "group" then
+            jn.onebot11.send_group_msg(t.target_id, segs)
+        else
+            jn.onebot11.send_private_msg(t.target_id, segs)
         end
     end
 end
@@ -883,14 +868,18 @@ function on_message(event)
         return true, false
     end
 
-    if b.seq == 0 then
+    -- 窗口策略：只有 1 篇时等 single_window（默认 10s），≥2 篇起等满 batch_window
+    local wait = (#b.entries >= 2) and window or cfg_num("single_window", 10)
+    if wait <= 0 then
+        flush_buffer(key)
+        return true, false
+    end
+    if jn.timer and jn.timer.after then
         buf_seq = buf_seq + 1
-        b.seq = buf_seq
-        if jn.timer and jn.timer.after then
-            jn.timer.after(window, { action = "wx_batch_flush", key = key, seq = b.seq })
-        else
-            flush_buffer(key) -- 无 timer 能力时立即发送
-        end
+        b.seq = buf_seq -- 旧 timer 因代际号失效
+        jn.timer.after(wait, { action = "wx_batch_flush", key = key, seq = b.seq })
+    else
+        flush_buffer(key) -- 无 timer 能力时立即发送
     end
     return true, false -- 消费：不进 Agent
 end
