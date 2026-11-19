@@ -60,11 +60,14 @@ https://github.com/ericzakariasson/scandinavian-design
 
 ## HF / ModelScope 模型卡片
 
-HF/MS 仓库渲染 `templates/card-6.html`（GitHub 仍用 card-5）。模型卡展示：标题 + 仓库名、HF/MS 组织头像、**参数量 + 上下文（一行）**、**输入类型（文本/图片/音频/视频/PDF 图标，一行）**、**价格块**；去掉了 GitHub 水印图标与模型简介。
+HF/MS 仓库渲染 `templates/card-6.html`（GitHub 仍用 card-5）。模型卡展示：标题 + 仓库名、HF/MS 作者头像、**参数量 / 上下文（或「类型」）**、**输入类型（文本/图片/音频/视频/PDF 图标，一行）**、**价格块**；去掉了 GitHub 水印图标与模型简介。
 
-- 参数量优先取 HF 元数据 `safetensors.total`（ModelScope 无该字段），模型库兜底，未知显示"闭源"
-- 价格按币种：国产模型（含 CNY 档）用 ¥，国外用 $；展示输入/输出、思考（不同于输出价时）、缓存、闲时档（off_peak）、不同上下文分段（tokenTier）
-- 头像：MS 直连 `resouces.modelscope.cn`；HF 走 `wsrv.nl` 图片代理（T2I 渲染器网络无法直连 huggingface CDN，失败时灰圆占位）
+- 参数量取数优先级：HF 元数据 `safetensors.parameters` 逐档求和（`total` 是参数个数，不是字节）→ 模型库 → 仓库名里的规模（65B / 27B / 24.7M）→ README 中含「参数量/参数/param」的行 → 兜底「—」。**有权重的开源模型绝不显示"闭源"**
+- 上下文：模型库 `ctx` 优先，README 中含「上下文/context」的行兜底（支持 32k / 1M / 100 万）
+- 参数量与上下文都拿不到（TTS / ASR / 3D 生成 / 视频生成 / 工作流等非 LLM 模型）时，第一个 chip 改为**类型**，不再显示空的参数量
+- 价格：`pr`（llmrates，含 CNY/USD、闲时、上下文分段、思考/缓存）优先；`pr` 为空时用 `cost` 兜底（models.dev / newapiratio，USD/百万 token）。国产厂商只有 USD 档时按 7.2 折算 ¥。都没有才显示「价格 · 开放权重」（库内无该模型）或「价格 · 未公开」（库内有条目但缺价），绝不编造
+- 模型库查找：先用完整 id（`MiniMax/MiniMax-M3.1-Flash`），查不到再退到纯仓库名（`minimaxm31flash`）——库里的别名多按纯模型名登记
+- 头像：HF 抓 org 页 `cdn-avatars`、MS 抓模型页 `resouces.modelscope.cn/avatar`（API 的 `Avatar` 字段是平台默认图）；HF 头像走 `wsrv.nl` 代理（T2I 渲染器直连 HF CDN 不通），MS 直连；失败时灰圆占位
 
 ### 模型信息收集链路（data/）
 

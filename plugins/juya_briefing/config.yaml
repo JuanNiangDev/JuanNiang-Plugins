@@ -1,0 +1,68 @@
+configs:
+  - key: enabled
+    type: bool
+    label: "启用橘鸦早报推送"
+    description: "关闭后定时任务不再发送（手动触发也跳过）"
+    default: true
+
+  - key: target_type
+    type: string
+    label: "推送目标类型"
+    description: "group=发到群；private=发给个人 QQ（测试用）"
+    default: "group"
+
+  - key: target_groups
+    type: list
+    label: "推送目标列表"
+    description: "target_type=group 时为群号列表（可配多个，逐群发送）；private 时取第一项作为 QQ 号。默认空，未配置时不发送"
+    default: []
+
+  - key: send_time
+    type: string
+    label: "每日发送时间"
+    description: "HH:MM 格式，默认 11:30；当天没出刊则跳过，不补发"
+    default: "11:30"
+
+  - key: feeds
+    type: list
+    label: "数据源"
+    description: "第一项为 RSS 地址；第二项为当期页面模板（{date} 会替换成当天日期）。当期页面 404 时回退 RSS 最新一期，日期不是今天则不发送"
+    default:
+      - "https://daily.juya.uk/rss.xml"
+      - "https://daily.juya.uk/issues/{date}/"
+
+  - key: max_items
+    type: string
+    label: "最多推送新闻条数"
+    description: "跨分类合计上限，默认 70；超出部分丢弃"
+    default: "70"
+
+  - key: summary_max_chars
+    type: string
+    label: "摘要截断字数"
+    description: "每条新闻摘要最多保留多少字，默认 160"
+    default: "160"
+
+  - key: links_max
+    type: string
+    label: "每条新闻最多来源链接数"
+    description: "同一事件多家报道时，最多列几个来源链接（默认 6）"
+    default: "6"
+
+  - key: node_nickname
+    type: string
+    label: "转发卡片展示昵称"
+    description: "合并转发卡片里各消息节点显示的名字"
+    default: "橘鸦·AI早报"
+
+  - key: forward
+    type: bool
+    label: "使用合并转发"
+    description: "开启则整期做成一条合并转发；关闭则按节点逐条发送纯文本"
+    default: true
+
+  - key: manual_trigger
+    type: bool
+    label: "立即触发一次"
+    description: "保存配置时若打开，立即抓取并推送当期（忽略时间与去重），执行后请手动关回"
+    default: false

@@ -161,15 +161,15 @@
 <body>
   <!-- HF/MS 模型卡：头像 + 标题/仓库名 + 参数/上下文 + 输入类型 + 价格（无 github 图标、无简介） -->
 
-  <div class="avatar"><img src="{{AVATAR}}" onerror="this.style.display='none'" alt=""></div>
+  {{AVATAR_HTML}}
 
-  <div class="title"><span class="owner">{{OWNER}}</span><span class="slash">/</span><span class="repo">{{REPO}}</span></div>
+  <div class="title{{TITLE_CLASS}}"><span class="owner">{{OWNER}}</span><span class="slash">/</span><span class="repo">{{REPO}}</span></div>
 
   <!-- 参数量 + 上下文（一行） -->
   <div class="meta-line">{{PARAMS_CHIP}}{{CONTEXT_CHIP}}</div>
 
   <!-- 输入类型（一行 icons） -->
-  <div class="mod-line"><span class="mod-hint">输入</span>{{MODALITY_HTML}}</div>
+  <div class="mod-line">{{MOD_HINT}}{{MODALITY_HTML}}</div>
 
   <!-- 价格块 -->
   <div class="price-block">{{PRICING_HTML}}</div>
@@ -181,6 +181,8 @@
     .avatar { position: absolute; right: 60px; top: 50px; width: 140px; height: 140px; border-radius: 50%; background-color: #d0d7de; overflow: hidden; }
     .avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; }
     .title { position: absolute; left: 60px; right: 240px; top: 60px; display: flex; flex-wrap: wrap; font-size: 48px; line-height: 55px; }
+    /* 没有作者头像时：标题占满整行，右上角留空 */
+    .title.no-avatar { right: 60px; }
     .title .owner, .title .slash { color: #656d76; font-weight: 400; white-space: nowrap; }
     .title .repo { color: #1f2328; font-weight: 700; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 

@@ -2,10 +2,8 @@ configs:
   - key: target_groups
     type: list
     label: "总结群列表"
-    description: "参与每日分析与消息收集的目标群聊列表（在后台添加/删除群号）"
-    default:
-      - "641370366"
-      - "822169910"
+    description: "参与每日分析与消息收集的目标群聊列表（在后台添加/删除群号）。默认空：未配置时不会总结任何群"
+    default: []
   - key: text_provider_id
     type: string
     label: "指定总结文本模型"
@@ -17,6 +15,12 @@ configs:
     label: "每日总结时间"
     description: "每日自动触发分析的时间点（HH:MM 格式，例如 23:00），将总结此前 24 小时的群聊记录"
     default: "23:00"
+
+  - key: report_retention_days
+    type: string
+    label: 历史报告保留天数
+    description: 成功生成的日报会落库保存，可跨容器/插件重启查询；默认保留 90 天
+    default: "90"
 
   - key: retention_days
     type: string
@@ -72,11 +76,46 @@ configs:
     description: "开启后在生成分析时会发送「正在生成分析中」的提示，关闭则完全静默仅发送最终转发"
     default: false
 
+  - key: report_mode
+    type: string
+    label: "发送模式"
+    description: "forward=整份做成一条合并转发（默认）；per_section=每个板块合成一条；per_item=每条目一条消息（会刷屏）"
+    default: "forward"
+
+  - key: sections
+    type: list
+    label: "板块：顺序 | 标题 | 条数上限"
+    description: "每行 key|标题|上限。key 可取 overview/topics/quotes/titles/critique/projects/news/stats；上限 0 关闭该板块，-1 不限；行的先后即发送顺序"
+    default:
+      - "overview|📊 群聊概况|1"
+      - "top|🔥 发言主力军|1"
+      - "topics|🔥 今日核心话题|5"
+      - "quotes|📖 群圣经 / 高光发言|5"
+      - "titles|👑 群友特色头衔 / 画像|6"
+      - "critique|🎭 聊天质量分析与人设点评|4"
+      - "projects|🧪 开源项目列表|20"
+      - "news|📰 今日新闻|70"
+      - "stats|📈 本次分析统计|1"
+
+  - key: news_feeds
+    type: list
+    label: "新闻数据源"
+    description: "第一项填 RSS 地址；第二项填当期页面模板（{date} 会替换成当天日期）。当天页面抓不到时回退 RSS 最新一期"
+    default:
+      - "https://daily.juya.uk/rss.xml"
+      - "https://daily.juya.uk/issues/{date}/"
+
+  - key: news_event_merge
+    type: bool
+    label: "新闻按事件合并"
+    description: "开启后用 LLM 把描述同一事件的公众号文章与今日早报条目合并成一条，并保留全部来源链接（公众号原文 + 早报来源）"
+    default: true
+
   - key: custom_sender_name
     type: string
     label: "转发卡片展示昵称"
-    description: "合并转发卡片内各消息节点展示的自定义昵称"
-    default: "奶蛙·群聊日报"
+    description: "合并转发卡片内各消息节点展示的昵称；留空则自动用「机器人昵称·群聊日报」"
+    default: ""
 
   - key: manual_trigger
     type: bool
@@ -95,3 +134,45 @@ configs:
     label: "立即触发发送目标"
     description: "总结结果发送的目标群号或好友QQ号（留空则发回被总结群本身）"
     default: ""
+
+  - key: expand_forward
+    type: bool
+    label: 展开合并转发内容
+    description: 分析前用 get_forward_msg 读取合并转发内层消息，按「昵称：正文」并入语料
+    default: true
+
+  - key: forward_node_limit
+    type: string
+    label: 转发最多展开条数
+    description: 单条合并转发最多展开几条内层消息，默认 10
+    default: "10"
+
+  - key: forward_node_chars
+    type: string
+    label: 转发每条字数上限
+    description: 合并转发内层每条最多取多少字，默认 120
+    default: "120"
+
+  - key: vision_describe
+    type: bool
+    label: 图片内容描述
+    description: 用 image_model Provider 描述图片内容，让总结能覆盖围绕图片展开的讨论
+    default: true
+
+  - key: vision_provider
+    type: string
+    label: 图片描述模型
+    description: image_model Provider 名称，留空用系统当前启用的图像模型
+    default: "wb-api-image"
+
+  - key: vision_image_limit
+    type: string
+    label: 每份报告图片描述上限
+    description: 超过上限的图片只记「[图片]」，默认 10，防止总结耗时过长
+    default: "10"
+
+  - key: expand_reply
+    type: bool
+    label: 展开回复引用
+    description: 把被回复消息的前 80 字作为上下文并入语料
+    default: true
