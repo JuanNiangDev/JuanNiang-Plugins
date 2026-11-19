@@ -122,6 +122,9 @@ end
 
 local function clean_message_text(raw)
     if not raw or raw == "" then return "" end
+    -- 刻意保留图片与合并转发的 CQ 码：这两类搬运内容的正文会在语料展开阶段
+    -- 由 jn.llm.vision_url / jn.onebot11.get_forward_msg_sync 补齐（见 expand_cq_content），
+    -- 若在此剥离就永远进不了总结语料；只移除回复引用与机器人指令。
     -- 移除回复引用 CQ 码
     local cleaned = raw:gsub("%[CQ:reply,id=%-?%d+%]", "")
     -- 过滤常规以 / 或 # 或 ! 开头的控制命令
@@ -1326,7 +1329,47 @@ local function match_text_provider(input_str, providers)
     return nil
 end
 
-function do_group_analysis(group_id, send_target_id, is_private_target)
+local function do_group_analysis(group_id, send_target_id, is_private_target, force)
+    group_id = tonumber(group_id)
+    if not group_id then return false, "非法群号" end
+
+    local cur_date = os.date("%Y-%m-%d")
+    local cache_key = "last_analyzed:" .. tostring(group_id)
+
+    -- 非强制触发（自动定时器或 CronJob）时，执行防并发与防重复检查
+    if not force then
+        if state.is_analyzing and state.is_analyzing[group_id] then
+            jn.log.warn(string.format("[%s] 群 %d 正在执行分析中，跳过并发调用", PLUGIN_NAME, group_id))
+            return false, "正在执行中"
+        end
+
+        local last_date = nil
+        if jn.cache and jn.cache.get then
+            last_date = jn.cache.get(cache_key)
+        end
+        if not last_date and state.last_analyzed_date then
+            last_date = state.last_analyzed_date[group_id]
+        end
+
+        if last_date == cur_date then
+            jn.log.info(string.format("[%s] 群 %d 今日 (%s) 已完成过群总结报告，跳过重复执行", PLUGIN_NAME, group_id, cur_date))
+            return true, "今日已完成"
+        end
+
+        -- 立即占位并落库当日标记，确保同一群同一日仅执行一次
+        -- （覆盖消息不足、LLM 失败、发送失败等所有分支，彻底杜绝双触发重复推送）
+        state.last_analyzed_date = state.last_analyzed_date or {}
+        state.last_analyzed_date[group_id] = cur_date
+        state.last_daily_date = cur_date
+        if jn.cache and jn.cache.set then
+            jn.cache.set(cache_key, cur_date, 86400 * 2)
+        end
+    end
+
+    state.is_analyzing = state.is_analyzing or {}
+    state.is_analyzing[group_id] = true
+
+    local function run_task()
     group_id = tonumber(group_id)
     if not group_id then return false, "非法群号" end
 
@@ -1435,7 +1478,7 @@ function do_group_analysis(group_id, send_target_id, is_private_target)
     local resp_text, err = jn.llm.chat({
         { role = "system", content = persona_prompt },
         { role = "user", content = prompt },
-    })
+    }, { timeout = 300 })
 
     -- 若之前临时切换了 Provider，切回原 Provider 保持全局环境纯净
     if target_provider_str ~= "" and old_provider_id and jn.agent and jn.agent.switch_provider then
@@ -1486,6 +1529,15 @@ function do_group_analysis(group_id, send_target_id, is_private_target)
     prune_expired_messages()
 
     return true, nil
+    end
+
+    local ok, res, err_msg = pcall(run_task)
+    state.is_analyzing[group_id] = nil
+    if not ok then
+        jn.log.error(string.format("[%s] 群 %d 总结执行异常: %s", PLUGIN_NAME, group_id, tostring(res)))
+        return false, tostring(res)
+    end
+    return res, err_msg
 end
 
 -- ============================================================================
@@ -1539,7 +1591,7 @@ function run_manual_trigger()
     end
 
     for _, gid in ipairs(target_groups) do
-        do_group_analysis(gid, send_target or gid, is_private)
+        do_group_analysis(gid, send_target or gid, is_private, true)
     end
 
     state.manual_running = false
