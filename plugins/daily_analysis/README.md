@@ -57,6 +57,21 @@
 相关配置：`expand_forward`、`forward_node_limit`、`forward_node_chars`、
 `vision_describe`、`vision_provider`、`vision_image_limit`、`expand_reply`。
 
+## 来源复用（repo-intro / 公众号总结）
+
+「开源项目列表」和「今日新闻」不再让 LLM 重新猜，直接复用群里已经发过的本机总结：
+
+- **bot 输出入库**：`filter_bot_messages` 只拦普通回复；带零宽水印的本机输出
+  （repo-intro 卡片、公众号总结）会写入消息表，作为来源索引。分析语料、统计、
+  话题、金句一律按 `user_id == bot` 排除，不会自我总结。
+- **合并转发要展开**：公众号总结按 `merge_forward` 合并转发下发，`raw_message`
+  只有 `[CQ:forward,id=…]`，水印在节点正文里。入库与采集时会全量展开节点
+  （不截断、保留换行），再按 `📰 标题` / 摘要 / `🔗 原文链接` 解析，按 URL
+  关联到群内分享的链接。
+- **拿不到标题的裸链接不进新闻正文**，日志输出 `新闻过滤：N 条无标题链接未进正文`。
+- **开源项目直接复用** repo-intro 已发的 `📦 名称` / `📝 标题` / 简介 / 链接；
+  没有总结过的仓库只列名称与链接，不再调用 LLM 编造简介。
+
 ## 报告持久化
 
 每次成功发送后，日报会写入 PostgreSQL 表 `pluggin_daily_analysis_reports`（来源群、投递目标、日期、模式、板块数、节点数、板块 JSON、正文），跨容器/插件重启可查；`report_retention_days` 默认保留 90 天。群消息表 `pluggin_daily_analysis_messages` 同样持久化（默认 7 天）。

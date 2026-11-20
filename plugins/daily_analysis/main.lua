@@ -139,6 +139,10 @@ end
 -- ============================================================================
 -- 3. 消息采集 (on_message)
 -- ============================================================================
+-- 水印识别在第 9 节定义；这里先声明，供采集阶段判断「本机输出」用
+local is_bot_output
+local da_forward_text
+
 function on_message(event)
     if not event or event.message_type ~= "group" then
         return false, nil
@@ -150,14 +154,29 @@ function on_message(event)
     end
 
     local sender_id = tonumber(event.user_id) or 0
+    local raw_msg = event.raw_message or ""
 
-    -- 过滤机器人自身发言
+    -- 过滤机器人自身发言；但带本机水印的输出（repo-intro / 公众号总结）要入库，
+    -- 否则日报无法复用「已经发过的总结」，只能让 LLM 重新瞎猜。
+    -- 公众号总结是「合并转发」：水印在转发节点里，raw_message 只有 [CQ:forward,id=…]，
+    -- 必须先展开再判断，并把展开后的标题/链接正文入库。
     local filter_bot = jn.config.get("filter_bot_messages")
+    local bot_forward_text = nil
     if filter_bot == nil then filter_bot = true end
     if filter_bot then
         local bot_uin = get_bot_uin()
         if bot_uin > 0 and sender_id == bot_uin then
-            return false, nil
+            local kept = is_bot_output and is_bot_output(raw_msg)
+            if not kept then
+                local fid = raw_msg:match("%[CQ:forward,id=([^,%]]+)%]")
+                if fid and da_forward_text then
+                    bot_forward_text = da_forward_text(fid, true)
+                    kept = is_bot_output(bot_forward_text)
+                end
+            end
+            if not kept then
+                return false, nil
+            end
         end
     end
 
@@ -172,10 +191,13 @@ function on_message(event)
         nickname = "群友" .. tostring(sender_id)
     end
 
-    local raw_msg = event.raw_message or ""
     local clean_text = clean_message_text(raw_msg)
     if clean_text == "" then
         return false, nil
+    end
+    -- 合并转发里的插件输出：正文存展开后的文本，标题/链接才能进日报来源
+    if bot_forward_text and bot_forward_text ~= "" then
+        clean_text = bot_forward_text
     end
 
     local msg_id = tonumber(event.message_id) or 0
@@ -301,8 +323,10 @@ local function da_clip(text, max)
 end
 
 -- 合并转发：jn.onebot11.get_forward_msg_sync 拉取内层节点，按昵称+正文拼接
-local function da_forward_text(fid)
-    local cached = jn.cache.get("da:fwd:" .. fid)
+-- full=true：给「入库复用」用，完整保留节点正文（标题/摘要/链接），不做截断
+da_forward_text = function(fid, full)
+    local ck = "da:fwd:" .. fid .. (full and ":full" or "")
+    local cached = jn.cache.get(ck)
     if type(cached) == "string" then return cached end
     if not jn.onebot11 or not jn.onebot11.get_forward_msg_sync then
         return "【合并转发】"
@@ -313,8 +337,8 @@ local function da_forward_text(fid)
         return "【合并转发】"
     end
 
-    local limit = da_num("forward_node_limit", 10)
-    local width = da_num("forward_node_chars", 120)
+    local limit = full and 60 or da_num("forward_node_limit", 10)
+    local width = full and 4000 or da_num("forward_node_chars", 120)
     local parts, inner = {}, #nodes
     for i, n in ipairs(nodes) do
         if i > limit then break end
@@ -342,11 +366,19 @@ local function da_forward_text(fid)
             texts[#texts + 1] = content
         end
         local who = tostring(n.name or ("群友" .. tostring(n.uin or "")))
-        parts[#parts + 1] = who .. "：" .. da_clip(table.concat(texts, " "), width)
+        -- 全量模式保留段内换行：📰标题 / 摘要 / 🔗链接 各占一行，才能被来源解析识别
+        local joiner = full and "\n" or " "
+        parts[#parts + 1] = who .. "：" .. da_clip(table.concat(texts, joiner), width)
     end
-    local out = "【合并转发 " .. inner .. " 条】" .. table.concat(parts, " / ")
-    if inner > limit then out = out .. " …（另 " .. (inner - limit) .. " 条）" end
-    jn.cache.set("da:fwd:" .. fid, out, 7 * 86400)
+    local out
+    if full then
+        -- 全量模式：每个节点单独成段，保留原文换行（标题/摘要/🔗链接都在里面）
+        out = table.concat(parts, "\n")
+    else
+        out = "【合并转发 " .. inner .. " 条】" .. table.concat(parts, " / ")
+        if inner > limit then out = out .. " …（另 " .. (inner - limit) .. " 条）" end
+    end
+    jn.cache.set(ck, out, 7 * 86400)
     return out
 end
 
@@ -418,37 +450,26 @@ end
 -- ============================================================================
 local function format_chat_stream(messages)
     local formatted = {}
-    local participant_map = {}
-    local participant_counter = 0
 
     for idx, msg in ipairs(messages) do
-        local uid = tostring(msg.user_id)
-        if not participant_map[uid] then
-            participant_counter = participant_counter + 1
-            participant_map[uid] = {
-                id = participant_counter,
-                label = string.format("参与者%d[%s]", participant_counter, uid),
-                name = msg.nickname or ("群友" .. uid),
-            }
-        end
-
-        local p_info = participant_map[uid]
         local created = tostring(msg.created_at or "")
         local time_str = created:match("(%d%d:%d%d)") or "未知时间"
+        -- 只给昵称、绝不给 QQ 号：模型一旦在语料里看到号码，就会原样写进话题与金句
+        local name = tostring(msg.nickname or ("群友" .. tostring(msg.user_id)))
+        name = name:gsub('[<>\n"]', " ")
 
         -- 关键防空行拆分设计：使用 <msg> 标签包裹单条消息全部内容（含内部所有空行与换行）
         local item_text = string.format(
-            '<msg id="%d" time="%s" user="%s" nickname="%s">\n%s\n</msg>',
+            '<msg id="%d" time="%s" user="%s">\n%s\n</msg>',
             idx,
             time_str,
-            p_info.label,
-            p_info.name,
+            name,
             msg.content or ""
         )
         table.insert(formatted, item_text)
     end
 
-    return table.concat(formatted, "\n"), participant_map
+    return table.concat(formatted, "\n")
 end
 
 -- ============================================================================
@@ -547,12 +568,16 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
 请根据下方给出的【群聊记录数据流】，按规则完成分析，并以严格的纯 JSON 格式返回。
 
 ## 核心任务要求：
-1. 话题分析：%s。具体总结中，提及发言人时必须使用其真实的【QQ昵称】（nickname属性），严禁只写参与者编号或纯QQ号。
+1. 话题分析：%s。
+   - summary 必须写成 150-300 字的叙事段落：交代起因、谁抛出了什么、群里怎么交锋、最后的结论或笑点；点名具体发言人（真实昵称），可以引用短句。
+   - 禁止把「某人分享了一个链接/一篇公众号文章/一个仓库」单独列为话题——除非群里围绕它展开了讨论。零散分享并入最相关的话题，或合并成一条「资讯搬运」概述。
+   - 提及发言人必须使用真实【QQ昵称】（nickname 属性），严禁只写参与者编号或纯 QQ 号。
+   - 标题不超过 20 字，禁止「讨论 XX」「关于 XX」这种空壳标题。
 2. 群圣经甄选：%s。
-   ⚠️【核心防拆分规则·重中之重】：
-   在聊天记录中，每一个 `<msg id="...">` 标签内的内容代表单条完整发言。
-   无论该发言内部包含多少个空行、换行或段落，必须作为一个完整的金句段落提取，绝对严禁按空行截断拆分成多条！
-   content 字段必须完整保留原作者的换行与空行原貌（在 JSON 字符串中使用 \n 转义表示），sender 必须为发言人真实昵称。
+   ⚠️【入选门槛】只收让人拍案叫绝的内容：逆天逻辑、神反转、离谱反差、精准吐槽、或者真的牛逼。纯报错、纯复读、无信息短句一律不收，宁缺毋滥。
+   ⚠️【只取本人正文】只收发言人自己打出的字。严禁把「【回复 某人：「…」】」这类被引用的原文写进 content；清掉 [CQ:...] 与 [图片] 等占位符。
+   ⚠️【合并同人连发】同一个人连续 2-3 条消息如果合起来才成立（铺垫 + 抖包袱），合并成一条，content 用 \n 保留原貌。
+   ⚠️【防拆分】每个 `<msg id="...">` 是一条完整发言，不得按空行拆成多条；sender 必须是真实昵称。
 3. 群友头衔：%s。user 必须填群友真实昵称。
 4. 质量锐评与人设点评：%s。
 
@@ -561,8 +586,8 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
 {
   "topics": [
     {
-      "title": "话题标题（2-10字）",
-      "summary": "核心脉络与要点概述（50字以内）",
+      "title": "话题标题（不超过 20 字）",
+      "summary": "150-300 字叙事：起因、谁怎么说、交锋焦点、结论或笑点，点名发言人昵称",
       "participants": "主要讨论者（使用真实昵称，逗号分隔）"
     }
   ],
@@ -570,7 +595,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
     {
       "msg_id": 1,
       "sender": "发言人真实昵称",
-      "content": "完整圣经原文内容（包含原消息所有的多行与空行，严禁截断）",
+      "content": "金句原文（只含本人正文，不含被引用内容与 CQ 码；合并同人连发时用换行串联）",
       "reason": "入选理由（具体说明其逆天逻辑/神人反差/笑点）"
     }
   ],
@@ -651,7 +676,7 @@ local WM_ONE = "\226\128\140"
 local WM_LEGACY = "\226\128\139\226\128\140\226\128\141\239\187\191"
 
 -- 解出前若干字节，判断是否为本机输出（新编码前缀匹配，或旧 4 字符标记）
-local function is_bot_output(raw)
+is_bot_output = function(raw)
     if not raw or raw == "" then return false end
     if raw:find(WM_LEGACY, 1, true) then return true end
     local p = raw:find(WM_HEAD, 1, true)
@@ -684,6 +709,18 @@ local function strip_wm(s)
     return s
 end
 
+-- 金句清洗：剔除被引用原文、CQ 码与占位符，只留发言人本人的正文
+local function clean_quote_text(s)
+    s = tostring(s or "")
+    s = s:gsub("【回复.-」】", "")
+    s = s:gsub("%[CQ:[^%]]*%]", "")
+    s = s:gsub("%[图片[^%]]*%]", "")
+    s = s:gsub("\r", "")
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    s = s:gsub("\n[ \t]*\n[ \t]*\n+", "\n\n")
+    return s
+end
+
 local function normalize_url(u)
     u = tostring(u or ""):gsub("&amp;", "&")
     return (u:gsub("[%)%,%.%!%?%;:]+$", ""))
@@ -709,7 +746,9 @@ local function parse_bot_blocks(text)
             for i = anchor + 1, #cur.lines do
                 local seg = tostring(cur.lines[i])
                 seg = seg:gsub("^%s+", ""):gsub("%s+$", "")
-                if seg ~= "" and not seg:find("^https?://") then summary = seg; break end
+                -- 跳过公众号名（📖）与原文链接（🔗）行，摘要是正文那句
+                local skip = seg:find("📖", 1, true) or seg:find("🔗", 1, true)
+                if seg ~= "" and not skip and not seg:find("^https?://") then summary = seg; break end
             end
         end
         blocks[#blocks + 1] = { kind = cur.kind, name = cur.name, url = cur.url,
@@ -739,7 +778,11 @@ local function parse_bot_blocks(text)
         if cur then
             if not cur.url then
                 local u = line:match("(https?://[^%s]+)")
-                if u then cur.url = normalize_url(strip_wm(u)) end
+                if u then
+                    -- 卡片图常以 [CQ:image,…] 紧跟链接，URL 要截到第一个 '[' 之前
+                    u = u:match("^([^%[]*)") or u
+                    cur.url = normalize_url(strip_wm(u))
+                end
             end
             cur.lines[#cur.lines + 1] = line
         end
@@ -751,10 +794,27 @@ end
 -- 扫描消息：返回 repos、articles（各自保序、带出现次数与 bot 总结）
 local function collect_sources(messages)
     local bot_repo, bot_article = {}, {}
+    local bot_raw = {}   -- raw_message -> true，第二轮回链时跳过 bot 消息
     for _, m in ipairs(messages) do
         local raw = m.raw_message or ""
-        if is_bot_output(raw) then
-            for _, b in ipairs(parse_bot_blocks(raw)) do
+        local text = m.content or ""
+        local is_bot = is_bot_output(raw) or is_bot_output(text)
+        -- 公众号总结走合并转发：raw 只有 [CQ:forward,id=…]，正文在节点里
+        if not is_bot and raw:find("[CQ:forward,", 1, true)
+            and not (text:find("📰", 1, true) or text:find("📦", 1, true)) then
+            local fid = raw:match("%[CQ:forward,id=([^,%]]+)%]")
+            if fid then
+                local ex = da_forward_text(fid, true)
+                if is_bot_output(ex) then
+                    is_bot = true
+                    text = ex
+                end
+            end
+        end
+        if is_bot then
+            bot_raw[raw] = true
+            local src = (text ~= "" and text) or raw
+            for _, b in ipairs(parse_bot_blocks(src)) do
                 if b.kind == "repo" and b.name and b.name ~= "" then
                     bot_repo[b.name:lower()] = b
                 elseif b.kind == "article" and b.url and b.url ~= "" then
@@ -786,26 +846,29 @@ local function collect_sources(messages)
 
     for _, m in ipairs(messages) do
         local raw = m.raw_message or ""
-        if not is_bot_output(raw) then
-            for owner, repo in raw:gmatch("github%.com/([%w%-_%.]+)/([%w%-_%.]+)") do
+        if not is_bot_output(raw) and not bot_raw[raw] then
+            -- 扫展开后的正文：合并转发、图片描述里的链接才不会漏
+            local scan = m.content or ""
+            if scan == "" then scan = raw end
+            for owner, repo in scan:gmatch("github%.com/([%w%-_%.]+)/([%w%-_%.]+)") do
                 add_repo("github", owner .. "/" .. repo, "https://github.com/" .. owner .. "/" .. repo)
             end
-            for sub, owner, repo in raw:gmatch("huggingface%.co/(models|datasets)/([%w%-_%.]+)/([%w%-_%.]+)") do
+            for sub, owner, repo in scan:gmatch("huggingface%.co/(models|datasets)/([%w%-_%.]+)/([%w%-_%.]+)") do
                 add_repo("hf", owner .. "/" .. repo, "https://huggingface.co/" .. sub .. "/" .. owner .. "/" .. repo)
             end
-            for owner, repo in raw:gmatch("huggingface%.co/([%w%-_%.]+)/([%w%-_%.]+)") do
+            for owner, repo in scan:gmatch("huggingface%.co/([%w%-_%.]+)/([%w%-_%.]+)") do
                 if owner ~= "models" and owner ~= "datasets" and owner ~= "spaces" and owner ~= "api" then
                     add_repo("hf", owner .. "/" .. repo, "https://huggingface.co/" .. owner .. "/" .. repo)
                 end
             end
             for _, host in ipairs({ "cn", "ai" }) do
                 local pat = "modelscope%." .. host .. "/(models|datasets)/([%w%-_%.]+)/([%w%-_%.]+)"
-                for sub, owner, repo in raw:gmatch(pat) do
+                for sub, owner, repo in scan:gmatch(pat) do
                     add_repo("ms", owner .. "/" .. repo,
                         "https://modelscope." .. host .. "/" .. sub .. "/" .. owner .. "/" .. repo)
                 end
             end
-            for u in raw:gmatch("(https?://mp%.weixin%.qq%.com/s[%w%-%._%?%%&=/#]+)") do
+            for u in scan:gmatch("(https?://mp%.weixin%.qq%.com/s[%w%-%._%?%%&=/#]+)") do
                 add_article(u)
             end
         end
@@ -825,6 +888,15 @@ local function collect_sources(messages)
             a.summary = (b.summary ~= "" and b.summary) or nil
         end
     end
+
+    local with_title = 0
+    for _, a in ipairs(articles) do
+        if (a.title or "") ~= "" then with_title = with_title + 1 end
+    end
+    jn.log.info(string.format("[%s] 来源采集：仓库 %d / 公众号 %d（已有标题 %d），bot 索引 仓库 %d / 文章 %d",
+        PLUGIN_NAME, #repos, #articles, with_title,
+        (function() local n = 0 for _ in pairs(bot_repo) do n = n + 1 end return n end)(),
+        (function() local n = 0 for _ in pairs(bot_article) do n = n + 1 end return n end)()))
     return repos, articles
 end
 
@@ -848,57 +920,22 @@ local function llm_json(system, user)
     return obj, nil
 end
 
--- 裸链接（没被总结过）的仓库简介：让 LLM 按名字补一句
-local function fill_repo_briefs(repos)
-    local pending = {}
-    for _, r in ipairs(repos) do
-        if (not r.title or r.title == "") and (not r.summary or r.summary == "") then
-            pending[#pending + 1] = r
-        end
-    end
-    if #pending == 0 then return end
-
-    local lines = {}
-    for i, r in ipairs(pending) do
-        if i > 20 then break end
-        lines[#lines + 1] = string.format("%d. %s", i, r.name)
-    end
-    -- 与 repo-intro 同一套规范：精炼一句话标题 + 60~120 字介绍，禁止编造
-    local system = "你在为群聊日报整理开源项目条目，风格与 repo-intro 插件保持一致。"
-        .. "给每个仓库一句中文标题（≤30 字）和一段中文介绍（60~120 字）："
-        .. "只写 README 名、仓库名与元数据能确定的内容（是什么、面向什么场景、关键规格），"
-        .. "禁止编造参数量、许可证、价格、基准分数、安装命令；不确定的部分直接不写。"
-        .. '严格输出 JSON：{"repos":[{"n":"owner/repo","t":"一句话标题","s":"介绍"}]}'
-    local obj, err = llm_json(system, table.concat(lines, "\n"))
-    if not obj or type(obj.repos) ~= "table" then
-        jn.log.warn("[" .. PLUGIN_NAME .. "] 仓库简介生成失败: " .. tostring(err))
-        return
-    end
-    local map = {}
-    for _, it in ipairs(obj.repos) do
-        if type(it) == "table" and it.n then
-            map[tostring(it.n):lower()] = {
-                t = tostring(it.t or ""),
-                s = tostring(it.s or ""),
-            }
-        end
-    end
-    for _, r in ipairs(pending) do
-        local e = map[r.key]
-        if e then
-            if e.t ~= "" then r.title = e.t end
-            if e.s ~= "" then r.summary = e.s end
-        end
-    end
-end
-
 -- 新闻：公众号文章 + 橘鸦早报 → LLM 按事件合并，保留全部来源链接
 local function merge_news(articles, juya_items, max_items)
     local wechat, juya = {}, {}
+    local dropped = 0
     for i, a in ipairs(articles) do
         if i > 40 then break end
-        wechat[#wechat + 1] = { i = i, title = a.title or "", summary = a.summary or "",
-                                url = a.url, count = a.count }
+        -- 标题与摘要都拿不到的裸链接不进新闻正文（否则只能编成「未识别公众号分享 N」）
+        if (a.title or "") ~= "" or (a.summary or "") ~= "" then
+            wechat[#wechat + 1] = { i = i, title = a.title or "", summary = a.summary or "",
+                                    url = a.url, count = a.count }
+        else
+            dropped = dropped + 1
+        end
+    end
+    if dropped > 0 then
+        jn.log.info(string.format("[%s] 新闻过滤：%d 条无标题链接未进正文", PLUGIN_NAME, dropped))
     end
     local jidx = 0
     for _, it in ipairs(juya_items) do
@@ -1098,13 +1135,21 @@ local function build_sections(stats, analysis_data, group_name, group_id, dur_se
                 model_name, dur_sec, stats.total_chars or 0, est_tokens)
         elseif s.key == "topics" and type(analysis_data.topics) == "table" then
             for idx, t in ipairs(analysis_data.topics) do
-                local part = (t.participants and t.participants ~= "") and (" (参聊: " .. t.participants .. ")") or ""
-                items[#items + 1] = string.format("【%d】%s%s\n%s", idx, t.title or "核心话题", part, t.summary or "")
+                local part = (t.participants and t.participants ~= "") and ("参与者: " .. t.participants .. "\n") or ""
+                items[#items + 1] = string.format("【%d】%s\n%s%s", idx, t.title or "核心话题", part, t.summary or "")
             end
         elseif s.key == "quotes" and type(analysis_data.golden_quotes) == "table" then
-            for idx, q in ipairs(analysis_data.golden_quotes) do
-                local reason = (q.reason and q.reason ~= "") and ("\n💡 甄选理由: " .. q.reason) or ""
-                items[#items + 1] = string.format("📜 金句 #%d · %s:\n「\n%s\n」%s", idx, q.sender or "群友", q.content or "", reason)
+            local seen, n = {}, 0
+            for _, q in ipairs(analysis_data.golden_quotes) do
+                local content = clean_quote_text(q.content)
+                local dedup = content:gsub("%s+", "")
+                -- 清洗后过短（纯表情/占位符/空行）的不入典
+                if #content >= 4 and not seen[dedup] then
+                    seen[dedup] = true
+                    n = n + 1
+                    local reason = (q.reason and q.reason ~= "") and ("\n💡 甄选理由: " .. q.reason) or ""
+                    items[#items + 1] = string.format("📜 金句 #%d · %s:\n「\n%s\n」%s", n, q.sender or "群友", content, reason)
+                end
             end
         elseif s.key == "titles" and type(analysis_data.user_titles) == "table" then
             for _, u in ipairs(analysis_data.user_titles) do
@@ -1126,7 +1171,6 @@ local function build_sections(stats, analysis_data, group_name, group_id, dur_se
             if #repos == 0 then
                 items[1] = "今日没有检测到开源项目 / 模型仓库链接"
             end
-            if #repos > 0 then fill_repo_briefs(repos) end
             for _, r in ipairs(repos) do
                 local parts = { "📦 " .. r.name }
                 if r.title and r.title ~= "" then parts[#parts + 1] = "📝 " .. r.title end
@@ -1397,8 +1441,13 @@ local function do_group_analysis(group_id, send_target_id, is_private_target, fo
     -- 带水印的是插件自动产出的卡片（仓库/文章总结），不参与聊天分析，
     -- 只用于 build_sections 里复用标题与总结
     local messages = {}
+    local bot_uin = get_bot_uin()
     for _, m in ipairs(all_messages) do
-        if not is_bot_output(m.raw_message) then messages[#messages + 1] = m end
+        -- bot 自己发的（含水印输出、合并转发总结）一律不进聊天分析；
+        -- 它们只作为 build_sections 的来源索引
+        if tonumber(m.user_id) ~= bot_uin and not is_bot_output(m.raw_message) then
+            messages[#messages + 1] = m
+        end
     end
     if #messages < 3 then
         local msg = string.format("📊 今日群聊发言较少（当前仅 %d 条，不足 3 条），暂无足够数据生成分析报告。", #messages)

@@ -41,7 +41,7 @@ configs:
   - key: filter_bot_messages
     type: bool
     label: "过滤机器人自身发言"
-    description: "开启后机器人自身的回复消息不纳入总结分析，避免死循环自我总结"
+    description: "开启后机器人自身的普通回复不纳入聊天分析（防死循环自我总结）；带本机水印的插件输出（repo-intro / 公众号总结）仍会入库，用于复用已发过的标题与简介"
     default: true
 
   - key: filter_keywords
