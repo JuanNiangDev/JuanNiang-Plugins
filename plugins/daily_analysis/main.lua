@@ -1091,16 +1091,25 @@ local function enrich_fmt_k(n)
 end
 
 local function enrich_one(r, proxy)
-    local cache_key = "repoinfo:" .. r.key
+    local cache_key = "repoinfo:v3:" .. r.key
     local cached = jn.cache.get(cache_key)
-    if type(cached) == "table" and cached.summary ~= nil then
-        if cached.summary ~= "" then r.summary = cached.summary end
+    if type(cached) == "table" and (cached.summary ~= nil or cached.invalid) then
+        if cached.invalid then r.invalid = true end
+        if cached.summary and cached.summary ~= "" then r.summary = cached.summary end
         return
     end
 
     local summary = ""
     if r.kind == "github" then
-        local res = jn.http.get("https://api.github.com/repos/" .. r.name, proxy)
+        -- GitHub 在容器内可直连；代理只给 HuggingFace 用（容器里 127.0.0.1 不是宿主机）
+        local res, herr = jn.http.get("https://api.github.com/repos/" .. r.name, "")
+        if res and res.status == 404 then
+            r.invalid = true   -- 仓库不存在/链接错误：直接从日报剔除
+            jn.log.warn(string.format("[%s] GitHub 仓库 404，已剔除 %s", PLUGIN_NAME, r.name))
+        elseif not (res and res.status == 200) then
+            jn.log.warn(string.format("[%s] GitHub 简介获取失败 %s status=%s err=%s",
+                PLUGIN_NAME, r.name, tostring(res and res.status), tostring(herr)))
+        end
         if res and res.status == 200 then
             local d = jn.json.decode(res.body)
             if type(d) == "table" then
@@ -1123,7 +1132,14 @@ local function enrich_one(r, proxy)
         local api = r.url:find("/datasets/", 1, true)
             and ("https://huggingface.co/api/datasets/" .. r.name)
             or ("https://huggingface.co/api/models/" .. r.name)
-        local res = jn.http.get(api, proxy)
+        local res, herr = jn.http.get(api, proxy)
+        if res and res.status == 404 then
+            r.invalid = true
+            jn.log.warn(string.format("[%s] HF 仓库 404，已剔除 %s", PLUGIN_NAME, r.name))
+        elseif not (res and res.status == 200) then
+            jn.log.warn(string.format("[%s] HF 简介获取失败 %s status=%s err=%s",
+                PLUGIN_NAME, r.name, tostring(res and res.status), tostring(herr)))
+        end
         if res and res.status == 200 then
             local d = jn.json.decode(res.body)
             if type(d) == "table" then
@@ -1144,7 +1160,8 @@ local function enrich_one(r, proxy)
         end
     end
 
-    jn.cache.set(cache_key, { summary = summary }, summary ~= "" and 604800 or 86400)
+    local ttl = (summary ~= "" or r.invalid) and 604800 or 86400
+    jn.cache.set(cache_key, { summary = summary, invalid = r.invalid or false }, ttl)
     if summary ~= "" then r.summary = summary end
 end
 
@@ -1271,16 +1288,19 @@ local function build_sections(stats, analysis_data, group_name, group_id, dur_se
                 items[#items + 1] = "🎯 终极表现总评:\n" .. crit.overall_summary
             end
         elseif s.key == "projects" then
-            if #repos == 0 then
-                items[1] = "今日没有检测到开源项目 / 模型仓库链接"
-            end
+            local shown = 0
             for _, r in ipairs(repos) do
-                local parts = { "📦 " .. r.name }
-                if r.title and r.title ~= "" then parts[#parts + 1] = "📝 " .. r.title end
-                if r.summary and r.summary ~= "" then parts[#parts + 1] = r.summary end
-                if r.count > 1 then parts[#parts + 1] = string.format("（今日被分享 %d 次）", r.count) end
-                parts[#parts + 1] = r.url
-                items[#items + 1] = table.concat(parts, "\n")
+                if not r.invalid then
+                    shown = shown + 1
+                    local parts = { "📦 " .. r.name }
+                    if r.title and r.title ~= "" then parts[#parts + 1] = "📝 " .. r.title end
+                    if r.summary and r.summary ~= "" then parts[#parts + 1] = r.summary end
+                    parts[#parts + 1] = r.url
+                    items[#items + 1] = table.concat(parts, "\n")
+                end
+            end
+            if shown == 0 then
+                items[1] = "今日没有检测到有效开源项目 / 模型仓库链接"
             end
         elseif s.key == "news" then
             local lim = (s.cap > 0) and s.cap or ((s.cap == -1) and 200 or 70)

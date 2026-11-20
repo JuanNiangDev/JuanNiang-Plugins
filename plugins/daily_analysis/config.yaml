@@ -172,6 +172,6 @@ configs:
   - key: enrich_proxy
     type: string
     label: 项目简介补全代理
-    description: 可选，HuggingFace 在部分网络下需要代理，如 socks5://127.0.0.1:20170；留空直连
+    description: 仅 HuggingFace 使用；容器内请填宿主机代理（如 socks5://172.27.0.1:20170），GitHub 始终直连
     default: ""
 
