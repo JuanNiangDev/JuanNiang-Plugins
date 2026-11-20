@@ -175,6 +175,12 @@ function on_message(event)
                 end
             end
             if not kept then
+                -- 带卡片特征却没有可识别水印：本机输出被改写/水印编码不一致时会静默丢消息，
+                -- 日报「项目复制」会因此变空，这里留一条线索便于定位
+                if raw_msg:find("📦", 1, true) or raw_msg:find("📰", 1, true) then
+                    jn.log.warn(string.format("[%s] 疑似本机卡片输出但水印校验失败，未入库: %s",
+                        PLUGIN_NAME, raw_msg:sub(1, 80)))
+                end
                 return false, nil
             end
         end
@@ -533,9 +539,9 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
 
     local quotes_rule = ""
     if max_quotes > 0 then
-        quotes_rule = string.format("甄选不多于 %d 句最具冲击力、反差感、神反转的「群圣经/高光金句」", max_quotes)
+        quotes_rule = string.format("甄选不多于 %d 句最具冲击力、反差感、神反转的「群圣经/高光金句」；引用必须逐字完整，禁止省略或概括", max_quotes)
     elseif max_quotes == -1 then
-        quotes_rule = "甄选今日所有的逆天、反差、高光「群圣经/金句」，不限数量上限"
+        quotes_rule = "甄选今日所有的逆天、反差、高光「群圣经/金句」，不限数量上限；引用必须逐字完整，禁止省略或概括"
     else
         quotes_rule = "无需提取金句（本项已关闭）"
     end
@@ -595,7 +601,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
     {
       "msg_id": 1,
       "sender": "发言人真实昵称",
-      "content": "金句原文（只含本人正文，不含被引用内容与 CQ 码；合并同人连发时用换行串联）",
+      "content": "金句原文：逐字完整引用本人正文，保留原有换行；严禁省略、缩写、只留开头结尾或用省略号代替中间内容。不含被引用内容与 CQ 码；同人连发用换行串联",
       "reason": "入选理由（具体说明其逆天逻辑/神人反差/笑点）"
     }
   ],
@@ -726,33 +732,72 @@ local function normalize_url(u)
     return (u:gsub("[%)%,%.%!%?%;:]+$", ""))
 end
 
--- 从本机输出里按 📦/📰 分块，摘出 name/url/title/summary
+-- CQ 参数里的 HTML 转义（卡片图 url 的 & 会写成 &amp;，直接发会 404）
+local function cq_unescape(s)
+    s = tostring(s or "")
+    s = s:gsub("&amp;", "&")
+    s = s:gsub("&#44;", ",")
+    s = s:gsub("&#91;", "[")
+    s = s:gsub("&#93;", "]")
+    return s
+end
+
+local IMG_CQ_PREFIX = "[CQ:image,"
+-- 按出现顺序摘出一行里的图片 URL（优先 url=，其次 file= 里的 http 地址）
+local function collect_cq_images(line, images)
+    local pos = 1
+    while true do
+        local s = line:find(IMG_CQ_PREFIX, pos, true)
+        if not s then break end
+        local e = line:find("]", s + 1, true)
+        if not e then break end
+        local body = line:sub(s + #IMG_CQ_PREFIX, e - 1)
+        local url = body:match("url=(https?://[^,%s]+)")
+        if not url then url = body:match("file=(https?://[^,%s]+)") end
+        if url and url ~= "" then images[#images + 1] = cq_unescape(url) end
+        pos = e + 1
+    end
+end
+
+-- 从本机输出里按 📦/📰 分块：正文按原样保留（去水印/去 CQ 码），
+-- 图片按消息内的段序挂到最近的上一个块上（repo-intro 的段序是 text1,img1,text2,img2）
 local function parse_bot_blocks(text)
     local blocks, cur = {}, nil
     local function flush()
         if not cur then return end
+        local clean = {}
+        for i, l in ipairs(cur.lines) do
+            local line = tostring(l)
+            line = line:gsub("%[CQ:[^%]]*%]", ""):gsub("\r", "")
+            line = strip_wm(line)
+            if i == 1 then line = line:gsub("^%s+", "") end
+            clean[#clean + 1] = line:gsub("%s+$", "")
+        end
+        -- 段间空行会留在上一块尾部，剪掉
+        while #clean > 0 and clean[#clean] == "" do clean[#clean] = nil end
+
         local title, summary = "", ""
         local anchor
-        for i, l in ipairs(cur.lines) do
+        for i, l in ipairs(clean) do
             if l:find("📝", 1, true) or l:find("📰", 1, true) then anchor = i; break end
         end
         if anchor then
-            local l = cur.lines[anchor]
+            local l = clean[anchor]
             local p1 = l:find("📝", 1, true)
             local p2 = l:find("📰", 1, true)
             local p, mlen = p1, #"📝"
             if not p or (p2 and p2 < p) then p, mlen = p2, #"📰" end
-            if p then title = strip_wm(l:sub(p + mlen)):gsub("^%s+", ""):gsub("%s+$", "") end
-            for i = anchor + 1, #cur.lines do
-                local seg = tostring(cur.lines[i])
-                seg = seg:gsub("^%s+", ""):gsub("%s+$", "")
+            if p then title = l:sub(p + mlen):gsub("^%s+", ""):gsub("%s+$", "") end
+            for i = anchor + 1, #clean do
+                local seg = clean[i]
                 -- 跳过公众号名（📖）与原文链接（🔗）行，摘要是正文那句
                 local skip = seg:find("📖", 1, true) or seg:find("🔗", 1, true)
                 if seg ~= "" and not skip and not seg:find("^https?://") then summary = seg; break end
             end
         end
         blocks[#blocks + 1] = { kind = cur.kind, name = cur.name, url = cur.url,
-                                title = title, summary = summary }
+                                title = title, summary = summary,
+                                text = table.concat(clean, "\n"), images = cur.images }
         cur = nil
     end
 
@@ -767,15 +812,21 @@ local function parse_bot_blocks(text)
 
         local pbox = line:find("📦", 1, true)
         local pnews = line:find("📰", 1, true)
+        local started = false
         if pbox then
             flush()
             local name = strip_wm(line:sub(pbox + #"📦"))
-            cur = { kind = "repo", lines = {}, name = name:gsub("^%s+", ""):gsub("%s+$", "") }
+            name = name:gsub("%[CQ:[^%]]*%]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            cur = { kind = "repo", lines = { line:sub(pbox) }, name = name, images = {} }
+            started = true
         elseif pnews then
             flush()
-            cur = { kind = "article", lines = {} }
+            cur = { kind = "article", lines = { line:sub(pnews) }, images = {} }
+            started = true
         end
         if cur then
+            if not started then cur.lines[#cur.lines + 1] = line end
+            collect_cq_images(line, cur.images)
             if not cur.url then
                 local u = line:match("(https?://[^%s]+)")
                 if u then
@@ -784,17 +835,19 @@ local function parse_bot_blocks(text)
                     cur.url = normalize_url(strip_wm(u))
                 end
             end
-            cur.lines[#cur.lines + 1] = line
         end
     end
     flush()
     return blocks
 end
 
--- 扫描消息：返回 repos、articles（各自保序、带出现次数与 bot 总结）
+-- 扫描消息：projects 只取 repo-intro 的本机输出（水印校验），原样复制正文与卡片图；
+-- articles 取公众号总结（标题/摘要仍供新闻事件合并复用）
 local function collect_sources(messages)
-    local bot_repo, bot_article = {}, {}
+    local projects, pindex = {}, {}
+    local bot_article = {}
     local bot_raw = {}   -- raw_message -> true，第二轮回链时跳过 bot 消息
+    local img_total = 0
     for _, m in ipairs(messages) do
         local raw = m.raw_message or ""
         local text = m.content or ""
@@ -813,10 +866,21 @@ local function collect_sources(messages)
         end
         if is_bot then
             bot_raw[raw] = true
-            local src = (text ~= "" and text) or raw
+            -- 卡片图只在 raw_message 的 CQ 码里；仓库块只在原文里，所以优先扫原始消息。
+            -- 一条消息可以塞多个仓库：段序 text1,img1,text2,img2 → 每个 📦 各成一块。
+            local src = raw
+            if not src:find("📦", 1, true) then src = text end
             for _, b in ipairs(parse_bot_blocks(src)) do
-                if b.kind == "repo" and b.name and b.name ~= "" then
-                    bot_repo[b.name:lower()] = b
+                if b.kind == "repo" and b.name ~= "" then
+                    local key = b.name:lower()
+                    img_total = img_total + #b.images
+                    if pindex[key] then
+                        -- 同一仓库被多次介绍：保留最新一份（卡片图 url 带 rkey，有时效）
+                        projects[pindex[key]] = b
+                    else
+                        pindex[key] = #projects + 1
+                        projects[#projects + 1] = b
+                    end
                 elseif b.kind == "article" and b.url and b.url ~= "" then
                     bot_article[normalize_url(b.url)] = b
                 end
@@ -824,16 +888,17 @@ local function collect_sources(messages)
         end
     end
 
-    local repos, rindex = {}, {}
-    local articles, aindex = {}, {}
+    -- 用户直接分享、但 repo-intro 没介绍过的仓库：仍要进列表，稍后用官方 API 补真实简介
+    local repo_seen = {}
+    for k in pairs(pindex) do repo_seen[k] = true end
     local function add_repo(kind, name, url)
         local key = name:lower()
-        if not rindex[key] then
-            rindex[key] = #repos + 1
-            repos[#repos + 1] = { key = key, kind = kind, name = name, url = url, count = 0 }
-        end
-        repos[rindex[key]].count = repos[rindex[key]].count + 1
+        if repo_seen[key] then return end
+        repo_seen[key] = true
+        projects[#projects + 1] = { key = key, kind = kind, name = name, url = url }
     end
+
+    local articles, aindex = {}, {}
     local function add_article(url)
         url = normalize_url(url)
         if url == "" then return end
@@ -868,19 +933,12 @@ local function collect_sources(messages)
                         "https://modelscope." .. host .. "/" .. sub .. "/" .. owner .. "/" .. repo)
                 end
             end
-            for u in scan:gmatch("(https?://mp%.weixin%.qq%.com/s[%w%-%._%?%%&=/#]+)") do
+            for u in scan:gmatch("(https?://mp%.weixin%.qq%.com/s[%w%-_%.%?%%&=/#]+)") do
                 add_article(u)
             end
         end
     end
 
-    for _, r in ipairs(repos) do
-        local b = bot_repo[r.key]
-        if b then
-            r.title = (b.title ~= "" and b.title) or nil
-            r.summary = (b.summary ~= "" and b.summary) or nil
-        end
-    end
     for _, a in ipairs(articles) do
         local b = bot_article[normalize_url(a.url)]
         if b then
@@ -893,11 +951,9 @@ local function collect_sources(messages)
     for _, a in ipairs(articles) do
         if (a.title or "") ~= "" then with_title = with_title + 1 end
     end
-    jn.log.info(string.format("[%s] 来源采集：仓库 %d / 公众号 %d（已有标题 %d），bot 索引 仓库 %d / 文章 %d",
-        PLUGIN_NAME, #repos, #articles, with_title,
-        (function() local n = 0 for _ in pairs(bot_repo) do n = n + 1 end return n end)(),
-        (function() local n = 0 for _ in pairs(bot_article) do n = n + 1 end return n end)()))
-    return repos, articles
+    jn.log.info(string.format("[%s] 项目复制：%d 个（带图 %d 张）", PLUGIN_NAME, #projects, img_total))
+    jn.log.info(string.format("[%s] 来源采集：公众号 %d（已有标题 %d）", PLUGIN_NAME, #articles, with_title))
+    return projects, articles
 end
 
 local function cfg_news_merge_enabled()
@@ -1065,17 +1121,20 @@ local function chunk_text(text, max)
 end
 
 -- @@enrich_begin
--- 开源项目简介补全：repo-intro 没介绍过的仓库，用官方 API 拉真实简介/指标
-local function enrich_bool(key, default)
-    local v = jn.config.get(key)
-    if v == nil then return default end
-    return v ~= false and v ~= "false" and v ~= "0"
-end
+-- 开源项目简介补全：repo-intro 没介绍过的仓库，优先复用 repo-intro 缓存，再退回官方 API
+-- HuggingFace 在容器内需要宿主机 socks5；GitHub 直连即可
+local HF_PROXY = "socks5://172.27.0.1:20170"
+local INTRO_CACHE = "http://172.27.0.1:5284/repo-intro"
 
-local function enrich_num(key, default)
-    local n = tonumber(jn.config.get(key))
-    if n == nil then return default end
-    return n
+local function repo_intro_cache(r)
+    local encoded = r.name:gsub("[^%w%-_%.]", function(c)
+        return string.format("%%%02X", c:byte())
+    end)
+    local res = jn.http.get(INTRO_CACHE .. "?repo=" .. encoded, "")
+    if not (res and res.status == 200) then return nil end
+    local d = jn.json.decode(res.body)
+    if type(d) == "table" and (d.summary or d.desc_cn or d.title) then return d end
+    return nil
 end
 
 local function enrich_trim(s)
@@ -1091,10 +1150,22 @@ local function enrich_fmt_k(n)
 end
 
 local function enrich_one(r, proxy)
-    local cache_key = "repoinfo:v3:" .. r.key
+    local cache_key = "repoinfo:v4:" .. r.key
+
+    -- 1) repo-intro 已经总结过（含中文标题/简介/渲染卡片）：直接复用
+    local ri = repo_intro_cache(r)
+    if ri then
+        r.ri = ri
+        r.summary = enrich_trim(ri.summary)
+        if r.summary == "" then r.summary = enrich_trim(ri.desc_cn) end
+        jn.cache.set(cache_key, { summary = r.summary, ri = ri }, 604800)
+        return
+    end
+
     local cached = jn.cache.get(cache_key)
     if type(cached) == "table" and (cached.summary ~= nil or cached.invalid) then
         if cached.invalid then r.invalid = true end
+        if cached.ri then r.ri = cached.ri end
         if cached.summary and cached.summary ~= "" then r.summary = cached.summary end
         return
     end
@@ -1166,27 +1237,38 @@ local function enrich_one(r, proxy)
 end
 
 local function enrich_repos(repos)
-    if not enrich_bool("enrich_projects", true) or #repos == 0 then return end
-    local max = math.max(0, enrich_num("enrich_max", 20))
-    local proxy = tostring(jn.config.get("enrich_proxy") or "")
-    local tried, okc = 0, 0
+    if #repos == 0 then return end
     for _, r in ipairs(repos) do
-        if (r.summary or "") == "" then
-            if tried >= max then break end
-            tried = tried + 1
-            local ok = pcall(enrich_one, r, proxy)
-            if ok and r.summary and r.summary ~= "" then okc = okc + 1 end
+        if not r.text and (r.summary or "") == "" then
+            pcall(enrich_one, r, HF_PROXY)
         end
     end
-    jn.log.info(string.format("[%s] 项目简介补全：尝试 %d / 成功 %d（共 %d 个仓库）",
-        PLUGIN_NAME, tried, okc, #repos))
 end
 -- @@enrich_end
 
--- 组装各板块条目（每条是一个可直接发送的字符串）
-local function build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages)
-    local repos, articles = collect_sources(messages or {})
-    enrich_repos(repos)
+-- 组装各板块条目（每条是纯文本，或 {text=…, images={…}} 的项目卡片）
+-- 金句回填：按 <msg id> 取原始消息完整正文（合并转发则展开全文），不再信任模型复述的长度
+local function quote_source_text(messages, msg_id)
+    local idx = tonumber(msg_id)
+    if not idx then return nil end
+    local m = messages[idx]
+    if type(m) ~= "table" then return nil end
+    local raw = tostring(m.raw_message or "")
+    local fid = raw:match("%[CQ:forward,id=([^,%]]+)%]")
+        or tostring(m.content or ""):match("%[CQ:forward,id=([^,%]]+)%]")
+    if fid then
+        raw = da_forward_text(fid, true)
+    else
+        raw = tostring(m.content or "")
+    end
+    local text = clean_quote_text(raw)
+    if text == "" then return nil end
+    return text
+end
+
+local function build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages)
+    local projects, articles = collect_sources(messages or {})
+    enrich_repos(projects)
     local juya_items = {}
     local news_on = false
     for _, s in ipairs(parse_sections_config()) do
@@ -1262,6 +1344,9 @@ local function build_sections(stats, analysis_data, group_name, group_id, dur_se
             local seen, n = {}, 0
             for _, q in ipairs(analysis_data.golden_quotes) do
                 local content = clean_quote_text(q.content)
+                -- 金句以原消息为准：模型偶尔会省略中间内容或只留头尾，直接回填完整原文
+                local src = quote_source_text(chat_messages or messages, q.msg_id)
+                if src and #src > #content and #src >= 4 then content = src end
                 local dedup = content:gsub("%s+", "")
                 -- 清洗后过短（纯表情/占位符/空行）的不入典
                 if #content >= 4 and not seen[dedup] then
@@ -1288,19 +1373,28 @@ local function build_sections(stats, analysis_data, group_name, group_id, dur_se
                 items[#items + 1] = "🎯 终极表现总评:\n" .. crit.overall_summary
             end
         elseif s.key == "projects" then
-            local shown = 0
-            for _, r in ipairs(repos) do
-                if not r.invalid then
-                    shown = shown + 1
-                    local parts = { "📦 " .. r.name }
-                    if r.title and r.title ~= "" then parts[#parts + 1] = "📝 " .. r.title end
-                    if r.summary and r.summary ~= "" then parts[#parts + 1] = r.summary end
-                    parts[#parts + 1] = r.url
-                    items[#items + 1] = table.concat(parts, "\n")
+            -- repo-intro 介绍过的：原样复制正文+卡片图；没介绍过的：保留名称+API 简介+链接
+            for _, p in ipairs(projects) do
+                if not p.invalid then
+                    if p.text and p.text ~= "" then
+                        items[#items + 1] = { text = p.text, images = p.images }
+                    else
+                        local lines = { "📦 " .. p.name }
+                        if p.ri then
+                            if p.ri.title and p.ri.title ~= "" then lines[#lines + 1] = "📝 " .. p.ri.title end
+                            local body = p.summary
+                            if (not body or body == "") and p.ri.desc_cn then body = p.ri.desc_cn end
+                            if body and body ~= "" then lines[#lines + 1] = body end
+                        elseif p.summary and p.summary ~= "" then
+                            lines[#lines + 1] = p.summary
+                        end
+                        lines[#lines + 1] = p.url
+                        items[#items + 1] = table.concat(lines, "\n")
+                    end
                 end
             end
-            if shown == 0 then
-                items[1] = "今日没有检测到有效开源项目 / 模型仓库链接"
+            if #items == 0 then
+                items[1] = "今日没有检测到开源项目 / 模型仓库链接"
             end
         elseif s.key == "news" then
             local lim = (s.cap > 0) and s.cap or ((s.cap == -1) and 200 or 70)
@@ -1321,25 +1415,57 @@ local function build_sections(stats, analysis_data, group_name, group_id, dur_se
     return sections
 end
 
+-- 板块条目：纯文本，或 {text=…, images={…}}（开源项目卡片图）
+local function item_text(item)
+    if type(item) == "table" then return tostring(item.text or "") end
+    return tostring(item or "")
+end
+
+local function item_images(item)
+    if type(item) == "table" and type(item.images) == "table" then return item.images end
+    return nil
+end
+
+-- 合并转发节点 / 普通消息的 content：有图就发 [文本, 图片…] 段数组，否则继续用纯文本
+local function node_payload(text, images)
+    if not images or #images == 0 then return text end
+    local segs = { { type = "text", data = { text = text } } }
+    for _, u in ipairs(images) do
+        segs[#segs + 1] = { type = "image", data = { file = u } }
+    end
+    return segs
+end
+
 local function send_report(sections, target_type, target_id)
     if #sections == 0 then return 0, 0 end
     local mode = tostring(jn.config.get("report_mode") or "forward")
 
-    local function send_text(text)
+    local function send_msg(payload)
         if target_type == "group" then
-            return jn.onebot11.send_group_msg(target_id, text)
+            return jn.onebot11.send_group_msg(target_id, payload)
         end
-        return jn.onebot11.send_private_msg(target_id, text)
+        return jn.onebot11.send_private_msg(target_id, payload)
     end
 
     -- 兜底：把节点拼成少量文本再发。绝不逐节点发送——那会把日报拆成几十条消息。
+    -- 段数组节点只取文本段（降级路径丢图是已知代价，至少不丢正文）
     local function send_nodes_as_text(nodes)
         local parts = {}
         for _, n in ipairs(nodes) do
-            if type(n.content) == "string" and n.content ~= "" then parts[#parts + 1] = n.content end
+            local c = n.content
+            if type(c) == "string" then
+                if c ~= "" then parts[#parts + 1] = c end
+            elseif type(c) == "table" then
+                for _, seg in ipairs(c) do
+                    if type(seg) == "table" and seg.type == "text"
+                        and type(seg.data) == "table" and seg.data.text and seg.data.text ~= "" then
+                        parts[#parts + 1] = tostring(seg.data.text)
+                    end
+                end
+            end
         end
         local chunks = chunk_text(table.concat(parts, "\n\n"), 1500)
-        for _, c in ipairs(chunks) do send_text(c) end
+        for _, c in ipairs(chunks) do send_msg(c) end
         return #chunks
     end
 
@@ -1363,26 +1489,76 @@ local function send_report(sections, target_type, target_id)
         -- 不加分割线：合并转发里每个节点已是独立气泡，--- 纯属噪音
         for _, s in ipairs(sections) do
             if #s.items == 1 then
-                push(s.title .. "\n" .. s.items[1])
+                local it = s.items[1]
+                push(node_payload(s.title .. "\n" .. item_text(it), item_images(it)))
             else
                 push(s.title)
                 for _, item in ipairs(s.items) do
-                    push(item)
+                    push(node_payload(item_text(item), item_images(item)))
                 end
             end
         end
+        local ferr
         if target_type == "group" and jn.onebot11.send_group_forward_msg_sync then
-            local id, ferr = jn.onebot11.send_group_forward_msg_sync(target_id, nodes)
-            if ferr == nil then return 1, #nodes end -- 成功时返回 message_id（可能为 0），只有带错误串才算失败
-            jn.log.warn("[" .. PLUGIN_NAME .. "] 群合并转发失败，改用合并文本: " .. tostring(ferr))
+            local _, e = jn.onebot11.send_group_forward_msg_sync(target_id, nodes)
+            ferr = e
         elseif target_type ~= "group" and jn.onebot11.send_private_forward_msg_sync then
-            local id, ferr = jn.onebot11.send_private_forward_msg_sync(target_id, nodes)
-            if ferr == nil then return 1, #nodes end
-            jn.log.warn("[" .. PLUGIN_NAME .. "] 私聊合并转发失败，改用合并文本: " .. tostring(ferr))
+            local _, e = jn.onebot11.send_private_forward_msg_sync(target_id, nodes)
+            ferr = e
         else
             jn.log.warn("[" .. PLUGIN_NAME .. "] 当前引擎无" .. (target_type == "group" and "群" or "私聊")
                 .. "合并转发接口，改用合并文本发送")
+            ferr = "no_forward_api"
         end
+        if ferr == nil then return 1, #nodes end
+
+        -- 带图节点可能被 QQ 拒绝（"HTTP download failed: 400"，卡片图 rkey 过期/CDN 限制）。
+        -- 先退成纯文本节点保住「一条合并转发」，图片随后单独补发，而不是把日报拆成十几条文本。
+        local text_nodes = {}
+        for _, n in ipairs(nodes) do
+            local c = n.content
+            if type(c) == "table" then
+                local parts = {}
+                for _, seg in ipairs(c) do
+                    if type(seg) == "table" and seg.type == "text"
+                        and type(seg.data) == "table" and seg.data.text and seg.data.text ~= "" then
+                        parts[#parts + 1] = tostring(seg.data.text)
+                    end
+                end
+                text_nodes[#text_nodes + 1] = { user_id = uin, nickname = name, content = table.concat(parts, "\n") }
+            else
+                text_nodes[#text_nodes + 1] = n
+            end
+        end
+        local ok2 = false
+        if target_type == "group" and jn.onebot11.send_group_forward_msg_sync then
+            local _, e2 = jn.onebot11.send_group_forward_msg_sync(target_id, text_nodes)
+            ok2 = (e2 == nil)
+        elseif target_type ~= "group" and jn.onebot11.send_private_forward_msg_sync then
+            local _, e2 = jn.onebot11.send_private_forward_msg_sync(target_id, text_nodes)
+            ok2 = (e2 == nil)
+        end
+        if ok2 then
+            jn.log.warn("[" .. PLUGIN_NAME .. "] 合并转发带图失败，已改纯文本转发并单独补图: " .. tostring(ferr))
+            local imgs = {}
+            for _, s in ipairs(sections) do
+                for _, item in ipairs(s.items) do
+                    local im = item_images(item)
+                    if im then
+                        for _, u in ipairs(im) do imgs[#imgs + 1] = u end
+                    end
+                end
+            end
+            for i = 1, #imgs, 4 do
+                local segs = {}
+                for k = i, math.min(i + 3, #imgs) do
+                    segs[#segs + 1] = { type = "image", data = { file = imgs[k] } }
+                end
+                send_msg(segs)
+            end
+            return 1, #text_nodes
+        end
+        jn.log.warn("[" .. PLUGIN_NAME .. "] 合并转发失败，改用合并文本: " .. tostring(ferr))
         local n = send_nodes_as_text(nodes)
         return n, #nodes
     end
@@ -1391,14 +1567,28 @@ local function send_report(sections, target_type, target_id)
     for _, s in ipairs(sections) do
         local n = #s.items
         if mode == "per_section" then
-            for _, chunk in ipairs(chunk_text(s.title .. "\n" .. table.concat(s.items, "\n\n"), 1500)) do
-                send_text(chunk)
+            local lines, images = {}, {}
+            for _, item in ipairs(s.items) do
+                lines[#lines + 1] = item_text(item)
+                local im = item_images(item)
+                if im then
+                    for _, u in ipairs(im) do images[#images + 1] = u end
+                end
+            end
+            local chunks = chunk_text(s.title .. "\n" .. table.concat(lines, "\n\n"), 1500)
+            for i, chunk in ipairs(chunks) do
+                -- 图片挂在最后一段文本后面一起发（文字在前、图在后）
+                if i == #chunks then
+                    send_msg(node_payload(chunk, images))
+                else
+                    send_msg(chunk)
+                end
                 count = count + 1
             end
         else
             for i, item in ipairs(s.items) do
                 local head = (n > 1) and string.format("%s (%d/%d)\n", s.title, i, n) or (s.title .. "\n")
-                send_text(head .. item)
+                send_msg(node_payload(head .. item_text(item), item_images(item)))
                 count = count + 1
             end
         end
@@ -1414,7 +1604,8 @@ local function persist_report(group_id, target_id, sections, mode, node_count)
     for _, sec in ipairs(sections or {}) do
         flat[#flat + 1] = "## " .. tostring(sec.title or sec.key or "")
         for _, item in ipairs(sec.items or {}) do
-            flat[#flat + 1] = tostring(item)
+            -- 项目条目是 {text, images}：只把正文拼进可读文本，图片仍在 sections JSON 里
+            flat[#flat + 1] = item_text(item)
         end
     end
     local content = table.concat(flat, "\n")
@@ -1686,7 +1877,7 @@ local function do_group_analysis(group_id, send_target_id, is_private_target, fo
     end
 
     -- 8. 组装板块（概况/话题/金句/头衔/质量/项目/新闻/统计，来源见 collect_sources）
-    local sections = build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, all_messages)
+    local sections = build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, all_messages, messages)
 
     -- 9. 按 report_mode 发送（forward 默认：一条合并转发；per_section；per_item）
     local target_type = is_private_target and "private" or "group"
