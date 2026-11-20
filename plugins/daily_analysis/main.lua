@@ -390,8 +390,9 @@ end
 
 -- 图片：image_model Provider 描述（每份报告限量，避免总结时间爆炸）
 local da_vision_used = 0
-local function da_image_text(url)
-    local key = "da:img:" .. url
+local function da_image_text(url, file)
+    -- QQ 原始 rkey 会过期，缓存按 file 哈希走；同一张图换签名链接后仍能命中
+    local key = "da:img:" .. (((file and file ~= "") and file) or url)
     local cached = jn.cache.get(key)
     if type(cached) == "string" then return cached end
     if not da_bool("vision_describe", true)
@@ -400,9 +401,22 @@ local function da_image_text(url)
         return "[图片]"
     end
     da_vision_used = da_vision_used + 1
+
+    -- 24h 日报运行时旧链接必过期；用 OneBot get_image 换一条新签发链接
+    local fresh = url
+    if file and file ~= "" and jn.onebot11 and jn.onebot11.get_image then
+        local ok_renew, info, renew_err = pcall(jn.onebot11.get_image, file)
+        if ok_renew and type(info) == "table" and type(info.url) == "string" and info.url ~= "" then
+            fresh = info.url
+        else
+            jn.log.warn("[daily_analysis] get_image 续签失败 file=" .. da_clip(file, 80)
+                .. " err=" .. tostring(renew_err or info))
+        end
+    end
+
     local ok, text, err = pcall(jn.llm.vision_url,
         da_string("vision_provider", "wb-api-image"),
-        url,
+        fresh,
         "用一句中文描述这张图片的内容，最多30字，只写图中明确可见的内容，不要编造",
         { timeout = 30 })
     if ok and not err and type(text) == "string" and text ~= "" then
@@ -410,7 +424,8 @@ local function da_image_text(url)
         jn.cache.set(key, out, 7 * 86400)
         return out
     end
-    jn.log.warn("[daily_analysis] 图片描述失败 url=" .. da_clip(url, 80) .. " err=" .. tostring(err or text))
+    jn.log.warn("[daily_analysis] 图片描述失败 file=" .. tostring(file or "-")
+        .. " url=" .. da_clip(fresh, 80) .. " err=" .. tostring(err or text))
     return "[图片]"
 end
 
@@ -441,9 +456,11 @@ local function expand_cq_content(raw, fallback)
             return da_forward_text(fid)
         end)
     end
-    s = s:gsub("%[CQ:image,[^%]]*url=([^,%]]+)[^%]]*%]", function(u)
-        local url = u:gsub("&amp;", "&")
-        return da_image_text(url)
+    s = s:gsub("%[CQ:image,([^%]]+)%]", function(attrs)
+        local url = attrs:match("url=([^,%]]+)")
+        local file = attrs:match("file=([^,%]]+)")
+        if not url or url == "" then return "[图片]" end
+        return da_image_text((url:gsub("&amp;", "&")), file)
     end)
     s = s:gsub("%[CQ:record,[^%]]*%]", "[语音]")
     s = s:gsub("%[CQ:video,[^%]]*%]", "[视频]")
