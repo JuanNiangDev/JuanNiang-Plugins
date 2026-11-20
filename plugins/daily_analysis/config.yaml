@@ -156,3 +156,22 @@ configs:
     label: 展开回复引用
     description: 把被回复消息的前 80 字作为上下文并入语料
     default: true
+
+  - key: enrich_projects
+    type: bool
+    label: 补全开源项目简介
+    description: 对未被 repo-intro 介绍过的 GitHub / HuggingFace 链接，实时调用官方 API 补全简介与指标（失败则保持名称+链接）
+    default: true
+
+  - key: enrich_max
+    type: string
+    label: 单次补全项目上限
+    description: 每次日报最多补全多少个项目，默认 20；GitHub 未登录 API 限额 60 次/小时
+    default: "20"
+
+  - key: enrich_proxy
+    type: string
+    label: 项目简介补全代理
+    description: 可选，HuggingFace 在部分网络下需要代理，如 socks5://127.0.0.1:20170；留空直连
+    default: ""
+

@@ -1064,9 +1064,112 @@ local function chunk_text(text, max)
     return out
 end
 
+-- @@enrich_begin
+-- 开源项目简介补全：repo-intro 没介绍过的仓库，用官方 API 拉真实简介/指标
+local function enrich_bool(key, default)
+    local v = jn.config.get(key)
+    if v == nil then return default end
+    return v ~= false and v ~= "false" and v ~= "0"
+end
+
+local function enrich_num(key, default)
+    local n = tonumber(jn.config.get(key))
+    if n == nil then return default end
+    return n
+end
+
+local function enrich_trim(s)
+    s = tostring(s or "")
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " "))
+end
+
+local function enrich_fmt_k(n)
+    n = tonumber(n) or 0
+    if n >= 1000000 then return string.format("%.1fM", n / 1000000) end
+    if n >= 1000 then return string.format("%.1fk", n / 1000) end
+    return tostring(n)
+end
+
+local function enrich_one(r, proxy)
+    local cache_key = "repoinfo:" .. r.key
+    local cached = jn.cache.get(cache_key)
+    if type(cached) == "table" and cached.summary ~= nil then
+        if cached.summary ~= "" then r.summary = cached.summary end
+        return
+    end
+
+    local summary = ""
+    if r.kind == "github" then
+        local res = jn.http.get("https://api.github.com/repos/" .. r.name, proxy)
+        if res and res.status == 200 then
+            local d = jn.json.decode(res.body)
+            if type(d) == "table" then
+                local desc = enrich_trim(d.description)
+                local meta = {}
+                if enrich_trim(d.language) ~= "" then meta[#meta + 1] = d.language end
+                if tonumber(d.stargazers_count) then meta[#meta + 1] = "⭐ " .. enrich_fmt_k(d.stargazers_count) end
+                summary = desc
+                if #meta > 0 then
+                    summary = (summary ~= "" and (summary .. " ") or "") .. "（" .. table.concat(meta, " · ") .. "）"
+                end
+                if summary == "" and type(d.topics) == "table" then
+                    local tags = {}
+                    for i = 1, math.min(4, #d.topics) do tags[#tags + 1] = tostring(d.topics[i]) end
+                    if #tags > 0 then summary = "标签：" .. table.concat(tags, ", ") end
+                end
+            end
+        end
+    elseif r.kind == "hf" then
+        local api = r.url:find("/datasets/", 1, true)
+            and ("https://huggingface.co/api/datasets/" .. r.name)
+            or ("https://huggingface.co/api/models/" .. r.name)
+        local res = jn.http.get(api, proxy)
+        if res and res.status == 200 then
+            local d = jn.json.decode(res.body)
+            if type(d) == "table" then
+                local head = enrich_trim(d.pipeline_tag)
+                if head == "" and type(d.tags) == "table" then
+                    local tags = {}
+                    for i = 1, math.min(3, #d.tags) do tags[#tags + 1] = tostring(d.tags[i]) end
+                    head = table.concat(tags, ", ")
+                end
+                local meta = {}
+                if tonumber(d.downloads) then meta[#meta + 1] = "⬇ " .. enrich_fmt_k(d.downloads) end
+                if tonumber(d.likes) then meta[#meta + 1] = "♥ " .. enrich_fmt_k(d.likes) end
+                summary = head
+                if #meta > 0 then
+                    summary = (summary ~= "" and (summary .. " · ") or "") .. table.concat(meta, " · ")
+                end
+            end
+        end
+    end
+
+    jn.cache.set(cache_key, { summary = summary }, summary ~= "" and 604800 or 86400)
+    if summary ~= "" then r.summary = summary end
+end
+
+local function enrich_repos(repos)
+    if not enrich_bool("enrich_projects", true) or #repos == 0 then return end
+    local max = math.max(0, enrich_num("enrich_max", 20))
+    local proxy = tostring(jn.config.get("enrich_proxy") or "")
+    local tried, okc = 0, 0
+    for _, r in ipairs(repos) do
+        if (r.summary or "") == "" then
+            if tried >= max then break end
+            tried = tried + 1
+            local ok = pcall(enrich_one, r, proxy)
+            if ok and r.summary and r.summary ~= "" then okc = okc + 1 end
+        end
+    end
+    jn.log.info(string.format("[%s] 项目简介补全：尝试 %d / 成功 %d（共 %d 个仓库）",
+        PLUGIN_NAME, tried, okc, #repos))
+end
+-- @@enrich_end
+
 -- 组装各板块条目（每条是一个可直接发送的字符串）
 local function build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages)
     local repos, articles = collect_sources(messages or {})
+    enrich_repos(repos)
     local juya_items = {}
     local news_on = false
     for _, s in ipairs(parse_sections_config()) do
