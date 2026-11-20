@@ -762,7 +762,7 @@ end
 
 local function fetch_opus(job)
     local url = "https://www.bilibili.com/opus/" .. job.entry.id
-    local rid = http_get(url, { jid = job.id, stage = "opus" }, "https://www.bilibili.com/opus/" .. job.entry.id, false, true)
+    local rid = http_get(url, { jid = job.id, stage = "opus" }, "https://www.bilibili.com/opus/" .. job.entry.id, true, true)
     if not rid or rid == 0 then
         send_error(job, "请求专栏页面失败")
         finish_job(job)
@@ -771,7 +771,7 @@ end
 
 local function fetch_read(job)
     local url = "https://www.bilibili.com/read/cv" .. job.entry.id
-    local rid = http_get(url, { jid = job.id, stage = "read" }, "https://www.bilibili.com/read/cv" .. job.entry.id, false, true)
+    local rid = http_get(url, { jid = job.id, stage = "read" }, "https://www.bilibili.com/read/cv" .. job.entry.id, true, true)
     if not rid or rid == 0 then
         send_error(job, "请求专栏页面失败")
         finish_job(job)
@@ -783,8 +783,10 @@ local function start_entry(job)
     if e.kind == "video" then
         fetch_view(job)
     elseif e.kind == "b23" then
-        local rid = http_get("https://b23.tv/" .. e.code, { jid = job.id, stage = "resolve" },
-            "https://www.bilibili.com/", false, true)
+        -- 直接访问 b23.tv 会跟随跳转到 www.bilibili.com/video/... 页面（B 站风控 412）；
+        -- 本地代理只取 Location，不跟随跳转，再交给 handle_resolve 从 URL 里解析 BV/opus。
+        local rid = http_get("http://172.27.0.1:5284/b23?code=" .. tostring(e.code),
+            { jid = job.id, stage = "resolve" }, "https://www.bilibili.com/", false)
         if not rid or rid == 0 then
             send_error(job, "解析短链失败")
             finish_job(job)
@@ -1186,7 +1188,7 @@ local function handle_player(job, ctx, result)
         local u = chosen.subtitle_url
         if u:sub(1, 2) == "//" then u = "https:" .. u end
         local rid = http_get(u, { jid = job.id, stage = "subtitle", idx = ctx.idx },
-            "https://www.bilibili.com/video/" .. job.entry.bvid .. "/", false)
+            "https://www.bilibili.com/video/" .. job.entry.bvid .. "/", true)
         if rid and rid ~= 0 then return end
     end
     -- 接口会间歇性返回空 subtitles（同一 cid 多次请求结果不同），重试几次
