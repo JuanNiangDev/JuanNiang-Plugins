@@ -1,0 +1,12 @@
+name: cyber_chaunzi
+version: 1.0.0
+author: excniesNIED
+description: 赛博串子：接 searchanythingfun 素材检索，按概率或 /开串 手动在群里串表情包，可配开串/结束/每次完成的表情包
+entry: main.lua
+permissions:
+  - onebot11
+  - database
+  - cache
+  - http
+system: false
+enabled: true

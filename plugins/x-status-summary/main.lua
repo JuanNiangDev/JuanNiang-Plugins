@@ -496,6 +496,16 @@ local function send_segments(batch, segments)
     end
 end
 
+-- 同步发送：只有它能拿到失败原因，用来做「图文失败→纯文本」「视频失败→链接」降级。
+-- 异步版本是 fire-and-forget，失败只写进宿主日志，插件无从补救。
+local function send_segments_sync(batch, segments)
+    local t = batch.target
+    if t.message_type == "group" then
+        return jn.onebot11.send_group_msg_sync(t.target_id, segments)
+    end
+    return jn.onebot11.send_private_msg_sync(t.target_id, segments)
+end
+
 local function media_segments(e, max_images)
     local segs = {}
     if not cfg_bool("send_media", true) then return segs end
@@ -602,7 +612,9 @@ local function finish(batch)
 
     local t = batch.target
     local reply_seg = nil
-    if t.reply_quote and t.message_id ~= nil and tostring(t.message_id) ~= "" then
+    -- 引用目标必须是真实消息 ID；0/空会让协议端报 could not quote 并可能导致整条发送失败
+    local reply_id = tostring(t.message_id or "")
+    if t.reply_quote and reply_id ~= "" and reply_id ~= "0" then
         reply_seg = { type = "reply", data = { id = tostring(t.message_id) } }
     end
 
@@ -619,12 +631,18 @@ local function finish(batch)
             local segs = {}
             if reply_seg then segs[#segs + 1] = reply_seg end
             segs[#segs + 1] = { type = "text", data = { text = text } }
+
+            -- 媒体分流：图片跟正文同一条消息，视频必须独占一条（OneBot 限制）
+            local videos = {}
             for _, s in ipairs(media_segments(e, max_images)) do
                 if s.type == "video" then
-                    send_segments(batch, { s })  -- 视频必须独占一条消息
+                    videos[#videos + 1] = s
                 else
                     segs[#segs + 1] = s
                 end
+            end
+            if cfg_string("proxy_image_rewrite", "") == "" and (#segs > 1) then
+                jn.log.warn("[x-status] proxy_image_rewrite 未配置，图片可能被协议端拉取失败（建议 https://wsrv.nl/?url=）")
             end
             if e.article and e.article.cover and e.article.cover ~= "" and cfg_bool("send_media", true) then
                 local cp = cfg_string("proxy_image_rewrite", "")
@@ -638,7 +656,47 @@ local function finish(batch)
                 end
                 segs[#segs + 1] = { type = "image", data = { file = cf } }
             end
-            send_segments(batch, segs)
+
+            -- 有视频但没选中（超时长/超体积/仅一帧）时，至少把视频链接带上
+            if #videos == 0 and cfg_bool("video_enabled", true) then
+                local has_video = false
+                for _, m in ipairs(e.media or {}) do
+                    if type(m) == "table" and (m.type == "video" or m.format == "video/mp4") then
+                        has_video = true
+                    end
+                end
+                if has_video then
+                    segs[#segs + 1] = { type = "text", data = {
+                        text = "🎬 视频超限未发送，原推：" .. ((e.url and e.url ~= "") and e.url or "") } }
+                end
+            end
+
+            local img_n = 0
+            for _, s in ipairs(segs) do
+                if s.type == "image" then img_n = img_n + 1 end
+            end
+            jn.log.info(string.format("[x-status] 发送 id=%s：图文 %d 张 + 视频 %d 条",
+                tostring(e.id), img_n, #videos))
+
+            -- 先发「正文 + 图片」：失败就降级纯文本，保证总结一定送达
+            local ok, err = send_segments_sync(batch, segs)
+            if not ok then
+                jn.log.warn(string.format("[x-status] 图文发送失败，降级纯文本 id=%s err=%s",
+                    tostring(e.id), tostring(err)))
+                send_segments(batch, { { type = "text", data = { text = text } } })
+            end
+
+            -- 再发视频：失败降级成原推链接，避免「总结到了视频没了」还查不到原因
+            for _, v in ipairs(videos) do
+                local vok, verr = send_segments_sync(batch, { v })
+                if not vok then
+                    jn.log.warn(string.format("[x-status] 视频发送失败，降级为链接 id=%s err=%s",
+                        tostring(e.id), tostring(verr)))
+                    local line = "🎬 视频发送失败，原推："
+                        .. ((e.url and e.url ~= "") and e.url or (v.data and v.data.file) or "")
+                    send_segments(batch, { { type = "text", data = { text = line } } })
+                end
+            end
         end
     end
 
@@ -1031,19 +1089,33 @@ end
 -- 上线验证：manual_trigger 打开后延迟 1s 把 14 条测试链接发到指定群
 -- 用 cache 保证只跑一次，不重复刷屏
 -- --------------------------------------------------------------------
-local TEST_LINKS = {
+local DEFAULT_TEST_LINKS = {
     "https://x.com/Xanderwow_A/status/2116148304883097987",
 }
-local TEST_GROUP = 1007385018
+local DEFAULT_TEST_GROUP = 1007385018
+
+-- 测试链接与测试群走配置：改完直接重载就能复测，不用改代码
+local function manual_test_links()
+    local raw = cfg_string("test_links", "")
+    local list = {}
+    for u in raw:gmatch("https?://[^%s,，]+") do list[#list + 1] = u end
+    if #list == 0 then return DEFAULT_TEST_LINKS end
+    return list
+end
 
 local function run_manual_test()
     if not cfg_bool("manual_trigger", false) then return end
-    if jn.cache.get("xstatus:manual_test_done") then return end
-    jn.cache.set("xstatus:manual_test_done", "1", 3600)
-    jn.log.info("[x-status] 手动触发：发送 " .. #TEST_LINKS .. " 条测试链接到群 " .. tostring(TEST_GROUP))
+    local links = manual_test_links()
+    local group = tonumber(cfg_string("test_group", tostring(DEFAULT_TEST_GROUP))) or DEFAULT_TEST_GROUP
+    local joined = table.concat(links, " ")
+    -- 缓存键带链接指纹：换了链接就能立即复测，同一批链接 1 小时内不重复刷屏
+    local key = string.format("xstatus:manual_test_done:%d:%d", #joined, #links)
+    if jn.cache.get(key) then return end
+    jn.cache.set(key, "1", 3600)
+    jn.log.info(string.format("[x-status] 手动触发：发送 %d 条测试链接到群 %d", #links, group))
     on_message({
-        raw_message = table.concat(TEST_LINKS, " "),
-        message_type = "group", group_id = TEST_GROUP,
+        raw_message = joined,
+        message_type = "group", group_id = group,
         user_id = 2741226099, message_id = 0,
     })
 end

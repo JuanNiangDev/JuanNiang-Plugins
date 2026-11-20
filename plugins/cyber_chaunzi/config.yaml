@@ -1,0 +1,166 @@
+configs:
+  - key: enabled
+    type: bool
+    label: "启用插件"
+    description: "总开关。关闭后既不会静默串，也不响应 /开串、/串子出去"
+    default: true
+
+  - key: mode
+    type: string
+    label: "启用方式"
+    description: "both=后台静默 + 前台命令；silent=仅后台静默；manual=仅 /开串 前台手动"
+    options:
+      - both
+      - silent
+      - manual
+    default: "both"
+
+  - key: target_groups
+    type: list
+    label: "生效群列表"
+    description: "留空表示所有群生效；填写后只在列出的群里串"
+    default: []
+
+  - key: admin_only
+    type: bool
+    label: "仅管理员可开串"
+    description: "开启后只有 admins 列表或系统管理员能执行 /开串、/串子出去"
+    default: true
+
+  - key: admins
+    type: list
+    label: "允许开串的 QQ"
+    description: "即使关闭 admin_only 也建议留一个；系统管理员默认有权限"
+    default: []
+
+  - key: command_start
+    type: string
+    label: "开串命令"
+    description: "不加斜杠，例如 开串 即 /开串"
+    default: "开串"
+
+  - key: command_end
+    type: string
+    label: "结束命令"
+    description: "不加斜杠，例如 串子出去 即 /串子出去"
+    default: "串子出去"
+
+  - key: silent_probability
+    type: string
+    label: "静默触发概率（%）"
+    description: "后台静默模式下，每条群消息被串的概率，0-100"
+    default: "3"
+
+  - key: session_probability
+    type: string
+    label: "开串后触发概率（%）"
+    description: "/开串 之后每条消息被串的概率，0-100；100 表示每条都串（仍受冷却限制）"
+    default: "100"
+
+  - key: cooldown_seconds
+    type: string
+    label: "同群冷却（秒）"
+    description: "同一群两次串之间至少间隔多少秒，0 表示不限制"
+    default: "60"
+
+  - key: daily_cap
+    type: string
+    label: "每群每天上限"
+    description: "单个群每天最多串多少次，防止额度被一个群吃光"
+    default: "500"
+
+  - key: min_chars
+    type: string
+    label: "最短触发字数"
+    description: "消息正文短于该长度时跳过（纯图片/纯表情没有文字可检索）"
+    default: "2"
+
+  - key: api_base
+    type: string
+    label: "API 地址"
+    description: "searchanythingfun 服务地址"
+    default: "https://www.searchanythingfun.xyz"
+
+  - key: api_mode
+    type: string
+    label: "选材接口"
+    description: "hybrid=先用 /api/reply（AI 选材，20 次/天），失败再退回 /api/search；search=只用检索"
+    options:
+      - hybrid
+      - search
+    default: "hybrid"
+
+  - key: api_style
+    type: string
+    label: "AI 选材风格"
+    description: "fun=节目效果优先（默认）；fit=贴合原意"
+    options:
+      - fun
+      - fit
+    default: "fun"
+
+  - key: ai_daily_cap
+    type: string
+    label: "AI 选材每天上限"
+    description: "本地记账，避免把 20 次/天的 AI 额度打光；超出后自动只用检索"
+    default: "20"
+
+  - key: limit
+    type: string
+    label: "每次取回条数"
+    description: "传给 API 的 limit（上限 20）"
+    default: "8"
+
+  - key: quota_guard_min
+    type: string
+    label: "额度保护阈值"
+    description: "当日检索剩余低于该值时降频到 20%，避免撞 500 次/天上限"
+    default: "20"
+
+  - key: image_proxy_prefix
+    type: string
+    label: "图片代理前缀（可选）"
+    description: "如 https://wsrv.nl/?url= ；留空则直接发送素材图片原地址"
+    default: ""
+
+  - key: proxy
+    type: string
+    label: "请求代理（可选）"
+    description: "如 socks5://172.27.0.1:20170 ；容器直连 API 不通时填写"
+    default: ""
+
+  - key: emoji_start_enabled
+    type: bool
+    label: "开串后发表情包"
+    description: "/开串 成功后发一个 QQ 表情包"
+    default: true
+
+  - key: emoji_start
+    type: string
+    label: "开串表情包 ID"
+    description: "QQ 表情包短 ID，可写成 stk://xxx 或直接 xxx"
+    default: ""
+
+  - key: emoji_end_enabled
+    type: bool
+    label: "结束后发表情包"
+    description: "/串子出去 结束后发一个 QQ 表情包"
+    default: true
+
+  - key: emoji_end
+    type: string
+    label: "结束表情包 ID"
+    description: "QQ 表情包短 ID，可写成 stk://xxx 或直接 xxx"
+    default: ""
+
+  - key: emoji_each_enabled
+    type: bool
+    label: "每次串完发表情包"
+    description: "每成功串一次就补发一个 QQ 表情包（可能刷屏，慎用）"
+    default: true
+
+  - key: emoji_each
+    type: string
+    label: "每次串完表情包 ID"
+    description: "QQ 表情包短 ID，可写成 stk://xxx 或直接 xxx"
+    default: ""

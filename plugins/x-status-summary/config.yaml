@@ -128,9 +128,21 @@ configs:
 
   - key: manual_trigger
     type: bool
-    label: 上线验证（发 14 条测试链接到 1007385018）
-    description: 打开后插件重载时自动把 14 条测试链接的总结发到指定群验证；发完请关闭，避免重启重复发送
+    label: 手动触发测试
+    description: 打开后插件重载时自动把 test_links 里的链接发到 test_group 验证；发完请关闭，避免重启重复发送
     default: false
+
+  - key: test_links
+    type: string
+    label: 手动触发链接
+    description: 手动触发时发给测试群的推文链接，空格或逗号分隔；留空用内置样例。换链接会自动重新跑一次
+    default: ""
+
+  - key: test_group
+    type: string
+    label: 手动触发测试群
+    description: 手动触发的发送目标群号
+    default: "1007385018"
 
   - key: video_url_rewrite
     type: string

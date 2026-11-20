@@ -1,0 +1,110 @@
+# ====================================================================
+# arxiv-summary 插件配置
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# type 支持 bool / string / list；数字类配置用 string，插件内 tonumber。
+# value 为用户当前生效值（缺省时回退 default）。
+# ====================================================================
+
+configs:
+  - key: enabled
+    type: bool
+    label: 启用 arXiv 论文总结
+    description: 发送 arxiv.org 链接（abs / pdf / html）时自动抓取元数据并翻译标题与摘要；关闭则完全不处理
+    default: true
+
+  - key: enable_summary
+    type: bool
+    label: 启用中文翻译
+    description: 用主程序 LLM 翻译标题与摘要；关闭则只输出标题原文、作者、学科与链接
+    default: true
+
+  - key: reply_quote
+    type: bool
+    label: 引用原消息
+    description: 普通消息投递时是否引用触发的那条消息（合并转发不受影响）
+    default: true
+
+  - key: group_only
+    type: bool
+    label: 仅群聊生效
+    description: 开启后只在群聊中处理，私聊链接忽略
+    default: false
+
+  - key: cache_hours
+    type: string
+    label: 结果缓存时长（小时）
+    description: 同一篇论文的元数据与翻译缓存小时数，默认 168（7 天）
+    default: "168"
+
+  - key: max_links
+    type: string
+    label: 单条消息最多处理链接数
+    description: 一条消息里最多处理几篇论文，默认 3，超出忽略
+    default: "3"
+
+  - key: max_authors
+    type: string
+    label: 作者展示上限
+    description: 作者超过该数量时只显示前 N 位并追加 et al.，默认 3
+    default: "3"
+
+  - key: max_categories
+    type: string
+    label: 学科展示上限
+    description: 主分类优先，交叉分类依次追加；超过该数量折叠为「等 N 类」，默认 4
+    default: "4"
+
+  - key: max_abstract_chars
+    type: string
+    label: 送翻摘要最大字数
+    description: 送入 LLM 的单篇摘要最大字符数，默认 6000（arXiv 摘要通常 1000-2500 字符）
+    default: "6000"
+
+  - key: llm_timeout
+    type: string
+    label: LLM 超时（秒）
+    description: 调用主程序 LLM 的超时秒数，默认 90（摘要翻译输出较长）
+    default: "90"
+
+  - key: batch_window
+    type: string
+    label: 攒批窗口（秒）
+    description: 同一人首条 arXiv 链接起算的等待秒数，窗口内收到的新链接并入同一批；0 = 不攒批立即发送
+    default: "60"
+
+  - key: batch_threshold
+    type: string
+    label: 攒批阈值（条）
+    description: 窗口内攒满这么多条链接立即发送；同时是「合并转发」的门槛，条数 ≥ 该值才合并转发
+    default: "3"
+
+  - key: single_window
+    type: string
+    label: 单篇等待（秒）
+    description: 只有 1 篇链接时的等待秒数，期间来第 2 篇会自动延长到攒批窗口；默认 10
+    default: "10"
+
+  - key: merge_forward
+    type: bool
+    label: 合并转发投递（总开关）
+    description: 开启后，一批链接数量 ≥ 攒批阈值（默认 3）才合并成一条转发；不足阈值或关闭时每篇发一条普通消息
+    default: true
+
+  - key: forward_sender_name
+    type: string
+    label: 转发节点昵称
+    description: 合并转发内各节点展示的昵称；留空则用机器人自己的昵称
+    default: ""
+
+  - key: ua
+    type: string
+    label: 抓取 User-Agent
+    description: 抓取 arXiv 页面使用的浏览器 UA；保持浏览器 UA 可避免被 CDN 风控
+    default: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+  - key: proxy
+    type: string
+    label: 抓取代理
+    description: 抓取 arXiv 时使用的代理地址（如 http://127.0.0.1:20171）；留空则直连
+    default: ""

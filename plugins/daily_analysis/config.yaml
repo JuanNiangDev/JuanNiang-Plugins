@@ -41,7 +41,7 @@ configs:
   - key: filter_bot_messages
     type: bool
     label: "过滤机器人自身发言"
-    description: "开启后机器人自身的回复消息不纳入总结分析，避免死循环自我总结"
+    description: "开启后机器人自身的普通回复不纳入聊天分析（防死循环自我总结）；带本机水印的插件输出（repo-intro / 公众号总结）仍会入库，用于复用已发过的标题与简介"
     default: true
 
   - key: filter_keywords
@@ -124,14 +124,14 @@ configs:
   - key: forward_node_limit
     type: string
     label: 转发最多展开条数
-    description: 单条合并转发最多展开几条内层消息，默认 10
-    default: "10"
+    description: 单条合并转发最多展开几条内层消息，默认 50
+    default: "50"
 
   - key: forward_node_chars
     type: string
     label: 转发每条字数上限
-    description: 合并转发内层每条最多取多少字，默认 120
-    default: "120"
+    description: 合并转发内层每条最多取多少字，默认 4000（避免长清单/长文被截断）
+    default: "4000"
 
   - key: vision_describe
     type: bool
@@ -156,3 +156,4 @@ configs:
     label: 展开回复引用
     description: 把被回复消息的前 80 字作为上下文并入语料
     default: true
+

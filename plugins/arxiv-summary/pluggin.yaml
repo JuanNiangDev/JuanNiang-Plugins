@@ -1,0 +1,13 @@
+name: "arxiv-summary"
+version: "1.0.0"
+author: "excniesNIED"
+description: "发送 arXiv 链接时自动抓取论文元数据，用主程序 LLM 翻译标题与摘要，按标题原文/标题翻译/作者/摘要翻译/学科输出，多篇合并转发"
+entry: "main.lua"
+permissions:
+  - onebot11
+  - http
+  - cache
+  - llm
+  - timer
+system: false
+enabled: true

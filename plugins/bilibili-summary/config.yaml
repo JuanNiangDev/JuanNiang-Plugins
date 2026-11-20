@@ -1,0 +1,145 @@
+# ====================================================================
+# bilibili-summary 插件配置
+# ====================================================================
+# type: bool / string / list；数字类配置用 string，插件内 tonumber。
+# value 为用户当前生效值（缺省回退 default）。Web 面板可改，改后即时生效。
+# ====================================================================
+
+configs:
+  - key: enabled
+    type: bool
+    label: 启用哔哩哔哩总结
+    description: 收到 b 站视频 / BV 号 / b23 短链 / 小程序卡片 / 专栏链接时自动总结
+    default: true
+
+  - key: summary_style
+    type: string
+    label: 总结风格
+    description: objective = 客观内容总结；persona = 用 Bot 人设口吻把内容完整讲一遍（不是短评）
+    default: "objective"
+    options:
+      - objective
+      - persona
+
+  - key: link_style
+    type: string
+    label: 链接展示
+    description: "0 = 完整链接；1 = 视频显示 BV 号、专栏显示规范 opus 链接（不用 b23 短链）"
+    default: "0"
+    options:
+      - "0"
+      - "1"
+
+  - key: consume_matched
+    type: bool
+    label: 接管消息（不触发普通回复）
+    description: 命中 B 站链接后由插件接管，Bot 不再对这条消息生成普通回复；关闭则总结的同时 Agent 也会回复
+    default: true
+
+  - key: reply_quote
+    type: bool
+    label: 引用原消息
+    description: 回复时引用触发总结的那条消息
+    default: true
+
+  - key: send_cover
+    type: bool
+    label: 发送视频封面
+    description: 视频总结末尾附视频封面图；专栏按 send_images 发送配图
+    default: true
+
+  - key: send_images
+    type: bool
+    label: 发送专栏配图
+    description: 专栏图文按顺序发送配图（受 max_images 限制）
+    default: true
+
+  - key: max_images
+    type: string
+    label: 专栏配图上限
+    description: 单篇专栏最多发送几张图，默认 9
+    default: "9"
+
+  - key: max_pages
+    type: string
+    label: 多 P 字幕总结上限
+    description: 多 P 视频最多总结前几个 P 的字幕，默认 5；超出的 P 只在分 P 列表里出现
+    default: "5"
+
+  - key: max_links
+    type: string
+    label: 单条消息最多处理链接数
+    description: 一条消息里识别到多个 b 站链接时，最多处理几个，默认 3
+    default: "3"
+
+  - key: summary_max_chars
+    type: string
+    label: 总结最大字数
+    description: 视频字幕总结的最大字数，默认 300
+    default: "300"
+
+  - key: persona_max_chars
+    type: string
+    label: 人设讲解最大字数
+    description: summary_style=persona 时，人设口吻讲解内容的字数上限，默认 600
+    default: "600"
+
+  - key: max_desc_chars
+    type: string
+    label: 简介截断字数
+    description: 视频简介最多展示多少字，默认 300
+    default: "300"
+
+  - key: max_subtitle_chars
+    type: string
+    label: 单个 P 字幕送入 LLM 的最大字数
+    description: 每个 P 的字幕文本最多送多少字给模型，默认 50000（约 5 万字）
+    default: "50000"
+
+  - key: max_content_chars
+    type: string
+    label: 专栏正文送入 LLM 的最大字数
+    description: 专栏正文最多送多少字给模型，默认 8000
+    default: "8000"
+
+  - key: llm_timeout
+    type: string
+    label: LLM 超时（秒）
+    description: 调用主程序 LLM 的超时秒数，默认 90
+    default: "90"
+
+  - key: cache_ttl
+    type: string
+    label: 结果缓存时长（秒）
+    description: 同一视频/专栏的总结缓存秒数，默认 604800（7 天）
+    default: "604800"
+
+  - key: target_groups
+    type: list
+    label: 生效群号
+    description: 留空 = 所有群/私聊生效；填写后只处理这些群
+    default: []
+
+  - key: cookie
+    type: string
+    label: 哔哩哔哩 Cookie
+    description: 字幕接口需要登录态。填浏览器里 bilibili.com 的 Cookie（至少 SESSDATA），留空则视频只按简介总结；不要外传
+    default: ""
+
+  - key: ua
+    type: string
+    label: 请求 User-Agent
+    description: 抓取 B 站页面 / API 使用的浏览器 UA
+    default: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+
+  - key: proxy
+    type: string
+    label: 请求代理
+    description: 可选，如 http://127.0.0.1:20171 或 socks5://127.0.0.1:20170；留空直连
+    default: ""
+
+  - key: image_proxy_prefix
+    type: string
+    label: 图片代理前缀
+    description: 可选，图片地址拼在此前缀之后发送（如 https://wsrv.nl/?url=）；留空直接发 B 站图片地址
+    default: ""
