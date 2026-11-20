@@ -493,13 +493,9 @@ local function compose_section(e)
         lines[#lines + 1] = "🏷️ " .. cat_line
     end
 
-    local links = "🔗 https://arxiv.org/abs/" .. e.id
-    if e.pdf_url and e.pdf_url ~= "" then
-        links = links .. " · " .. e.pdf_url
-    else
-        links = links .. " · https://arxiv.org/pdf/" .. e.id
-    end
-    lines[#lines + 1] = links
+    lines[#lines + 1] = "🔗 https://arxiv.org/abs/" .. e.id
+    local pdf = (e.pdf_url and e.pdf_url ~= "") and e.pdf_url or ("https://arxiv.org/pdf/" .. e.id)
+    lines[#lines + 1] = "📄 " .. pdf
 
     return table.concat(lines, "\n")
 end
