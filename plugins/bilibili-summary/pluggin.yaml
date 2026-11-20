@@ -8,5 +8,6 @@ permissions:
   - http
   - cache
   - llm
+  - timer
 system: false
 enabled: true

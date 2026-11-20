@@ -30,6 +30,12 @@ configs:
       - "0"
       - "1"
 
+  - key: consume_matched
+    type: bool
+    label: 接管消息（不触发普通回复）
+    description: 命中 B 站链接后由插件接管，Bot 不再对这条消息生成普通回复；关闭则总结的同时 Agent 也会回复
+    default: true
+
   - key: reply_quote
     type: bool
     label: 引用原消息

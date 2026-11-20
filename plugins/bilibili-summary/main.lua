@@ -258,7 +258,8 @@ local function parse_entries(raw)
         if not s then break end
         bv = "BV" .. bv
         local tail = raw:sub(e + 1, e + 80)
-        local p = tonumber(tail:match("^[^%s]-[?&]p=(%d+)"))
+        local pm = tail:match("^[^%s]-[?&]p=(%d+)")
+        local p = pm and tonumber(pm) or nil
         if not p then
             -- p 出现在当前匹配之前（如 BV... 前面有 ?p=2 的情况极少），忽略
         end
@@ -1560,7 +1561,7 @@ function on_message(event)
             rest[#rest + 1] = e
         end
     end
-    if #rest == 0 then return false, nil end
+    if #rest == 0 then return cbool("consume_matched", true), nil end
 
     local ck = chat_key(target)
     local q = queues[ck]
@@ -1570,5 +1571,6 @@ function on_message(event)
         queues[ck] = { items = rest, idx = 0, target = target, running = false }
     end
     run_next(ck)
-    return false, nil
+    -- 命中 B 站链接后默认接管消息，避免 Agent 再对链接本身回复
+    return cbool("consume_matched", true), nil
 end
