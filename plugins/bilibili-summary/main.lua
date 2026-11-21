@@ -799,6 +799,7 @@ local function fetch_view(job)
 end
 
 local PLAYER_RETRIES = 3   -- B 站字幕接口会间歇性返回空数组，重试几次再判定无字幕
+local QUEUE_WATCHDOG_SECONDS = 300   -- 单任务超时上限：异常中断未 finish_job 时强制推进队列
 
 local next_page  -- 前向声明（fetch_player 与 next_page 互相调用）
 
@@ -1381,7 +1382,8 @@ local function handle_subtitle(job, ctx, result)
     if text ~= "" and score == 0 and tries < SUBTITLE_TRIES then
         job.subtitle_tries[ctx.idx] = tries + 1
         jn.log.info("[" .. PLUGIN .. "] 字幕与标题不符，重新获取 P" .. tostring(ctx.idx) .. "（" .. tries .. "/" .. SUBTITLE_TRIES .. "）")
-        fetch_player(job)
+        -- 经定时器重入，避免在异步回调里直接递归发起新请求触发 registry overflow
+        jn.timer.after(1, { jid = job.id, stage = "subtitle_retry", idx = ctx.idx })
         return
     end
     if text ~= "" and score == 0 then
@@ -1473,11 +1475,28 @@ end
 
 -- 定时器回调（字幕接口重试）
 function on_timer_response(req_id, ctx, result, err)
-    if not ctx or not ctx.jid then return end
+    if not ctx then return end
+    if ctx.stage == "queue_watchdog" then
+        local q = queues[ctx.ck]
+        local job = ctx.jid and jobs[ctx.jid] or nil
+        if q and q.running and q.current_jid == ctx.jid and job then
+            jn.log.warn("[" .. PLUGIN .. "] 任务超时未结束，强制推进队列 jid=" .. tostring(ctx.jid) .. " ck=" .. tostring(ctx.ck))
+            finish_job(job)
+        end
+        return
+    end
+    if not ctx.jid then return end
     local job = jobs[ctx.jid]
     if not job then return end
     if ctx.stage == "player_retry" then
         fetch_player(job, tonumber(ctx.attempt) or 1)
+    elseif ctx.stage == "subtitle_retry" then
+        local ok, perr = pcall(fetch_player, job)
+        if not ok then
+            jn.log.warn("[" .. PLUGIN .. "] 字幕重取失败，跳过该 P: " .. tostring(perr))
+            job.subs[ctx.idx] = job.subs[ctx.idx] or { text = "" }
+            next_page(job)
+        end
     end
 end
 
@@ -1571,6 +1590,9 @@ local function run_next(ck)
     end
     q.running = true
     local job = new_job(q.target, entry)
+    q.current_jid = job.id
+    -- 队列看门狗：任务异常中断未调 finish_job 时，超时后强制推进，避免整个群队列永久卡死
+    jn.timer.after(QUEUE_WATCHDOG_SECONDS, { stage = "queue_watchdog", ck = ck, jid = job.id })
     start_entry(job)
 end
 
