@@ -337,26 +337,34 @@ local function extract_cgi_block(html)
     return html:sub(brace, send)
 end
 
--- 按 key 取 cgiDataNew 里的顶层字符串值（带词边界，避免 msg_title 命中 title）。
--- Lua 模式不支持转义引号内的任意内容，这里手动扫描到未转义的结束引号。
+-- 按 key 取 cgiDataNew 里的顶层字符串值。
+-- 不能用 %f[...] frontier：线上 gopher-lua 1.1.2 不支持，会永远匹配不到。
+-- 这里手动检查 key 前一个字符，避免 msg_title 误命中 title。
 local function cgi_string(block, key)
     if not block or block == "" then return "" end
-    local s, e = block:find("%f[%w_]" .. key .. "%s*:%s*'")
-    if not s then return "" end
-    local out, i = {}, e + 1
-    while i <= #block do
-        local c = block:sub(i, i)
-        if c == "\\" then
-            out[#out + 1] = block:sub(i, i + 1)
-            i = i + 2
-        elseif c == "'" then
-            break
-        else
-            out[#out + 1] = c
-            i = i + 1
+    local pos = 1
+    while true do
+        local s, e = block:find(key .. "%s*:%s*'", pos)
+        if not s then return "" end
+        local before = s > 1 and block:sub(s - 1, s - 1) or ""
+        if not before:match("[%w_]") then
+            local out, i = {}, e + 1
+            while i <= #block do
+                local c = block:sub(i, i)
+                if c == "\\" then
+                    out[#out + 1] = block:sub(i, i + 1)
+                    i = i + 2
+                elseif c == "'" then
+                    break
+                else
+                    out[#out + 1] = c
+                    i = i + 1
+                end
+            end
+            return decode_js_string(table.concat(out))
         end
+        pos = e + 1
     end
-    return decode_js_string(table.concat(out))
 end
 
 -- cgiDataNew 块里的正文/图片 URL（排除头像、二维码等装饰图）
