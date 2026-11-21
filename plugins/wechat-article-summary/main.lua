@@ -326,7 +326,7 @@ local function decode_js_string(s)
     return s
 end
 
--- 取 cgiDataNew 顶层块（window.cgiDataNew = { ... };）
+-- 取 cgiDataNew 顶层块（另一类文章形态的数据源，非“新版”替代）
 local function extract_cgi_block(html)
     local start = html:find("window%.cgiDataNew%s*=%s*%{")
     if not start then return "" end
@@ -337,11 +337,26 @@ local function extract_cgi_block(html)
     return html:sub(brace, send)
 end
 
--- 按 key 取 cgiDataNew 里的顶层字符串值（带词边界，避免 msg_title 命中 title）
+-- 按 key 取 cgiDataNew 里的顶层字符串值（带词边界，避免 msg_title 命中 title）。
+-- Lua 模式不支持转义引号内的任意内容，这里手动扫描到未转义的结束引号。
 local function cgi_string(block, key)
     if not block or block == "" then return "" end
-    local v = block:match("%f[%w_]" .. key .. "%s*:%s*'((?:\\.|[^\\'])*)'")
-    return decode_js_string(v or "")
+    local s, e = block:find("%f[%w_]" .. key .. "%s*:%s*'")
+    if not s then return "" end
+    local out, i = {}, e + 1
+    while i <= #block do
+        local c = block:sub(i, i)
+        if c == "\\" then
+            out[#out + 1] = block:sub(i, i + 1)
+            i = i + 2
+        elseif c == "'" then
+            break
+        else
+            out[#out + 1] = c
+            i = i + 1
+        end
+    end
+    return decode_js_string(table.concat(out))
 end
 
 -- cgiDataNew 块里的正文/图片 URL（排除头像、二维码等装饰图）
@@ -382,7 +397,7 @@ local function extract_cgi_images(block)
     return imgs
 end
 
--- 新格式正文：cgiDataNew 的 content_noencode 是纯文本（\x0a 换行）或少量 HTML；
+-- 该形态正文：cgiDataNew 的 content_noencode 是纯文本（\x0a 换行）或少量 HTML；
 -- 保留换行，压缩行内空白，不同于经典页的 html_to_text。
 local function cgi_text_to_text(s)
     if not s or s == "" then return "" end
@@ -394,9 +409,9 @@ local function cgi_text_to_text(s)
     s = s:gsub("&quot;", '"'):gsub("&#39;", "'"):gsub("&amp;", "&")
     local lines = {}
     for line in (s .. "\n"):gmatch("([^\n]*)\n") do
-        line = line:gsub("[ \t\r]+", " ")
-        line = line:gsub("^%s+", ""):gsub("%s+$", "")
-        lines[#lines + 1] = line
+        local l = line:gsub("[ \t\r]+", " ")
+        l = l:gsub("^%s+", ""):gsub("%s+$", "")
+        lines[#lines + 1] = l
     end
     while #lines > 1 and lines[#lines] == "" do lines[#lines] = nil end
     return table.concat(lines, "\n")
@@ -426,7 +441,8 @@ local function parse_article(body)
     if body:find("环境异常", 1, true) then
         return nil, "微信风控拦截，请稍后再试"
     end
-    -- 新格式（cgiDataNew）：正文在 content_noencode，标题/公众号名也可从这里取，图片全量提取
+    -- 另一类文章形态（cgiDataNew 数据块）：无 js_content，正文在 content_noencode，
+    -- 标题/公众号名也可从这里取，图片全量提取；经典 js_content 页不受影响。
     local cgi = extract_cgi_block(body)
     if cgi ~= "" then
         local content = cgi_text_to_text(cgi_string(cgi, "content_noencode"))
@@ -446,7 +462,7 @@ local function parse_article(body)
             }, nil
         end
     end
-    -- 新格式：无 js_content，正文在 meta description（字面 \x0a 为换行），图片从整页提取
+    -- 另一种形式：无 js_content，正文在 meta description（字面 \x0a 为换行），图片从整页提取
     local desc_content = body:match('<meta name="description" content="(.-)"') or ""
     if desc_content == "" then
         return nil, "文章内容为空"
