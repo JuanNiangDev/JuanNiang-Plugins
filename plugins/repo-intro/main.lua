@@ -301,10 +301,112 @@ local function copy_ctx(ctx)
     return c
 end
 
-local function truncate(str)
+local function is_model_entry(e)
+    return e ~= nil and (e.kind == "hf" or e.kind == "ms")
+        and e.sub ~= "datasets" and e.sub ~= "spaces"
+end
+
+local function truncate(str, e)
     local max = cfg_num("max_readme_chars", 10000)
+    if is_model_entry(e) then max = cfg_num("model_readme_max_chars", 30000) end
     if #str > max then return str:sub(1, max) end
     return str
+end
+
+local function url_encode(s)
+    return (s:gsub("([^%w%-_%.~])", function(c)
+        return string.format("%%%02X", c:byte())
+    end))
+end
+
+local function image_base_for(e)
+    if e.kind == "hf" then
+        return "https://" .. hf_host() .. "/" .. e.owner .. "/" .. e.repo .. "/resolve/main/"
+    elseif e.kind == "ms" then
+        return "https://modelscope.cn/models/" .. e.owner .. "/" .. e.repo .. "/resolve/master/"
+    end
+    return ""
+end
+
+local function scan_images(blob, base, out, seen, cap)
+    if not blob or blob == "" then return end
+    local function add(u)
+        if not u or u == "" or #out >= cap then return end
+        u = u:gsub("&amp;", "&")
+        local low = u:lower()
+        if low:match("^data:") or low:find("shields%.io", 1, true)
+            or low:find("badge", 1, true) or low:find("avatar", 1, true)
+            or low:match("%.svg$") then return end
+        if not u:match("^https?://") then u = base .. u:gsub("^/", "") end
+        if not seen[u] then seen[u] = true; out[#out + 1] = u end
+    end
+    for u in blob:gmatch('<img%s[^>]-src%s*=%s*"([^"]+)"') do add(u) end
+    for u in blob:gmatch("<img%s[^>]-src%s*=%s*'([^']+)'") do add(u) end
+    for u in blob:gmatch('!%[%[^%]]*%]%(([^%s%)]+)') do add(u) end
+end
+
+-- 从 README 与其引用的 blog/model-card 页面取候选图，再用视觉模型挑架构图/benchmark 图
+local function collect_readme_images(e)
+    if not is_model_entry(e) or not e.readme or e.readme == "" then return {} end
+    local limit = cfg_num("key_image_count", 2)
+    if limit <= 0 then return {} end
+    local proxy = cfg_string("key_image_proxy", "https://wsrv.nl/?url=")
+    local candidates, seen = {}, {}
+    scan_images(e.readme, image_base_for(e), candidates, seen, 8)
+
+    local pages, pseen = {}, {}
+    for raw_u in e.readme:gmatch('https?://[%w%-%._/%?=&#]+') do
+        local u = raw_u:gsub("&amp;", "&")
+        if (u:find("/blog/", 1, true) or u:find("/news/", 1, true)
+                or u:find("arxiv.org/abs/", 1, true) or u:find("model%-card", 1, true))
+            and not pseen[u] and #pages < 2 then
+            pseen[u] = true
+            local fetch_url = u:gsub("^https://huggingface%.co", "https://hf-mirror.com")
+                :gsub("^https://hf%.co", "https://hf-mirror.com")
+            local ok, res = pcall(function() return jn.http.get(fetch_url) end)
+            if ok and res and res.body and res.body ~= "" then
+                scan_images(res.body, fetch_url .. "/", candidates, seen, 8)
+            end
+        end
+    end
+
+    local chosen = {}
+    for _, u in ipairs(candidates) do
+        if #chosen >= limit then break end
+        local desc
+        local ok, v = pcall(function()
+            return jn.llm.vision_url("", u,
+                "这张图是模型架构图、结构图、流程图或 benchmark/性能对比图表吗？只回答：是/否 + 一句话说明。")
+        end)
+        if ok then desc = v end
+        local low = tostring(desc or ""):lower()
+        local relevant = low:find("架构", 1, true) or low:find("结构", 1, true)
+            or low:find("流程", 1, true) or low:find("benchmark", 1, true)
+            or low:find("基准", 1, true) or low:find("性能", 1, true)
+            or low:find("图表", 1, true) or low:find("architect", 1, true)
+            or low:find("diagram", 1, true) or low:find("chart", 1, true)
+            or low:find("performance", 1, true)
+        local is_logo = low:find("logo", 1, true) or low:find("标志", 1, true)
+            or low:find("商标", 1, true)
+        if relevant and not is_logo then chosen[#chosen + 1] = u end
+    end
+
+    if #chosen == 0 then
+        for _, u in ipairs(candidates) do
+            local low = u:lower()
+            if low:find("bench", 1, true) or low:find("arch", 1, true)
+                or low:find("figure", 1, true) or low:find("eval", 1, true) then
+                chosen[#chosen + 1] = u
+                if #chosen >= limit then break end
+            end
+        end
+    end
+
+    local out = {}
+    for _, u in ipairs(chosen) do
+        out[#out + 1] = proxy ~= "" and (proxy .. url_encode(u)) or u
+    end
+    return out
 end
 
 -- --------------------------------------------------------------------
@@ -491,7 +593,7 @@ end
 -- --------------------------------------------------------------------
 local function llm_system_prompt()
     local min_c = tostring(cfg_num("summary_min_chars", 50))
-    local max_c = tostring(cfg_num("summary_max_chars", 150))
+    local max_c = tostring(cfg_num("summary_max_chars", 400))
     local p = [[你是中文仓库介绍助手。用户会给你若干仓库（GitHub / Hugging Face / ModelScope）的元数据与 README 内容，请对每个仓库独立判定类型、写出简体中文介绍，最后按指定 JSON 输出。
 
 【零、通用铁律（所有仓库必做）】
@@ -542,6 +644,16 @@ summary 要点（按子类型，均遵守零.8 反罗列、精炼）：SDK/库�
 
 文本对话/推理模型总结重点：架构（MoE 稀疏或稠密）、上下文长度、参数（MoE 必写"总参 X / 激活 Y"，如"总参 428B / 激活 23B"；稠密直接给）、精度（FP8/BF16/FP4）、多模态支持（纯文本或可视觉输入，写清输入模态）、专长（只写 README 明确的 benchmark 类别：长文本推理、agent、编码、数学推理、中文等）、工具调用/函数调用、许可协议、部署（vLLM/transformers/Ollama）。
 
+【二·A、HF/MS 模型卡片总结范式（模型页覆盖通用罗列限制，字数仍为 __MAX__）】
+仅适用于 Hugging Face / ModelScope 的模型页（不含 datasets / spaces）。以技术底层为主，内容充分时 summary 写成 1~4 段、最多 __MAX__ 字；通用第 8/10 条的“清单最多 2 个”在此不适用，但仍禁止编造与空话。按以下优先级取数，缺哪项就跳过哪项：
+1. 定位与架构：一句话说明模型是什么，然后写底层设计——稠密/MoE/循环 Transformer、层数与共享权重方式、路由专家数、注意力机制、原生多模态如何实现；不要只写“功能强大”等营销话术。
+2. 参数与计算口径：总参、激活参，以及每 token 的有效激活参数/权重访问量/循环次数等 README 明确给出的口径（如“26.4B 总参 / 3.4B 激活；三次循环后每 token 有效激活 5.4B”）。
+3. 核心特色与能力：上下文长度、输入/输出模态、图像分辨率范围、工具调用、许可与部署框架；只写 README 明确的，最多概括 2 项特色。
+4. Benchmark：最多列 3 个、优先 2 个最有代表性的基准，写清基准名 + 分数 + 对比范围（如“DeepSWE v1.1 48.2%、Vals Index v2.2 46.5%，在总参低于 100B 的开放权重模型中领先”）；有速度、显存、内存对比时写具体数值与单位。
+5. 工程信息：训练/部署精度（NVFP4、MXFP8、FP8、BF16 等）、量化方式、显存/内存占用、推理框架；最多写 2 个精度/框架名。
+6. 官方链接：末尾只列 README 或输入元数据中明确给出的 Blog / arXiv / Hugging Face / ModelScope / model card 等原始链接，最多 3 条；用平台名或简短语义标签（如“Blog:”“Hugging Face:”“ModelScope:”）；同一 URL 只出现一次，且必须包含输入里的 url（仓库原始链接）；没有就不写。
+数字、单位、基准名、精度名必须与 README 一致，禁止估算、禁止写“约/≈”；模型名与基准名保留原文。此范式只改变详略与分段，不改变零.1 的真实性铁律。
+
 其他模型类别要点：
 - 多模态：输入模态（图像/视频/音频）、图像分辨率、视频理解与 OCR 能力、参数量、上下文长度
 - 图像生成：文生/图生、分辨率（1K/2K/4K）、架构（DiT/扩散）、是否加速版（Turbo）、library（diffusers/ComfyUI）
@@ -557,7 +669,7 @@ summary 要点（按子类型，均遵守零.8 反罗列、精炼）：SDK/库�
 - Space：SDK、功能、能否在线使用
 
 【三、输出格式】严格只输出如下 JSON（不要输出 JSON 以外的任何内容，不要用代码块包裹）：
-{"repos":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字，无信息时可用仓库名，禁止套话）","summary":"精炼介绍（简体中文，通常 __MIN__~__MAX__字；内容充分时写足、内容稀少时写短或留空；突出是什么、能做什么、关键数字；严禁空话套话旁白与罗列；不得重复 desc_cn）","desc_cn":"官方描述中文翻译（GitHub 必填，无则空字符串）"}]}
+{"repos":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字，无信息时可用仓库名，禁止套话）","summary":"精炼介绍（简体中文，通常 __MIN__~__MAX__字；内容充分时写足、内容稀少时写短或留空；突出是什么、能做什么、关键数字；模型页按【二·A】以技术与 benchmark 为主；严禁空话套话旁白；不得重复 desc_cn）","desc_cn":"官方描述中文翻译（GitHub 必填，无则空字符串）"}]}
 index 与输入仓库编号一一对应（从 1 开始）。]]
     return p:gsub("__MIN__", min_c):gsub("__MAX__", max_c)
 end
@@ -1227,7 +1339,10 @@ local function compose_section(e)
     if summary ~= "" then
         lines[#lines + 1] = summary
     end
-    lines[#lines + 1] = e.url or ""
+    local url = e.url or ""
+    if url ~= "" and not (summary ~= "" and summary:find(url, 1, true)) then
+        lines[#lines + 1] = url
+    end
     return table.concat(lines, "\n")
 end
 
@@ -1245,6 +1360,11 @@ local function compose_segments(batch)
             end
             first = false
             segs[#segs + 1] = { type = "text", data = { text = text } }
+            local imgs = e.key_images
+            if not imgs then imgs = collect_readme_images(e) end
+            for _, img in ipairs(imgs) do
+                segs[#segs + 1] = { type = "image", data = { file = img } }
+            end
             if send_card and e.card_url and e.card_url ~= "" then
                 segs[#segs + 1] = { type = "image", data = { file = e.card_url } }
             end
@@ -1549,7 +1669,7 @@ local function handle_readme(ctx, result, err)
         -- （国内常被墙/超时，导致 README 缺失、LLM 只能写"无 README/详见文档"套话）。
         local decoded = b64_decode(data.content)
         if decoded and decoded ~= "" then
-            e.readme = truncate(decoded)
+            e.readme = truncate(decoded, e)
             batch.pending = batch.pending - 1
             return
         end
@@ -1568,7 +1688,8 @@ local function handle_readme(ctx, result, err)
     -- HF：main 404 则重试 master 分支
     if e.kind == "hf" then
         if not err and result and result.status == 200 and result.body and result.body ~= "" then
-            e.readme = truncate(result.body)
+            e.readme = truncate(result.body, e)
+            e.key_images = collect_readme_images(e)
             batch.pending = batch.pending - 1
             return
         end
@@ -1590,7 +1711,8 @@ local function handle_readme(ctx, result, err)
 
     -- MS：成功则取内容
     if not err and result and result.status == 200 and result.body and result.body ~= "" then
-        e.readme = truncate(result.body)
+        e.readme = truncate(result.body, e)
+        e.key_images = collect_readme_images(e)
     end
     batch.pending = batch.pending - 1
 end

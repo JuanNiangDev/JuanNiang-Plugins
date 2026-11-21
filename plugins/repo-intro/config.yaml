@@ -69,8 +69,13 @@ configs:
   - key: max_readme_chars
     type: string
     label: README 最大输入字数
-    description: 送入 LLM 的 README 最大字符数，默认 10000
+    description: 送入 LLM 的 README 最大字符数，默认 10000；Hugging Face / ModelScope 模型页改用 model_readme_max_chars
     default: "10000"
+  - key: model_readme_max_chars
+    type: string
+    label: 模型 README 最大输入字数
+    description: HF/MS 模型页送入 LLM 的 README 最大字符数，默认 30000，确保 benchmark 与架构章节不被截断
+    default: "30000"
 
   - key: llm_timeout
     type: string
@@ -93,8 +98,18 @@ configs:
   - key: summary_max_chars
     type: string
     label: 总结最大字数
-    description: LLM 总结的最多字数，默认 150
-    default: "150"
+    description: LLM 总结的最多字数，默认 400
+    default: "400"
+  - key: key_image_count
+    type: string
+    label: 随总结发送的关键图片数
+    description: HF/MS 模型页从 README 提取并随总结发送的关键图片数量，默认 2，0 关闭
+    default: "2"
+  - key: key_image_proxy
+    type: string
+    label: 关键图片代理前缀
+    description: HF/MS 模型页关键图片走该代理再发图，默认 wsrv.nl；留空则直接发原图 URL
+    default: "https://wsrv.nl/?url="
 
   - key: card_enabled
     type: bool

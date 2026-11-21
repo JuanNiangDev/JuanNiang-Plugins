@@ -211,10 +211,26 @@ local function ua()
     return cstr("ua", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
 end
 
+local function buvid_cookie()
+    local parts = {}
+    local v = jn.cache.get("bili:buvid")
+    if type(v) == "table" then
+        if v.b3 and v.b3 ~= "" then parts[#parts + 1] = "buvid3=" .. v.b3 end
+        if v.b4 and v.b4 ~= "" then parts[#parts + 1] = "buvid4=" .. v.b4 end
+    end
+    local b3 = cstr("buvid3", "")
+    local b4 = cstr("buvid4", "")
+    if b3 ~= "" then parts[#parts + 1] = "buvid3=" .. b3 end
+    if b4 ~= "" then parts[#parts + 1] = "buvid4=" .. b4 end
+    return table.concat(parts, "; ")
+end
+
 local function cookie_header()
     local ck = cstr("cookie", "")
-    if ck == "" then return nil end
-    return ck
+    local extra = buvid_cookie()
+    if ck == "" then return extra ~= "" and extra or nil end
+    if extra == "" then return ck end
+    return ck .. "; " .. extra
 end
 
 local function headers_for(referer, with_cookie, html)
@@ -224,6 +240,9 @@ local function headers_for(referer, with_cookie, html)
             or "application/json, text/plain, */*",
         ["Accept-Language"] = "zh-CN,zh;q=0.9",
         ["Origin"] = "https://www.bilibili.com",
+        ["Sec-Fetch-Site"] = "same-origin",
+        ["Sec-Fetch-Mode"] = "cors",
+        ["Sec-Fetch-Dest"] = "empty",
     }
     if referer and referer ~= "" then h["Referer"] = referer end
     if with_cookie then
@@ -235,6 +254,35 @@ end
 
 local function http_get(url, ctx, referer, with_cookie, html)
     return jn.http.get_async(url, ctx, headers_for(referer, with_cookie, html), cstr("proxy", ""))
+end
+
+-- B 站视频页会带 buvid3/buvid4；服务端手工 Cookie 通常没有，补一次并缓存。
+-- 不阻塞主流程：取不到也继续用现有 Cookie。
+local function ensure_buvid(job, next_fn)
+    local v = jn.cache.get("bili:buvid")
+    if type(v) == "table" and v.b3 and v.b4 then
+        next_fn()
+        return
+    end
+    job.after_spi = next_fn
+    local rid = http_get("https://api.bilibili.com/x/frontend/finger/spi",
+        { jid = job.id, stage = "spi" }, "https://www.bilibili.com/", false)
+    if not rid or rid == 0 then
+        job.after_spi = nil
+        next_fn()
+    end
+end
+
+local function handle_spi(job, result, next_fn)
+    job.after_spi = nil
+    local ok, data = pcall(function() return jn.json.decode(result and result.body or "") end)
+    if ok and type(data) == "table" and type(data.data) == "table" then
+        local d = data.data
+        if type(d.b_3) == "string" and d.b_3 ~= "" and type(d.b_4) == "string" and d.b_4 ~= "" then
+            jn.cache.set("bili:buvid", { b3 = d.b_3, b4 = d.b_4 }, 7 * 24 * 3600)
+        end
+    end
+    if next_fn then next_fn() end
 end
 
 -- --------------------------------------------------------------------
@@ -382,6 +430,15 @@ local function cache_set(e, payload)
     jn.cache.set(cache_key(e), payload, cnum("cache_ttl", 604800))
 end
 
+-- 只有相关度通过且未被分类器剔除的字幕才允许写入缓存。
+local function subtitle_clean(job)
+    if not job or job.subtitle_lost then return false end
+    for _, s in ipairs(job.subs or {}) do
+        if s and s.weak then return false end
+    end
+    return true
+end
+
 -- --------------------------------------------------------------------
 -- 任务队列（同一会话串行）
 -- --------------------------------------------------------------------
@@ -437,11 +494,20 @@ local function send_payload(target, text, images, quote)
     return jn.onebot11.send_private_msg(target.target_id, segs)
 end
 
+local render_video, render_article  -- 前向声明：send_error 失败时只渲染元信息
+
 local function send_error(job, reason)
-    local e = job.entry
-    local label = "哔哩哔哩"
-    if e.kind == "opus" or e.kind == "read" then label = "专栏" end
-    send_payload(job.target, "❌ " .. label .. "总结失败：" .. reason, nil, true)
+    jn.log.warn("[" .. PLUGIN .. "] 总结失败，降级为元信息：" .. tostring(reason))
+    if not job then return end
+    local e = job.entry or {}
+    if e.kind == "opus" or e.kind == "read" then
+        if not job.meta then return end
+        local text, images = render_article(job)
+        send_payload(job.target, text, images, true)
+        return
+    end
+    local text, images = render_video(job)
+    send_payload(job.target, text, images, true)
 end
 
 -- --------------------------------------------------------------------
@@ -473,7 +539,7 @@ local function video_url(meta, page)
     return "https://www.bilibili.com/video/" .. bvid
 end
 
-local function render_video(job)
+render_video = function(job)
     local m = job.meta or {}
     local llm = job.llm or {}
     local lines = {}
@@ -525,7 +591,7 @@ local function render_video(job)
     return table.concat(lines, "\n"), images
 end
 
-local function render_article(job)
+render_article = function(job)
     local m = job.meta or {}
     local llm = job.llm or {}
     local lines = {}
@@ -742,7 +808,13 @@ local function fetch_player(job, attempt)
         start_llm(job)
         return
     end
-    local url = "https://api.bilibili.com/x/player/v2?bvid=" .. job.entry.bvid .. "&cid=" .. tostring(page.cid)
+    local aid = job.meta and job.meta.aid or 0
+    if aid <= 0 then
+        job.subs[job.idx] = { text = "" }
+        next_page(job)
+        return
+    end
+    local url = "https://api.bilibili.com/x/player/wbi/v2?aid=" .. tostring(aid) .. "&cid=" .. tostring(page.cid)
     local rid = http_get(url, { jid = job.id, stage = "player", idx = job.idx, attempt = attempt or 0 },
         "https://www.bilibili.com/video/" .. job.entry.bvid .. "/", true)
     if not rid or rid == 0 then
@@ -781,7 +853,7 @@ end
 local function start_entry(job)
     local e = job.entry
     if e.kind == "video" then
-        fetch_view(job)
+        ensure_buvid(job, function() fetch_view(job) end)
     elseif e.kind == "b23" then
         -- 直接访问 b23.tv 会跟随跳转到 www.bilibili.com/video/... 页面（B 站风控 412）；
         -- 本地代理只取 Location，不跟随跳转，再交给 handle_resolve 从 URL 里解析 BV/opus。
@@ -1030,7 +1102,7 @@ local function start_summary(job)
             job.llm = { no_content = true, summary = "", parts = {}, persona = "" }
             local text, images = render_video(job)
             send_payload(job.target, text, images, true)
-            if not job.subtitle_lost then cache_set(e, { text = text, images = images }) end
+            if subtitle_clean(job) then cache_set(e, { text = text, images = images }) end
             finish_job(job)
             return
         end
@@ -1095,7 +1167,7 @@ local function handle_resolve(job, result)
         end
         job.entry.url = "https://www.bilibili.com/video/" .. bv ..
             (job.entry.page and ("?p=" .. job.entry.page) or "")
-        fetch_view(job)
+        ensure_buvid(job, function() fetch_view(job) end)
         return
     end
     local opus = body:match('"detail":%s*{%s*"id_str":%s*"(%d+)"')
@@ -1132,6 +1204,7 @@ local function handle_view(job, result)
     end
     local d = data.data
     job.meta = {
+        aid = tonumber(d.aid) or 0,
         bvid = d.bvid or job.entry.bvid,
         title = d.title or "",
         owner_name = (d.owner or {}).name or "",
@@ -1186,9 +1259,10 @@ local function handle_player(job, ctx, result)
 
     if chosen then
         local u = chosen.subtitle_url
-        if u:sub(1, 2) == "//" then u = "https:" .. u end
-        local rid = http_get(u, { jid = job.id, stage = "subtitle", idx = ctx.idx },
-            "https://www.bilibili.com/video/" .. job.entry.bvid .. "/", true)
+        if u:sub(1, 2) == "//" then u = "https:" .. u
+        elseif u:sub(1, 7) == "http://" then u = "https://" .. u:sub(8) end
+        -- 字幕 JSON 是公开 CDN 文件，不携带 Cookie/Referer。
+        local rid = http_get(u, { jid = job.id, stage = "subtitle", idx = ctx.idx }, "", false)
         if rid and rid ~= 0 then return end
     end
     -- 接口会间歇性返回空 subtitles（同一 cid 多次请求结果不同），重试几次
@@ -1357,6 +1431,16 @@ function on_http_response(req_id, ctx, result, err)
     if not ctx or not ctx.jid then return end
     local job = jobs[ctx.jid]
     if not job then return end
+    if ctx.stage == "spi" then
+        local next_fn = job.after_spi
+        job.after_spi = nil
+        if err or not result or (result.status or 0) < 200 or (result.status or 0) >= 300 then
+            if next_fn then next_fn() end
+            return
+        end
+        handle_spi(job, result, next_fn)
+        return
+    end
     if err then
         job.err = tostring(err)
         jn.log.warn("[" .. PLUGIN .. "] 请求失败 stage=" .. tostring(ctx.stage) .. " err=" .. tostring(err))
@@ -1469,7 +1553,7 @@ function on_chat_response(req_id, content, err)
     local text, images
     if is_article then text, images = render_article(job) else text, images = render_video(job) end
     send_payload(job.target, text, images, true)
-    if not job.subtitle_lost then cache_set(job.entry, { text = text, images = images }) end
+    if subtitle_clean(job) then cache_set(job.entry, { text = text, images = images }) end
     finish_job(job)
 end
 
@@ -1530,11 +1614,6 @@ function on_message(event)
 
     local raw = event.raw_message or ""
     if wm_own(raw) then return false, nil end
-    if not (raw:find("BV", 1, true) or raw:find("b23.tv", 1, true)
-        or raw:find("bilibili.com", 1, true) or raw:find("com.tencent.miniapp", 1, true)) then
-        return false, nil
-    end
-
     local entries = collect_entries(raw)
     if #entries == 0 then return false, nil end
     local max = math.max(1, cnum("max_links", 3))
