@@ -1,9 +1,8 @@
 -- ====================================================================
 -- bilibili-summary 哔哩哔哩内容总结插件
 -- --------------------------------------------------------------------
--- 识别一条消息中的 B 站链接（可混合多种）：
+-- 识别一条消息中的 B 站链接（可混合多种；裸 BV 不触发）：
 --   · 视频长链  https://www.bilibili.com/video/BVxxxxxxxxxx/?p=2
---   · 裸 BV 号   BV1B2oaB8ETM
 --   · 短链      https://b23.tv/xxxxxxx（302 到视频 / opus / 专栏）
 --   · 小程序卡片 [CQ:json,data=...]（meta.detail_1.qqdocurl 为 b23 链接）
 --   · 专栏      https://www.bilibili.com/opus/<id>、/read/cv<id>
@@ -299,18 +298,15 @@ local function parse_entries(raw)
         entries[#entries + 1] = e
     end
 
-    -- 1) BV 号（长链与裸号都在这里命中；先取 p 参数再判定）
+    -- 1) 只从 bilibili.com/video/ 链接里取 BV；裸 BV 不再识别
     local pos = 1
     while true do
-        local s, e, bv = raw:find("BV([1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z])", pos)
+        local s, e, bv = raw:find("bilibili%.com/video/BV([1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z])", pos)
         if not s then break end
         bv = "BV" .. bv
         local tail = raw:sub(e + 1, e + 80)
         local pm = tail:match("^[^%s]-[?&]p=(%d+)")
         local p = pm and tonumber(pm) or nil
-        if not p then
-            -- p 出现在当前匹配之前（如 BV... 前面有 ?p=2 的情况极少），忽略
-        end
         add({
             kind = "video", bvid = bv, page = p,
             key = "v:" .. bv .. (p and (":" .. p) or ""),
@@ -1636,6 +1632,10 @@ function on_message(event)
 
     local raw = event.raw_message or ""
     if wm_own(raw) then return false, nil end
+    -- 只识别 b23.tv / bilibili.com；裸 BV 号和其他站点不触发
+    if not (raw:find("b23.tv", 1, true) or raw:find("bilibili.com", 1, true)) then
+        return false, nil
+    end
     local entries = collect_entries(raw)
     if #entries == 0 then return false, nil end
     local max = math.max(1, cnum("max_links", 3))
