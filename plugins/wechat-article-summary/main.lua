@@ -443,6 +443,7 @@ local function parse_article(body)
             account = account,
             content = truncate(content),
             images = extract_images(body_html),
+            image_mode = "cover",
         }, nil
     end
     -- 风控验证页（无 js_content 且含"环境异常"）
@@ -467,6 +468,7 @@ local function parse_article(body)
                 account = cgi_account ~= "" and cgi_account or account,
                 content = truncate(content),
                 images = images,
+                image_mode = "all",
             }, nil
         end
     end
@@ -483,6 +485,7 @@ local function parse_article(body)
         account = account,
         content = truncate(content),
         images = extract_page_images(body),
+        image_mode = "cover",
     }, nil
 end
 
@@ -497,9 +500,10 @@ local function article_cache_get(e)
     if not v.summary then return nil end
     -- 缓存结构升级：旧缓存无 account、无 cover 或图文支持前无 images，视为未命中重建
     if not v.account or not v.cover or not v.images then return nil end
-    -- 恢复抓取期 meta（标题/公众号名/封面图/图片），缓存命中时输出段完整
+    -- 恢复抓取期 meta（标题/公众号名/封面图/图片/图片模式），缓存命中时输出段完整
+    -- 旧缓存没有 image_mode：按普通文章处理，只发封面
     e.meta = { title = v.title or "", account = v.account or "", cover = v.cover or "", desc = "",
-               images = v.images or {} }
+               images = v.images or {}, image_mode = v.image_mode or "cover" }
     return v
 end
 
@@ -589,24 +593,25 @@ local function compose_section(e)
     return table.concat(lines, "\n")
 end
 
--- 单篇封面：og:image 优先，其次正文第一张图；只要一张，避免多图刷屏
+-- 普通文章封面：只认 og:image，不再回退正文第一张图
 local function cover_of(e)
     if not (e and e.meta) then return nil end
     local c = e.meta.cover
     if c and c ~= "" then return c end
-    if e.meta.images and #e.meta.images > 0 then return e.meta.images[1] end
     return nil
 end
 
--- 单篇节点：文本段 + 一张封面
+-- 单篇节点：普通文章只发封面；cgiDataNew 图文形态发送全部正文图片
 local function section_segments(e)
     local segs = { { type = "text", data = { text = compose_section(e) } } }
     if cfg_bool("send_cover", true) then
+        local mode = (e.meta and e.meta.image_mode) or "cover"
         local images = {}
-        if e.meta and e.meta.images and #e.meta.images > 0 then
-            images = e.meta.images -- 正文里有图就全量发送
-        elseif cover_of(e) then
-            images = { cover_of(e) } -- 无正文图时兜底封面
+        if mode == "all" then
+            images = (e.meta and e.meta.images) or {} -- 图文：全量发送
+        else
+            local img = cover_of(e)
+            if img then images = { img } end -- 普通文章：只发封面
         end
         for _, img in ipairs(images) do
             if img and img ~= "" then
@@ -852,6 +857,7 @@ function on_chat_response(req_id, content, err)
                     cover = (e.meta and e.meta.cover) or "",
                     summary = r.summary and tostring(r.summary) or "",
                     images = (e.meta and e.meta.images) or {},
+                    image_mode = (e.meta and e.meta.image_mode) or "cover",
                 }
                 e.llm = content_tbl
                 article_cache_set(e, content_tbl)
