@@ -43,6 +43,11 @@ configs:
     label: "过滤机器人自身发言"
     description: "开启后机器人自身的普通回复不纳入聊天分析（防死循环自我总结）；带本机水印的插件输出（repo-intro / 公众号总结）仍会入库，用于复用已发过的标题与简介"
     default: true
+  - key: enable_projects
+    type: bool
+    label: "开源项目总结"
+    description: "开启后收集仓库链接与 repo-intro 卡片并生成开源项目板块；关闭后不收集、不补全简介、不发送该板块"
+    default: true
 
   - key: filter_keywords
     type: list

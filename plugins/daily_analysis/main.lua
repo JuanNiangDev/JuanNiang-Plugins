@@ -5,14 +5,25 @@
 -- ============================================================================
 
 local jn = require("jn")
--- 引擎没有给插件目录挂 package.path，共享模块用 jn.file.read + loadstring 载入
+-- 新引擎用 jn.file.read；旧引擎没有 jn.file，退回 package.path 从插件目录 require。
 local function load_juya()
-    local src, err = jn.file.read("juya.lua")
-    if not src then return nil, "juya.lua 读取失败: " .. tostring(err) end
-    local chunk, lerr = loadstring(src, "juya.lua")
-    if not chunk then return nil, "juya.lua 语法错误: " .. tostring(lerr) end
-    local ok, factory = pcall(chunk)
-    if not ok or type(factory) ~= "function" then return nil, "juya.lua 初始化失败" end
+    local factory
+    if type(jn.file) == "table" and type(jn.file.read) == "function" then
+        local src, err = jn.file.read("juya.lua")
+        if not src then return nil, "juya.lua 读取失败: " .. tostring(err) end
+        local chunk, lerr = loadstring(src, "juya.lua")
+        if not chunk then return nil, "juya.lua 语法错误: " .. tostring(lerr) end
+        local ok, f = pcall(chunk)
+        if not ok or type(f) ~= "function" then return nil, "juya.lua 初始化失败" end
+        factory = f
+    else
+        local old_path = package and package.path
+        if package then package.path = "data/pluggins/daily_analysis/?.lua;" .. tostring(old_path or "") end
+        local ok, f = pcall(require, "juya")
+        if package then package.path = old_path or "" end
+        if not ok or type(f) ~= "function" then return nil, "juya.lua 读取失败: " .. tostring(f) end
+        factory = f
+    end
     local ok2, mod = pcall(factory, jn)
     if not ok2 or type(mod) ~= "table" then return nil, "juya.lua 执行失败: " .. tostring(mod) end
     return mod
@@ -862,6 +873,7 @@ end
 -- articles 取公众号总结（标题/摘要仍供新闻事件合并复用）
 local function collect_sources(messages)
     local projects, pindex = {}, {}
+    local projects_on = da_bool("enable_projects", true)
     local bot_article = {}
     local bot_raw = {}   -- raw_message -> true，第二轮回链时跳过 bot 消息
     local img_total = 0
@@ -888,7 +900,7 @@ local function collect_sources(messages)
             local src = raw
             if not src:find("📦", 1, true) then src = text end
             for _, b in ipairs(parse_bot_blocks(src)) do
-                if b.kind == "repo" and b.name ~= "" then
+                if projects_on and b.kind == "repo" and b.name ~= "" then
                     local key = b.name:lower()
                     img_total = img_total + #b.images
                     if pindex[key] then
@@ -909,6 +921,7 @@ local function collect_sources(messages)
     local repo_seen = {}
     for k in pairs(pindex) do repo_seen[k] = true end
     local function add_repo(kind, name, url)
+        if not projects_on then return end
         local key = name:lower()
         if repo_seen[key] then return end
         repo_seen[key] = true
@@ -1285,7 +1298,7 @@ end
 
 local function build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages)
     local projects, articles = collect_sources(messages or {})
-    enrich_repos(projects)
+    if da_bool("enable_projects", true) then enrich_repos(projects) end
     local juya_items = {}
     local news_on = false
     for _, s in ipairs(parse_sections_config()) do
