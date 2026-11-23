@@ -1243,13 +1243,65 @@ local function fill_template(tpl, e)
     return out
 end
 
+-- 群聊内容脱敏：QQ 群对“白嫖/福利/免费/抽奖/试用/推广/虚假”等词更敏感，
+-- 群消息可能被静默吞掉；私聊不受影响，保持原文。
+local GROUP_REPLACE = {
+    { "白嫖", "免费获取" },
+    { "福利", "资源" },
+    { "免费", "开放" },
+    { "抽奖", "活动" },
+    { "试用", "体验" },
+    { "推广", "分享" },
+    { "虚假", "不实" },
+}
+
+local function sanitize_group_text(s)
+    if type(s) ~= "string" or s == "" then return s, false end
+    local out, changed = s, false
+    for _, kv in ipairs(GROUP_REPLACE) do
+        local n
+        out, n = out:gsub(kv[1], kv[2])
+        if n > 0 then changed = true end
+    end
+    return out, changed
+end
+
+local function sanitize_entry_for_group(e)
+    local copy, changed = {}, false
+    for k, v in pairs(e) do copy[k] = v end
+    local function scrub(tbl)
+        if type(tbl) ~= "table" then return nil, false end
+        local out, any = {}, false
+        for k, v in pairs(tbl) do
+            if type(v) == "string" then
+                local nv, ch = sanitize_group_text(v)
+                out[k] = nv
+                if ch then any = true end
+            else
+                out[k] = v
+            end
+        end
+        return out, any
+    end
+    local llm, a = scrub(e.llm)
+    local meta, b = scrub(e.meta)
+    if a then changed = true end
+    if b then changed = true end
+    if llm then copy.llm = llm end
+    if meta then copy.meta = meta end
+    return copy, changed
+end
+
 -- 卡片渲染完成后：写缓存（含 card_url）并发送
 local function finish_cards(batch)
     for idx, ct in pairs(batch.pending_content or {}) do
         local e = batch.llm_usable and batch.llm_usable[idx]
         if e then
             ct.card_url = e.card_url or ""
-            repo_cache_set(e, ct)
+            -- 群聊脱敏过的卡片不写回公共缓存，避免私聊复用脱敏版本
+            if not e._group_sanitized then
+                repo_cache_set(e, ct)
+            end
         end
     end
     compose_and_send(batch)
@@ -1258,6 +1310,18 @@ end
 -- 触发卡片渲染（每仓库一张；全部完成后 finish_cards）
 local function start_cards(batch)
     local usable = batch.llm_usable or {}
+    -- 群聊先准备脱敏视图；命中敏感词时丢弃旧卡片，按脱敏内容重新渲染
+    local is_group = batch.target and batch.target.message_type == "group"
+    if is_group then
+        for _, e in ipairs(usable) do
+            local view, changed = sanitize_entry_for_group(e)
+            if changed then
+                e._group_view = view
+                e._group_sanitized = true
+                e.card_url = ""
+            end
+        end
+    end
     -- 批次全为 HF/MS 时用 card-6 做启用判定（card-5 可能未随附）；否则用配置模板
     local all_model = #usable > 0
     for _, e in ipairs(usable) do
@@ -1275,13 +1339,13 @@ local function start_cards(batch)
         -- 非模型的 HF/MS 仓库（数据集/Space 等路由）不渲染卡片图，只发文本
         if e.kind ~= "github" and e.sub ~= "models" then
             e.card_url = ""
-        elseif not e.card_url or e.card_url == "" then
-            -- HF/MS 模型卡固定用 card-6，GitHub 用配置模板
+        elseif e._group_sanitized or not e.card_url or e.card_url == "" then
+            -- HF/MS 模型卡固定用 card-6，GitHub 用配置模板；群聊用脱敏视图渲染
             local etpl = tpl
             if e.kind ~= "github" then
                 etpl = load_template("6") or tpl
             end
-            local html = fill_template(etpl, e)
+            local html = fill_template(etpl, e._group_view or e)
             pending = pending + 1
             -- 注意：不传 timeout。SDK 文档约定单位为秒，但 Go SDK 原样透传、
             -- T2I 服务端按 Playwright 毫秒处理，传 60 会被当成 60ms，渲染必失败（500）。
@@ -1380,7 +1444,7 @@ local function compose_segments(batch)
     local first = true
     for _, e in ipairs(batch.entries) do
         if not e.skipped and (e.llm or not e.err) then
-            local text = compose_section(e)
+            local text = compose_section(e._group_view or e)
             if not first then
                 text = "\n\n" .. text -- 段间空两行（QQ 多 segment 拼接显示）
             end
