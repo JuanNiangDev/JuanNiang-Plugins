@@ -663,36 +663,73 @@ end
 -- ============================================================================
 -- 8. JSON 解析与健壮清洗 (消除循环 sub 造成的 registry overflow)
 -- ============================================================================
+local function escape_json_string_controls(src)
+    if not src or src == "" then return src end
+    local out, in_str, esc = {}, false, false
+    for i = 1, #src do
+        local c = src:sub(i, i)
+        if in_str then
+            if esc then
+                out[#out + 1] = c
+                esc = false
+            elseif c == "\\" then
+                out[#out + 1] = c
+                esc = true
+            elseif c == '"' then
+                out[#out + 1] = c
+                in_str = false
+            elseif c == "\n" then
+                out[#out + 1] = "\\n"
+            elseif c == "\r" then
+                out[#out + 1] = "\\r"
+            elseif c == "\t" then
+                out[#out + 1] = "\\t"
+            elseif c == "\b" then
+                out[#out + 1] = "\\b"
+            elseif c == "\f" then
+                out[#out + 1] = "\\f"
+            elseif c:byte() < 32 then
+                out[#out + 1] = string.format("\\u%04x", c:byte())
+            else
+                out[#out + 1] = c
+            end
+        else
+            out[#out + 1] = c
+            if c == '"' then
+                in_str = true
+                esc = false
+            end
+        end
+    end
+    return table.concat(out)
+end
+
 local function parse_llm_json(raw)
     if not raw or raw == "" then return nil end
     local json_str = raw:match("```json%s*(.-)%s*```") or raw:match("```%s*(.-)%s*```") or raw
 
-    -- 1. 优先尝试直接解码 (如果大模型已正确输出合法 JSON)
-    local ok, res = pcall(jn.json.decode, json_str)
-    if ok and type(res) == "table" then
-        return res
+    local function try_decode(src)
+        if not src or src == "" then return nil, "empty" end
+        local fixed = escape_json_string_controls(src)
+        local ok, res = pcall(jn.json.decode, fixed)
+        if ok and type(res) == "table" then return res end
+        return nil, res
     end
 
-    -- 2. 若直接解码失败，使用 string.gsub 快速转义字符串字面量中的真实换行符
-    -- 针对包含多行文本的字段执行安全替换，不产生 Lua 栈对象堆积
-    local fixed = json_str:gsub('("content"%s*:%s*")(.-)(")', function(pre, body, post)
-        return pre .. body:gsub("\r\n", "\\n"):gsub("\n", "\\n"):gsub("\r", "") .. post
-    end)
-    fixed = fixed:gsub('("reason"%s*:%s*")(.-)(")', function(pre, body, post)
-        return pre .. body:gsub("\r\n", "\\n"):gsub("\n", "\\n"):gsub("\r", "") .. post
-    end)
-    fixed = fixed:gsub('("comment"%s*:%s*")(.-)(")', function(pre, body, post)
-        return pre .. body:gsub("\r\n", "\\n"):gsub("\n", "\\n"):gsub("\r", "") .. post
-    end)
-    fixed = fixed:gsub('("overall_summary"%s*:%s*")(.-)(")', function(pre, body, post)
-        return pre .. body:gsub("\r\n", "\\n"):gsub("\n", "\\n"):gsub("\r", "") .. post
-    end)
+    -- 1. 优先直接解码；2. 统一转义字符串内的裸控制字符后再解码
+    local res, err = try_decode(json_str)
+    if res then return res end
 
-    ok, res = pcall(jn.json.decode, fixed)
-    if ok and type(res) == "table" then
-        return res
+    -- 3. 截取首个 { 到最后一个 }，兼容模型在 JSON 前后加说明文字
+    local s = json_str:find("{", 1, true)
+    local e = json_str:match(".*()}")
+    if s and e and e > s then
+        res, err = try_decode(json_str:sub(s, e))
+        if res then return res end
     end
 
+    jn.log.warn("[daily_analysis] LLM JSON 解析失败: " .. tostring(err)
+        .. " head=" .. json_str:sub(1, 300):gsub("\n", "\\n"))
     return nil
 end
 
