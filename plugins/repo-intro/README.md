@@ -7,7 +7,7 @@
 - **类型由 LLM 判定**：AI Agent 项目 / MCP·Skills·插件 / 数据集 / 文本模型 / 图像生成 / 视频生成 / 语音 / 多模态 / 嵌入 / 重排序 / OCR / 机器人模型 / 其他
 - **附带文本**：消息中除链接外的说明文字（如推文、推荐语）也会一并交给 LLM 作为仓库补充信息——例如分享者给的安装命令、一句话定位；与仓库无关的闲聊/晒 Star/祝贺等噪声由 LLM 自动忽略，绝不输出
 - **反空话套话**：禁止输出"推测与 XX 相关""具体内容需查阅仓库文档""未提供详细文档"等元信息旁白；README 极简或没内容时如实写短或留空，只输出仓库给出的信息
-- **GitHub 项目写具体**：README 内容充分时按 2~3 段写清定位、工作方式、2~3 个可验证能力与一条最简用法；不再只给一句泛泛定位。GitHub README 输入上限独立提高到 30000 字，避免中后段被截断
+- **GitHub 项目写具体**：README 内容充分时按 2~3 段写清定位、工作方式、2~3 个可验证能力，以及支持哪些 Agent/客户端或运行方式；安装命令只给极短形式，不贴完整 URL/API Key/多步骤。GitHub README 输入上限独立提高到 30000 字，避免中后段被截断
 - README 缺失则不输出摘要段；LLM 不可用自动降级为仓库名 + 原文简介
 - 复用主程序 LLM（`jn.llm.chat_async`），全程异步不阻塞事件循环
 
@@ -115,7 +115,7 @@ python3 data/rebuild-modeldb.py
 | `llm_timeout` | string | `60` | 主程序 LLM 调用超时（秒） |
 | `max_repos` | string | `5` | 单条消息最多处理的链接数 |
 | `summary_min_chars` | string | `50` | LLM 总结的目标字数（内容稀少时可如实写短或留空） |
-| `summary_max_chars` | string | `400` | LLM 总结的最多字数；GitHub 项目在内容充分时按 150~350 字写 |
+| `summary_max_chars` | string | `500` | LLM 总结的最多字数；GitHub 项目在内容充分时按 150~500 字写 |
 | `card_enabled` | bool | `true` | 发送仓库卡片图（走主程序 T2I 服务渲染 HTML 模板） |
 | `card_template` | string | `5` | 卡片模板编号（仅用于 GitHub 卡片；`random` 在 1~5 间随机选一个；HF/MS 模型卡固定用 card-6） |
 | `card_width` | string | `900` | 卡片渲染宽度像素（模板 900×450） |

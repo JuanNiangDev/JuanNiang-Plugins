@@ -97,14 +97,14 @@ configs:
   - key: summary_min_chars
     type: string
     label: 总结最小字数
-    description: LLM 总结的目标字数（默认 50）；GitHub 项目在 README 充分时按 150~350 字写，内容稀少时允许如实写短或留空
+    description: LLM 总结的目标字数（默认 50）；GitHub 项目在 README 充分时按 150~500 字写，内容稀少时允许如实写短或留空
     default: "50"
 
   - key: summary_max_chars
     type: string
     label: 总结最大字数
-    description: LLM 总结的最多字数，默认 400
-    default: "400"
+    description: LLM 总结的最多字数，默认 500；GitHub 项目在内容充分时按 150~500 字写
+    default: "500"
   - key: key_image_count
     type: string
     label: 随总结发送的关键图片数

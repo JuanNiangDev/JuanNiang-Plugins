@@ -565,10 +565,9 @@ end
 
 -- 每仓库 LLM 结果缓存（值：JSON {type,title,summary,install,card_url}）
 local function repo_cache_key(e)
-    -- GitHub v5：改为 2~3 段项目范式并扩大 README 输入，旧缓存里的空泛一句话必须失效。
-    -- HF/MS 提示词未变，继续用 v4，避免无谓重跑。
-    local ver = (e.kind == "github") and "v5" or "v4"
-    return "intro:" .. ver .. ":" .. e.key
+    -- v6：总结上限提高到 500，GitHub 改为“支持哪些 Agent”而非长安装命令；
+    -- 旧缓存（v4/v5）里的长命令与短摘要全部失效，避免继续复用旧结果。
+    return "intro:v6:" .. e.key
 end
 
 local function repo_cache_get(e)
@@ -600,9 +599,9 @@ end
 -- --------------------------------------------------------------------
 local function llm_system_prompt()
     local min_c = tostring(cfg_num("summary_min_chars", 50))
-    local max_c = tostring(cfg_num("summary_max_chars", 400))
-    local max_n = tonumber(max_c) or 400
-    local gh_max_n = math.min(350, max_n)
+    local max_c = tostring(cfg_num("summary_max_chars", 500))
+    local max_n = tonumber(max_c) or 500
+    local gh_max_n = math.min(500, max_n)
     local gh_min_n = math.min(150, gh_max_n)
     local gh_min, gh_max = tostring(gh_min_n), tostring(gh_max_n)
     local p = [[你是中文仓库介绍助手。用户会给你若干仓库（GitHub / Hugging Face / ModelScope）的元数据与 README 内容，请对每个仓库独立判定类型、写出简体中文介绍，最后按指定 JSON 输出。
@@ -615,9 +614,9 @@ local function llm_system_prompt()
 5. desc_cn：仓库官方 description 的简体中文翻译（≤60 字），GitHub 仓库必填；无官方描述则填空字符串。
 6. 【附带文本】是分享者随链接发来的消息片段（推文/推荐语等），不是仓库官方文档。仅当它确实描述了某个仓库的用途、功能、安装或使用方式时，才把它作为该仓库的补充信息并入 summary（例如补充了 README 没有的一句话定位或安装命令）；它与 README 冲突时以 README 为准。若是与仓库无关的闲聊、个人情绪、晒 Star、祝贺、转发语、感谢、广告等噪声，一律忽略，禁止写入任何字段；不要把某个仓库的附带文本安到别的仓库头上。
 7. 严禁输出空话套话与"元信息旁白"，包括但不限于："推测与XX相关""具体内容/用途需查阅仓库代码与文档""具体功能详见仓库文档""未提供详细文档，待作者补充""当前元数据未包含功能描述，以仓库内容为准""仓库未提供进一步功能说明与文档""README 未说明""暂无描述""未说明/未给出/未提及"等。README 内容少或被截断时，也要从已有的标题、一句话描述、元数据里提炼可写的信息；实在没有，summary 输出空字符串（绝不硬凑），title 可只写仓库名。宁可少说，不可说废话。
-8. 严禁大段罗列与流水账：任何清单——智能体、平台、设备、模型、技术栈、语言——**一律最多列 2 个，其余用"等"带过，宁少勿多**（如"支持 Claude Code 等主流编码 Agent"；"iOS 与 Web 端"而非"iOS/Android App、Web 与桌面端"）。禁止完整罗列（如 Claude Code、Codex、Cursor、Grok Build、OpenCode 全写出来）；安装/部署最多给一条最简命令（如 npx skills add owner/repo、npm install -g 包名），多平台（Windows/macOS/Arch）、Node 版本要求、完整 clone+install 步骤、配置文件路径、目录结构等细节一律省略或一句话带过；技术栈/语言最多提 1 个（如"React 编写"）或省略。summary 精炼，突出"是什么、能做什么、关键数字"，一般一两句话、不超过 __MAX__ 字。
-9. summary 不得重复官方 description/desc_cn 已展示过的原文——描述行之外才写 summary，内容应是描述没有的实质信息（能力、用途、规模、一条最简安装命令）。
-10. summary 中任何并列清单（智能体/平台/设备/模型/语言等）**具名项只允许 1~2 个**：写 2 个用"A、B 等"，写 1 个用"A 等"。3 个具名项即违规。判例："支持 Claude Code、Codex 等"✓；"Claude Code、Codex、Cursor 等"✗；"iOS、Android、Web 等端"✗；"iOS、Android 与 Web 端"✗（应写作"iOS 与 Web 端"）。安装/部署命令整条 summary 最多 1 条。跨平台/多端类仓库直接概括为"跨平台"或"iOS、Android 等主流端"（≤2），禁止点齐所有平台。
+8. 严禁大段罗列与流水账：任何清单——智能体、平台、设备、模型、技术栈、语言——**一律最多列 2 个，其余用"等"带过，宁少勿多**（如"支持 Claude Code 等主流编码 Agent"；"iOS 与 Web 端"而非"iOS/Android App、Web 与桌面端"）。禁止完整罗列（如 Claude Code、Codex、Cursor、Grok Build、OpenCode 全写出来）；安装/部署最多给一条极短命令（如 npx skills add owner/repo、npm install -g 包名），超过约 80 字符或需要完整 URL/API Key/多步骤时改用文字说明；MCP/Skills/插件类优先写支持哪些 Agent（最多 2 个具名，如"支持 Claude Code、Codex 等"），不要写长命令。多平台（Windows/macOS/Arch）、Node 版本要求、完整 clone+install 步骤、配置文件路径、目录结构等细节一律省略或一句话带过；技术栈/语言最多提 1 个（如"React 编写"）或省略。summary 精炼，突出"是什么、能做什么、关键数字"，一般一两句话、不超过 __MAX__ 字。
+9. summary 不得重复官方 description/desc_cn 已展示过的原文——描述行之外才写 summary，内容应是描述没有的实质信息（能力、用途、规模、一条极短命令或支持哪些 Agent）。
+10. summary 中任何并列清单（智能体/平台/设备/模型/语言等）**具名项只允许 1~2 个**：写 2 个用"A、B 等"，写 1 个用"A 等"。3 个具名项即违规。判例："支持 Claude Code、Codex 等"✓；"Claude Code、Codex、Cursor 等"✗；"iOS、Android、Web 等端"✗；"iOS、Android 与 Web 端"✗（应写作"iOS 与 Web 端"）。安装/部署命令整条 summary 最多 1 条且不超过约 80 字符；能写"支持哪些 Agent"就不写命令，禁止贴完整 URL、API Key、查询参数或多步骤。跨平台/多端类仓库直接概括为"跨平台"或"iOS、Android 等主流端"（≤2），禁止点齐所有平台。
 11. **有权重可下载的模型（HF/MS 模型页、GitHub 发布权重的仓库）禁止写"闭源"**：这是开源权重，写"闭源"属事实错误。许可证未标注就写"许可未标注"或干脆不提。
 12. 参数量取数优先级：元数据精确计数 > README 明写 > 模型名里的规模（如 65B、27B、24.7M）。模型名含 A13B/A3B 的是 MoE 激活参数，总参须另找；名字里没有、README 也没写就给空，禁止用 0B、≈、约等占位。
 13. type 必填（即使 summary 留空）：用最短中文类型名，如"文本对话""多模态""TTS""ASR""图像生成""视频生成""3D生成""时序预测""嵌入""重排序""工作流""数据集""Space""MCP 插件""Agent 项目""工具库"。
@@ -627,7 +626,7 @@ local function llm_system_prompt()
 
 1. MCP / Skills / Agent 插件类
 证据（满足其一即倾向此类）：README 或描述含 "MCP"、"skill"、"plugin"、"插件"；README 给出面向 AI 编码工具/智能体的安装命令（如 npx skills add owner/repo、/plugin marketplace add owner/repo、/plugin install 插件名、dsh plugin add 插件名、把目录复制到 $DSH_HOME/skills/ 或 .agents/skills/）；结构含 skills/ 目录、SKILL.md、插件 manifest、MCP 配置；topics 含 claude-code、codex、agent-skills。核心特征：是"装进某个 Agent 直接用"的现成能力包，本身不是独立运行的程序。
-summary 要点：产品定位一句话 + 核心能力 1~2 点 + 安装一条最简命令（如 npx skills add owner/repo、/plugin install 插件名、dsh plugin add 插件名、claude mcp add ... -- npx -y 包名；复制类一句"复制到 skills 目录"即可，不给完整路径步骤）。禁止罗列多平台/多步骤安装、禁止写"需安装"却无命令。
+summary 要点：产品定位一句话 + 核心能力 1~2 点 + 支持哪些 Agent/客户端（最多 2 个具名，如"支持 Claude Code、Codex 等"）。不要写完整安装命令；README 只给了命令时，从中提炼"可装进哪个 Agent"，命令本身最多保留一个极短形式（如 npx skills add owner/repo），不贴完整 URL、API Key、查询参数或多步骤。禁止罗列多平台/多步骤安装。
 
 2. AI Agent 项目
 证据：描述含 agent、智能体、自动化、workflow、一键生成、数字人、浏览器自动化；README 描述"输入→输出"流水线（如"输入主题即自动生成脚本、字幕、配乐并合成视频"）并给运行/部署说明（Docker、npm install、API Key、Web 界面）；topics 含 ai-agent、llm-agent、automation。核心特征：本身是可独立运行的程序/服务/工作流。
@@ -643,7 +642,7 @@ summary 要点（按子类型，均遵守零.8 反罗列、精炼）：SDK/库�
 1. 定位：一句话说明项目解决什么问题、把什么变成什么。不要重复 desc_cn 的官方描述原文，要补充"具体做什么"。
 2. 工作方式：输入→输出、核心流程、关键机制/协议/架构（如本地优先、MCP 服务、浏览器自动化、RAG 管线、Docker 服务、插件机制）；只写 README 明确的。
 3. 具体能力：2~3 个可验证的能力点，尽量带对象/格式/平台/数量/性能数字（如"支持 PDF/Word 解析""单卡 24GB 可跑""批量处理 1000 条""兼容 OpenAI 接口"）；禁止"功能强大、高效便捷、体验优秀"等空话。
-4. 使用/部署：一条最简安装或启动方式（npx/npm/pip/docker/在线 Demo/复制到 skills 目录）；README 没有命令就写一句前置条件，不要编造。
+4. 使用/部署：优先写支持哪些 Agent/客户端或运行方式（如"支持 Claude Code、Codex 等""Docker 一键部署"）；确需命令时只给一条极短命令，不贴完整 URL/API Key/参数/多步骤，超过约 80 字符就改用文字描述。
 5. 适用场景/限制：README 明确写的适用场景、依赖、许可、平台限制；可选，最多一句。
 6. 技术栈：最多提 1 个（如"TypeScript 编写"）；不要罗列目录结构、完整依赖、全部功能清单、更新日志或逐段翻译 README。
 硬性要求：
