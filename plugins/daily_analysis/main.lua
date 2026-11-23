@@ -665,42 +665,45 @@ end
 -- ============================================================================
 local function escape_json_string_controls(src)
     if not src or src == "" then return src end
-    local out, in_str, esc = {}, false, false
-    for i = 1, #src do
-        local c = src:sub(i, i)
-        if in_str then
-            if esc then
-                out[#out + 1] = c
-                esc = false
-            elseif c == "\\" then
-                out[#out + 1] = c
-                esc = true
-            elseif c == '"' then
-                out[#out + 1] = c
-                in_str = false
-            elseif c == "\n" then
-                out[#out + 1] = "\\n"
-            elseif c == "\r" then
-                out[#out + 1] = "\\r"
-            elseif c == "\t" then
-                out[#out + 1] = "\\t"
-            elseif c == "\b" then
-                out[#out + 1] = "\\b"
-            elseif c == "\f" then
-                out[#out + 1] = "\\f"
-            elseif c:byte() < 32 then
-                out[#out + 1] = string.format("\\u%04x", c:byte())
-            else
-                out[#out + 1] = c
-            end
-        else
-            out[#out + 1] = c
-            if c == '"' then
-                in_str = true
-                esc = false
-            end
+    local out, buf = {}, {}
+    local function flush()
+        if #buf > 0 then
+            out[#out + 1] = table.concat(buf)
+            buf = {}
         end
     end
+    local in_str, esc = false, false
+    for i = 1, #src do
+        local c = src:sub(i, i)
+        local r = c
+        if in_str then
+            if esc then
+                esc = false
+            elseif c == "\\" then
+                esc = true
+            elseif c == '"' then
+                in_str = false
+            elseif c == "\n" then
+                r = "\\n"
+            elseif c == "\r" then
+                r = "\\r"
+            elseif c == "\t" then
+                r = "\\t"
+            elseif c == "\b" then
+                r = "\\b"
+            elseif c == "\f" then
+                r = "\\f"
+            elseif c:byte() < 32 then
+                r = string.format("\\u%04x", c:byte())
+            end
+        elseif c == '"' then
+            in_str = true
+            esc = false
+        end
+        buf[#buf + 1] = r
+        if #buf >= 1024 then flush() end
+    end
+    flush()
     return table.concat(out)
 end
 
