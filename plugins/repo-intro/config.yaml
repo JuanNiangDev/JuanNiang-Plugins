@@ -69,8 +69,13 @@ configs:
   - key: max_readme_chars
     type: string
     label: README 最大输入字数
-    description: 送入 LLM 的 README 最大字符数，默认 10000；Hugging Face / ModelScope 模型页改用 model_readme_max_chars
+    description: 送入 LLM 的 README 最大字符数，默认 10000；GitHub 项目改用 github_readme_max_chars，Hugging Face / ModelScope 模型页改用 model_readme_max_chars
     default: "10000"
+  - key: github_readme_max_chars
+    type: string
+    label: GitHub README 最大输入字数
+    description: GitHub 项目 README 送入 LLM 的最大字符数，默认 30000，避免架构/能力/用法章节被截断导致总结空泛
+    default: "30000"
   - key: model_readme_max_chars
     type: string
     label: 模型 README 最大输入字数
@@ -92,7 +97,7 @@ configs:
   - key: summary_min_chars
     type: string
     label: 总结最小字数
-    description: LLM 总结的目标字数（默认 50）；内容稀少时允许如实写短或留空，避免为凑字数写套话
+    description: LLM 总结的目标字数（默认 50）；GitHub 项目在 README 充分时按 150~350 字写，内容稀少时允许如实写短或留空
     default: "50"
 
   - key: summary_max_chars

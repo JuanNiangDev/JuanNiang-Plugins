@@ -308,7 +308,13 @@ end
 
 local function truncate(str, e)
     local max = cfg_num("max_readme_chars", 10000)
-    if is_model_entry(e) then max = cfg_num("model_readme_max_chars", 30000) end
+    if e and e.kind == "github" then
+        -- GitHub 项目介绍需要架构、能力、用法等细节；1 万字常把 README 中后段截掉，
+        -- 导致总结只剩仓库开头的一句话。单独给 GitHub 更大的输入预算。
+        max = cfg_num("github_readme_max_chars", 30000)
+    elseif is_model_entry(e) then
+        max = cfg_num("model_readme_max_chars", 30000)
+    end
     if #str > max then return str:sub(1, max) end
     return str
 end
@@ -559,9 +565,10 @@ end
 
 -- 每仓库 LLM 结果缓存（值：JSON {type,title,summary,install,card_url}）
 local function repo_cache_key(e)
-    -- v4：数据集总结加入文件树/字段描述，旧缓存作废
-    -- （旧 key 会把 LLM 失败时写下的空摘要缓存满 7 天，表现为只发「📦 + 链接」）
-    return "intro:v4:" .. e.key
+    -- GitHub v5：改为 2~3 段项目范式并扩大 README 输入，旧缓存里的空泛一句话必须失效。
+    -- HF/MS 提示词未变，继续用 v4，避免无谓重跑。
+    local ver = (e.kind == "github") and "v5" or "v4"
+    return "intro:" .. ver .. ":" .. e.key
 end
 
 local function repo_cache_get(e)
@@ -594,6 +601,10 @@ end
 local function llm_system_prompt()
     local min_c = tostring(cfg_num("summary_min_chars", 50))
     local max_c = tostring(cfg_num("summary_max_chars", 400))
+    local max_n = tonumber(max_c) or 400
+    local gh_max_n = math.min(350, max_n)
+    local gh_min_n = math.min(150, gh_max_n)
+    local gh_min, gh_max = tostring(gh_min_n), tostring(gh_max_n)
     local p = [[你是中文仓库介绍助手。用户会给你若干仓库（GitHub / Hugging Face / ModelScope）的元数据与 README 内容，请对每个仓库独立判定类型、写出简体中文介绍，最后按指定 JSON 输出。
 
 【零、通用铁律（所有仓库必做）】
@@ -624,7 +635,22 @@ summary 要点：先讲"把什么变成什么"（输入→输出），再讲核�
 
 3. 其他类
 其余全部：SDK/库与框架、API 网关/代理（把某模型封装成 OpenAI 兼容接口）、Web 应用（AI 简历编辑器、聊天前端）、数据集、论文/研究实现、学习资源（教程、awesome 精选列表）、实用小工具、整活、个人/组织主页、开源模型仓库。
-summary 要点（按子类型，均遵守零.8 反罗列、精炼）：SDK/库：是什么、支持什么模型/硬件、怎么装怎么调；API 网关：封装什么成什么接口、多账号/多模型、部署；Web 应用：定位、特性、部署或在线地址；数据集：规模、内容、标注、引用；论文/研究实现：论文名、方法、代码/权重地址；学习资源/awesome：范围、数量、亮点；实用工具：解决什么问题、怎么用；整活：一句话说明玩法。
+summary 要点（按子类型，均遵守零.8 反罗列、精炼）：SDK/库：是什么、支持什么模型/硬件、怎么装怎么调；API 网关：封装什么成什么接口、多账号/多模型、部署；Web 应用：定位、特性、部署或在线地址；数据集：规模、内容、标注、引用；论文/研究实现：论文名、方法、代码/权重地址；学习资源/awesome：范围、数量、亮点；实用工具：解决什么问题、怎么用；整活：一句话说明玩法。以上所有 GitHub 子类型都按【一·A】的 2~3 段结构写，不能只给一句定位。
+
+【一·A、GitHub 项目总结范式（代码仓库，不要套用模型卡范式）】
+目标：读者不点开 README 也能知道这个项目做什么、怎么运转、有什么具体能力、怎么跑起来。README 内容充分时写 2~3 段、约 __GH_MIN__~__GH_MAX__ 字；内容稀少时写短，但至少要有"定位 + 一个具体信息点"，不能只写"XX 是一个……项目"。
+按以下顺序取数，缺哪项就跳过哪项：
+1. 定位：一句话说明项目解决什么问题、把什么变成什么。不要重复 desc_cn 的官方描述原文，要补充"具体做什么"。
+2. 工作方式：输入→输出、核心流程、关键机制/协议/架构（如本地优先、MCP 服务、浏览器自动化、RAG 管线、Docker 服务、插件机制）；只写 README 明确的。
+3. 具体能力：2~3 个可验证的能力点，尽量带对象/格式/平台/数量/性能数字（如"支持 PDF/Word 解析""单卡 24GB 可跑""批量处理 1000 条""兼容 OpenAI 接口"）；禁止"功能强大、高效便捷、体验优秀"等空话。
+4. 使用/部署：一条最简安装或启动方式（npx/npm/pip/docker/在线 Demo/复制到 skills 目录）；README 没有命令就写一句前置条件，不要编造。
+5. 适用场景/限制：README 明确写的适用场景、依赖、许可、平台限制；可选，最多一句。
+6. 技术栈：最多提 1 个（如"TypeScript 编写"）；不要罗列目录结构、完整依赖、全部功能清单、更新日志或逐段翻译 README。
+硬性要求：
+- 至少包含 2 个实质信息点：定位之外，必须有机制、能力或用法之一；只有一句泛泛定位视为不合格。
+- 有数字、版本、命令、平台、协议名时优先保留；没有就不写。
+- 不写"详见文档/需查阅代码/未提供说明/README 未说明"等元信息旁白。
+- 通用第 8/10 条的反罗列仍适用：具名清单最多 2 个，其余用"等"。
 
 模型仓库（GitHub 上发布权重的仓库）归第 3 类，但必须写：模型定位与能力（如"手机端可运行的图文理解模型"）；参数量/权重规格（如 0.1B、4B，或"1 分钟音频即可训练"）；部署方式（HuggingFace 权重下载、本地/手机运行、在线 Demo、Colab 训练）；有论文或基准可补一句。
 
@@ -669,9 +695,10 @@ summary 要点（按子类型，均遵守零.8 反罗列、精炼）：SDK/库�
 - Space：SDK、功能、能否在线使用
 
 【三、输出格式】严格只输出如下 JSON（不要输出 JSON 以外的任何内容，不要用代码块包裹）：
-{"repos":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字，无信息时可用仓库名，禁止套话）","summary":"精炼介绍（简体中文，通常 __MIN__~__MAX__字；内容充分时写足、内容稀少时写短或留空；突出是什么、能做什么、关键数字；模型页按【二·A】以技术与 benchmark 为主；严禁空话套话旁白；不得重复 desc_cn）","desc_cn":"官方描述中文翻译（GitHub 必填，无则空字符串）"}]}
+{"repos":[{"index":1,"type":"类型中文名","title":"一句话标题（简体中文，≤30字，无信息时可用仓库名，禁止套话）","summary":"精炼介绍（简体中文；GitHub 按【一·A】写 __GH_MIN__~__GH_MAX__ 字，HF/MS 模型页按【二·A】写；内容稀少时写短或留空；突出是什么、怎么运转、能做什么、关键数字；严禁空话套话旁白；不得重复 desc_cn）","desc_cn":"官方描述中文翻译（GitHub 必填，无则空字符串）"}]}
 index 与输入仓库编号一一对应（从 1 开始）。]]
-    return p:gsub("__MIN__", min_c):gsub("__MAX__", max_c)
+    p = p:gsub("__MIN__", min_c):gsub("__MAX__", max_c)
+    return p:gsub("__GH_MIN__", gh_min):gsub("__GH_MAX__", gh_max)
 end
 
 -- 组装单仓库送 LLM 的用户输入
