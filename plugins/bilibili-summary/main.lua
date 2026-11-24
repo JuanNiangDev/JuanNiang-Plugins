@@ -195,9 +195,6 @@ local function img_for_send(url)
     if url == "" then return "" end
     local prefix = cstr("image_proxy_prefix", "")
     if prefix ~= "" then
-        if prefix:find("?url=", 1, true) then
-            return prefix .. url
-        end
         return prefix .. url
     end
     return url
@@ -452,6 +449,8 @@ local function new_job(target, entry)
         id = jid,
         target = target,
         entry = entry,
+        batch = entry and entry._batch or nil,
+        batch_order = entry and entry._batch_order or nil,
         subs = {},
         page_list = {},
         idx = 1,
@@ -460,13 +459,117 @@ local function new_job(target, entry)
     return job
 end
 
+local deliver_batch  -- 前向声明：批处理完成后投递
+
 local function finish_job(job)
+    if not job or job.finished then return end
+    job.finished = true
     jobs[job.id] = nil
+    local b = job.batch
+    if b and not job.batch_counted then
+        job.batch_counted = true
+        b.done = b.done + 1
+        if b.want_forward and b.done >= b.total and not b.flushed then
+            b.flushed = true
+            deliver_batch(b)
+        end
+    end
     advance_queue(job.target)
 end
 
 local function chat_key(t)
     return tostring(t.message_type) .. ":" .. tostring(t.target_id)
+end
+
+local function bot_identity()
+    local uin, nick = 0, "Bot"
+    if jn.onebot11 and jn.onebot11.get_login_info then
+        local info = jn.onebot11.get_login_info()
+        if info then
+            if info.user_id then uin = tonumber(info.user_id) or 0 end
+            if info.nickname and info.nickname ~= "" then nick = tostring(info.nickname) end
+        end
+    end
+    if uin <= 0 then uin = 1772023368 end
+    return uin, nick
+end
+
+local send_queue, send_pump_scheduled, last_send_at = {}, false, 0
+
+local function get_send_interval()
+    return math.max(0, cnum("send_interval", 15))
+end
+
+local function send_onebot_msg_raw(target, segs)
+    if target.message_type == "group" then
+        return jn.onebot11.send_group_msg(target.target_id, segs)
+    end
+    return jn.onebot11.send_private_msg(target.target_id, segs)
+end
+
+local pump_send_queue
+
+local function schedule_send_pump()
+    if send_pump_scheduled or #send_queue == 0 then return end
+    local interval = get_send_interval()
+    local elapsed = os.time() - last_send_at
+    if interval <= 0 or last_send_at == 0 or elapsed >= interval then
+        pump_send_queue()
+        return
+    end
+    if jn.timer and jn.timer.after then
+        send_pump_scheduled = true
+        jn.timer.after(math.max(1, interval - elapsed), { stage = "send_pump" })
+    else
+        while #send_queue > 0 do
+            local task = table.remove(send_queue, 1)
+            send_onebot_msg_raw(task.target, task.segs)
+            last_send_at = os.time()
+        end
+    end
+end
+
+pump_send_queue = function()
+    send_pump_scheduled = false
+    if #send_queue == 0 then return end
+    local interval = get_send_interval()
+    local elapsed = os.time() - last_send_at
+    if interval > 0 and last_send_at > 0 and elapsed < interval then
+        schedule_send_pump()
+        return
+    end
+    local task = table.remove(send_queue, 1)
+    send_onebot_msg_raw(task.target, task.segs)
+    last_send_at = os.time()
+    if #send_queue > 0 then
+        schedule_send_pump()
+    end
+end
+
+local function send_onebot_msg(target, segs)
+    local interval = get_send_interval()
+    local elapsed = os.time() - last_send_at
+    if #send_queue == 0 and (interval <= 0 or last_send_at == 0 or elapsed >= interval) then
+        local res, err = send_onebot_msg_raw(target, segs)
+        last_send_at = os.time()
+        return res, err
+    end
+    send_queue[#send_queue + 1] = { target = target, segs = segs }
+    schedule_send_pump()
+    return true, nil
+end
+
+local function send_onebot_forward_sync(target, nodes)
+    local res, err
+    if target.message_type == "group" then
+        if not jn.onebot11.send_group_forward_msg_sync then return nil, "no_forward_api" end
+        res, err = jn.onebot11.send_group_forward_msg_sync(target.target_id, nodes)
+    else
+        if not jn.onebot11.send_private_forward_msg_sync then return nil, "no_forward_api" end
+        res, err = jn.onebot11.send_private_forward_msg_sync(target.target_id, nodes)
+    end
+    if err == nil then last_send_at = os.time() end
+    return res, err
 end
 
 -- 发送文本 + 图片（quote 仅首条）
@@ -484,10 +587,102 @@ local function send_payload(target, text, images, quote)
             end
         end
     end
-    if target.message_type == "group" then
-        return jn.onebot11.send_group_msg(target.target_id, segs)
+    return send_onebot_msg(target, segs)
+end
+
+local function send_images_only(target, imgs)
+    for i = 1, #imgs, 4 do
+        local segs = {}
+        for k = i, math.min(i + 3, #imgs) do
+            segs[#segs + 1] = { type = "image", data = { file = imgs[k] } }
+        end
+        send_onebot_msg(target, segs)
     end
-    return jn.onebot11.send_private_msg(target.target_id, segs)
+end
+
+local function node_content(text, images)
+    if not images or #images == 0 then return text end
+    local segs = { { type = "text", data = { text = text } } }
+    for _, url in ipairs(images) do
+        if url and url ~= "" then
+            segs[#segs + 1] = { type = "image", data = { file = url } }
+        end
+    end
+    return segs
+end
+
+deliver_batch = function(batch)
+    if not batch then return end
+    local items = {}
+    for i = 1, batch.total do
+        local it = batch.results[i]
+        if it and type(it.text) == "string" and it.text ~= "" then
+            items[#items + 1] = it
+        end
+    end
+    if #items == 0 then return end
+
+    local t = batch.target
+    local threshold = math.max(1, cnum("merge_threshold", 1))
+    local want_forward = cbool("merge_forward", true) and #items >= threshold
+    local can_forward = (t.message_type == "group" and jn.onebot11.send_group_forward_msg_sync ~= nil)
+        or (t.message_type ~= "group" and jn.onebot11.send_private_forward_msg_sync ~= nil)
+
+    if want_forward and can_forward then
+        local uin, nick = bot_identity()
+        local custom = cstr("forward_sender_name", "")
+        if custom ~= "" then nick = custom end
+        local nodes = {}
+        for _, it in ipairs(items) do
+            nodes[#nodes + 1] = { user_id = uin, nickname = nick, content = node_content(it.text, it.images) }
+        end
+        local _, ferr = send_onebot_forward_sync(t, nodes)
+        if ferr == nil then return end
+
+        -- 带图转发可能被 QQ 拒绝：先退成纯文本合并转发并单独补图，仍失败再降级普通消息
+        local has_imgs = false
+        for _, it in ipairs(items) do
+            if it.images and #it.images > 0 then has_imgs = true; break end
+        end
+        if has_imgs then
+            local text_nodes = {}
+            for _, it in ipairs(items) do
+                text_nodes[#text_nodes + 1] = { user_id = uin, nickname = nick, content = it.text }
+            end
+            local _, ferr2 = send_onebot_forward_sync(t, text_nodes)
+            if ferr2 == nil then
+                jn.log.warn("[" .. PLUGIN .. "] 合并转发带图失败，已改纯文本转发并单独补图: " .. tostring(ferr))
+                local all_imgs = {}
+                for _, it in ipairs(items) do
+                    for _, u in ipairs(it.images or {}) do
+                        if u and u ~= "" then all_imgs[#all_imgs + 1] = u end
+                    end
+                end
+                if #all_imgs > 0 then send_images_only(t, all_imgs) end
+                return
+            end
+        end
+        jn.log.warn("[" .. PLUGIN .. "] 合并转发失败，改用普通消息: " .. tostring(ferr))
+    end
+
+    for i, it in ipairs(items) do
+        send_payload(t, it.text, it.images, i == 1)
+    end
+end
+
+local function emit_job_output(job, text, images)
+    if not job then return end
+    local b = job.batch
+    if b and b.want_forward and job.batch_order then
+        b.results[job.batch_order] = { text = text, images = images }
+        return
+    end
+    local quote = true
+    if b then
+        quote = not b.quoted_sent
+        b.quoted_sent = true
+    end
+    send_payload(job.target, text, images, quote)
 end
 
 local render_video, render_article  -- 前向声明：send_error 失败时只渲染元信息
@@ -499,11 +694,11 @@ local function send_error(job, reason)
     if e.kind == "opus" or e.kind == "read" then
         if not job.meta then return end
         local text, images = render_article(job)
-        send_payload(job.target, text, images, true)
+        emit_job_output(job, text, images)
         return
     end
     local text, images = render_video(job)
-    send_payload(job.target, text, images, true)
+    emit_job_output(job, text, images)
 end
 
 -- --------------------------------------------------------------------
@@ -533,6 +728,20 @@ local function video_url(meta, page)
     if bvid == "" then return "" end
     if page then return "https://www.bilibili.com/video/" .. bvid .. "?p=" .. tostring(page) end
     return "https://www.bilibili.com/video/" .. bvid
+end
+
+local function append_summary_lines(lines, llm)
+    if llm.no_content then return end
+    local style = cstr("summary_style", "objective")
+    local summary = trim(llm.summary or "")
+    local persona = trim(llm.persona or "")
+    if style == "persona" and persona ~= "" then
+        lines[#lines + 1] = "🧠 内容总结"
+        lines[#lines + 1] = persona
+    elseif summary ~= "" then
+        lines[#lines + 1] = "🧠 内容总结"
+        lines[#lines + 1] = summary
+    end
 end
 
 render_video = function(job)
@@ -567,18 +776,7 @@ render_video = function(job)
         lines[#lines + 1] = "🎬 共 " .. tostring(#m.pages) .. " P：" .. table.concat(names, "｜")
     end
 
-    local style = cstr("summary_style", "objective")
-    local summary = trim(llm.summary or "")
-    local persona = trim(llm.persona or "")
-    if not llm.no_content then
-        if style == "persona" and persona ~= "" then
-            lines[#lines + 1] = "🧠 内容总结"
-            lines[#lines + 1] = persona
-        elseif summary ~= "" then
-            lines[#lines + 1] = "🧠 内容总结"
-            lines[#lines + 1] = summary
-        end
-    end
+    append_summary_lines(lines, llm)
 
     local images = {}
     if cbool("send_cover", true) and trim(m.cover or "") ~= "" then
@@ -593,35 +791,21 @@ render_article = function(job)
     local lines = {}
     local title = trim(m.title or "")
     if title ~= "" then
-        lines[#lines + 1] = "📄 " .. title .. WATERMARK
+        lines[#lines + 1] = "📄 " .. title
     end
     if trim(m.author or "") ~= "" then
         lines[#lines + 1] = "👤 " .. m.author
     end
     local link = display_link(job)
     lines[#lines + 1] = "🔗 " .. link
-    local summary = trim(llm.summary or "")
-    local persona = trim(llm.persona or "")
-    if not llm.no_content then
-        if cstr("summary_style", "objective") == "persona" and persona ~= "" then
-            lines[#lines + 1] = "🧠 内容总结"
-            lines[#lines + 1] = persona
-        elseif summary ~= "" then
-            lines[#lines + 1] = "🧠 内容总结"
-            lines[#lines + 1] = summary
-        end
-    end
+    append_summary_lines(lines, llm)
     local vc = m.video_card
     if type(vc) == "table" and trim(vc.title or "") ~= "" then
         lines[#lines + 1] = "🎬 引用视频：" .. vc.title
         if trim(vc.url or "") ~= "" then lines[#lines + 1] = vc.url end
     end
-    local persona = trim(llm.persona or "")
-    if persona ~= "" and trim(m.content or "") ~= "" then
-        lines[#lines + 1] = "💭 " .. persona
-    end
 
-    -- 水印不能贴在链接后面：零宽字符会被一起复制，URL 直接失效
+    -- 水印只挂一次，且不能贴在链接后面：零宽字符会被一起复制，URL 直接失效
     local marked = false
     for i = 1, #lines do
         if lines[i]:sub(1, 3) ~= "🔗 " then
@@ -1098,7 +1282,7 @@ local function start_summary(job)
         if not has_sub and not multi then
             job.llm = { no_content = true, summary = "", parts = {}, persona = "" }
             local text, images = render_video(job)
-            send_payload(job.target, text, images, true)
+            emit_job_output(job, text, images)
             if subtitle_clean(job) then cache_set(e, { text = text, images = images }) end
             finish_job(job)
             return
@@ -1109,7 +1293,7 @@ local function start_summary(job)
         jn.log.warn("[" .. PLUGIN .. "] 无可用 LLM，降级为仅元信息")
         local text, images
         if is_article then text, images = render_article(job) else text, images = render_video(job) end
-        send_payload(job.target, text, images, true)
+        emit_job_output(job, text, images)
         finish_job(job)
         return
     end
@@ -1125,7 +1309,7 @@ local function start_summary(job)
         jn.log.warn("[" .. PLUGIN .. "] chat_async 提交失败")
         local text, images
         if is_article then text, images = render_article(job) else text, images = render_video(job) end
-        send_payload(job.target, text, images, true)
+        emit_job_output(job, text, images)
         finish_job(job)
         return
     end
@@ -1472,6 +1656,10 @@ end
 -- 定时器回调（字幕接口重试）
 function on_timer_response(req_id, ctx, result, err)
     if not ctx then return end
+    if ctx.stage == "send_pump" then
+        pump_send_queue()
+        return
+    end
     if ctx.stage == "queue_watchdog" then
         local q = queues[ctx.ck]
         local job = ctx.jid and jobs[ctx.jid] or nil
@@ -1567,7 +1755,7 @@ function on_chat_response(req_id, content, err)
     local is_article = (job.entry.kind == "opus" or job.entry.kind == "read")
     local text, images
     if is_article then text, images = render_article(job) else text, images = render_video(job) end
-    send_payload(job.target, text, images, true)
+    emit_job_output(job, text, images)
     if subtitle_clean(job) then cache_set(job.entry, { text = text, images = images }) end
     finish_job(job)
 end
@@ -1651,18 +1839,49 @@ function on_message(event)
         reply_quote = cbool("reply_quote", true),
     }
 
-    -- 缓存命中直接发（不排队、不请求）
-    local rest = {}
+    -- 缓存命中 / 异步队列统一纳入本条消息的 batch（支持合并转发开关与阈值）
+    local slots, rest = {}, {}
     for _, e in ipairs(entries) do
         local cached = cache_get(e)
         if cached then
-            send_payload(target, cached.text, cached.images, true)
+            slots[#slots + 1] = { cached = cached }
         elseif jn.cache.get("lock:" .. e.key) then
             jn.log.info("[" .. PLUGIN .. "] 同一内容正在处理或刚发过，跳过 " .. e.key)
         else
             jn.cache.set("lock:" .. e.key, 1, 120)
+            slots[#slots + 1] = { entry = e }
             rest[#rest + 1] = e
         end
+    end
+    if #slots == 0 then return cbool("consume_matched", true), nil end
+
+    local threshold = math.max(1, cnum("merge_threshold", 1))
+    local batch = {
+        target = target,
+        total = #slots,
+        done = 0,
+        results = {},
+        want_forward = cbool("merge_forward", true) and #slots >= threshold,
+        quoted_sent = false,
+        flushed = false,
+    }
+    for idx, slot in ipairs(slots) do
+        if slot.cached then
+            if batch.want_forward then
+                batch.results[idx] = { text = slot.cached.text, images = slot.cached.images }
+            else
+                send_payload(target, slot.cached.text, slot.cached.images, not batch.quoted_sent)
+                batch.quoted_sent = true
+            end
+            batch.done = batch.done + 1
+        else
+            slot.entry._batch = batch
+            slot.entry._batch_order = idx
+        end
+    end
+    if batch.want_forward and batch.done >= batch.total and not batch.flushed then
+        batch.flushed = true
+        deliver_batch(batch)
     end
     if #rest == 0 then return cbool("consume_matched", true), nil end
 

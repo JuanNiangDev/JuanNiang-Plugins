@@ -65,6 +65,9 @@ persona 模式下这一段改为人设口吻讲解内容（默认 ≤600 字）
 | `max_subtitle_chars` | 单 P 字幕送入 LLM 的字数上限，默认 50000 |
 | `max_images` | 专栏配图上限，默认 9 |
 | `target_groups` | 留空 = 全部群/私聊；填写后只处理这些群 |
+| `merge_forward` | 是否开启合并转发投递（默认 `true`） |
+| `merge_threshold` | 同条消息达到至少几条结果时合并转发（默认 `"1"`，即单条也合并转发；设为 `"2"`/`"3"` 则达到阈值才合并） |
+| `forward_sender_name` | 合并转发内节点昵称（留空用机器人自身昵称） |
 | `cookie` | 字幕登录 Cookie，默认空；可再填 `buvid3` / `buvid4` 手动覆盖自动获取值 |
 
 ## 其它
