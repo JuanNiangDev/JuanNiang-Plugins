@@ -10,6 +10,30 @@ configs:
     description: "留空默认使用系统当前激活的文本模型；也可直接输入后台服务商名称（如 volcengine 或 qianfan）或模型名称（如 deepseek-v4.1-flash），支持模糊匹配，无需查抄UUID"
     default: ""
 
+  - key: llm_timeout
+    type: string
+    label: "LLM 分析超时（秒）"
+    description: "日报主分析、新闻合并与未总结项目补全调用 LLM 的超时秒数，默认 300"
+    default: "300"
+
+  - key: fetch_limit
+    type: string
+    label: "单次拉取消息上限"
+    description: "每次总结最多拉取最近多少条群消息（默认 5000，按最新优先截取再按时间正序分析）"
+    default: "5000"
+
+  - key: max_msg_chars
+    type: string
+    label: "单条消息最大字数"
+    description: "进入 LLM 分析聊天流的单条消息字符上限（默认 1000，超长保留首尾；不影响开源项目/公众号链接采集）"
+    default: "1000"
+
+  - key: merge_repeats
+    type: bool
+    label: "合并同人与多人复读"
+    description: "开启后自动归并同人连续刷屏与多人连续复读，保留代表发言与复读次数/人数，减少无效重复语料"
+    default: true
+
   - key: auto_analysis_time
     type: string
     label: "每日总结时间"
@@ -161,4 +185,10 @@ configs:
     label: 展开回复引用
     description: 把被回复消息的前 80 字作为上下文并入语料
     default: true
+
+  - key: send_interval
+    type: string
+    label: 串行发送间隔（秒）
+    description: 拆条/降级/补图等多条连续发送之间的最小等待秒数，默认 15；0 表示不等待
+    default: "15"
 
