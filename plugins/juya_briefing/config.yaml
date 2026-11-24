@@ -43,11 +43,6 @@ configs:
     description: "跨分类合计上限，默认 70；超出部分丢弃"
     default: "70"
 
-  - key: summary_max_chars
-    type: string
-    label: "摘要截断字数"
-    description: "每条新闻摘要最多保留多少字，默认 160"
-    default: "160"
 
   - key: links_max
     type: string

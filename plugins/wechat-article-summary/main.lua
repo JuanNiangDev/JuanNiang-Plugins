@@ -316,6 +316,115 @@ local function extract_page_images(html)
     return imgs
 end
 
+-- 解码 JS 字符串里的常见转义（cgiDataNew 用单引号字符串，\x0a 表示换行）
+local function decode_js_string(s)
+    if not s or s == "" then return "" end
+    s = s:gsub("\\x(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+    s = s:gsub("\\n", "\n"):gsub("\\r", "\r"):gsub("\\t", "\t")
+    s = s:gsub('\\"', '"'):gsub("\\'", "'")
+    s = s:gsub("\\\\", "\\")
+    return s
+end
+
+-- 取 cgiDataNew 顶层块（另一类文章形态的数据源，非“新版”替代）
+local function extract_cgi_block(html)
+    local start = html:find("window%.cgiDataNew%s*=%s*%{")
+    if not start then return "" end
+    local brace = html:find("{", start, true)
+    if not brace then return "" end
+    local send = html:find("};", brace, true)
+    if not send then return "" end
+    return html:sub(brace, send)
+end
+
+-- 按 key 取 cgiDataNew 里的顶层字符串值。
+-- 不能用 %f[...] frontier：线上 gopher-lua 1.1.2 不支持，会永远匹配不到。
+-- 这里手动检查 key 前一个字符，避免 msg_title 误命中 title。
+local function cgi_string(block, key)
+    if not block or block == "" then return "" end
+    local pos = 1
+    while true do
+        local s, e = block:find(key .. "%s*:%s*'", pos)
+        if not s then return "" end
+        local before = s > 1 and block:sub(s - 1, s - 1) or ""
+        if not before:match("[%w_]") then
+            local out, i = {}, e + 1
+            while i <= #block do
+                local c = block:sub(i, i)
+                if c == "\\" then
+                    out[#out + 1] = block:sub(i, i + 1)
+                    i = i + 2
+                elseif c == "'" then
+                    break
+                else
+                    out[#out + 1] = c
+                    i = i + 1
+                end
+            end
+            return decode_js_string(table.concat(out))
+        end
+        pos = e + 1
+    end
+end
+
+-- cgiDataNew 块里的正文/图片 URL（排除头像、二维码等装饰图）
+local function extract_cgi_images(block)
+    if not block or block == "" then return {} end
+    local avatar_bases = {}
+    for _, k in ipairs({ "round_head_img", "hd_head_img", "ori_head_img_url" }) do
+        local a = cgi_string(block, k)
+        if a ~= "" then
+            local base = a:match("^https?://[^/]+/[^/]+/[^/]+/[^/]+") or a
+            avatar_bases[#avatar_bases + 1] = base
+        end
+    end
+    local imgs, seen = {}, {}
+    local function add(u)
+        if not u or u == "" then return end
+        u = u:gsub("\\x26", "&"):gsub("&amp;", "&"):gsub("^http://", "https://")
+        for _, ab in ipairs(avatar_bases) do
+            if ab ~= "" and u:sub(1, #ab) == ab then return end
+        end
+        if u:find("qrcode", 1, true) or u:find("wx_fmt=gif", 1, true) then return end
+        local base = (u:match("^([^?]+)") or u):gsub("/0$", "")
+        if not seen[base] then
+            seen[base] = true
+            imgs[#imgs + 1] = u
+        end
+    end
+    local text = cgi_string(block, "content_noencode") .. "\n" .. cgi_string(block, "content")
+    for u in text:gmatch("https?://mmbiz%.qpic%.cn/[^\"%s'<>]+") do add(u) end
+    for tag in text:gmatch("<img[^>]*>") do
+        local u = tag:match('data%-src="([^"]+)"') or tag:match('src="([^"]+)"')
+        if u then add(u) end
+    end
+    for _, k in ipairs({ "cdn_url", "cdn_url_235_1", "cdn_url_1_1", "cdn_url_16_9", "cdn_url_3_4" }) do
+        local u = cgi_string(block, k)
+        if u ~= "" then add(u) end
+    end
+    return imgs
+end
+
+-- 该形态正文：cgiDataNew 的 content_noencode 是纯文本（\x0a 换行）或少量 HTML；
+-- 保留换行，压缩行内空白，不同于经典页的 html_to_text。
+local function cgi_text_to_text(s)
+    if not s or s == "" then return "" end
+    s = s:gsub("<script[^>]*>.-</script>", " ")
+    s = s:gsub("<style[^>]*>.-</style>", " ")
+    s = s:gsub("<br%s*/?>", "\n"):gsub("</p>", "\n")
+    s = s:gsub("<[^>]+>", " ")
+    s = s:gsub("&nbsp;", " "):gsub("&lt;", "<"):gsub("&gt;", ">")
+    s = s:gsub("&quot;", '"'):gsub("&#39;", "'"):gsub("&amp;", "&")
+    local lines = {}
+    for line in (s .. "\n"):gmatch("([^\n]*)\n") do
+        local l = line:gsub("[ \t\r]+", " ")
+        l = l:gsub("^%s+", ""):gsub("%s+$", "")
+        lines[#lines + 1] = l
+    end
+    while #lines > 1 and lines[#lines] == "" do lines[#lines] = nil end
+    return table.concat(lines, "\n")
+end
+
 -- 解析文章页：成功返回 meta 表，失败返回 nil + 错误文案
 local function parse_article(body)
     if not body or body == "" then return nil, "抓取失败：空响应" end
@@ -334,13 +443,36 @@ local function parse_article(body)
             account = account,
             content = truncate(content),
             images = extract_images(body_html),
+            image_mode = "cover",
         }, nil
     end
     -- 风控验证页（无 js_content 且含"环境异常"）
     if body:find("环境异常", 1, true) then
         return nil, "微信风控拦截，请稍后再试"
     end
-    -- 新格式：无 js_content，正文在 meta description（字面 \x0a 为换行），图片从整页提取
+    -- 另一类文章形态（cgiDataNew 数据块）：无 js_content，正文在 content_noencode，
+    -- 标题/公众号名也可从这里取，图片全量提取；经典 js_content 页不受影响。
+    local cgi = extract_cgi_block(body)
+    if cgi ~= "" then
+        local content = cgi_text_to_text(cgi_string(cgi, "content_noencode"))
+        if content == "" then content = cgi_text_to_text(cgi_string(cgi, "content")) end
+        if content ~= "" then
+            local cgi_title = cgi_string(cgi, "title")
+            local cgi_account = cgi_string(cgi, "nick_name")
+            local cgi_cover = cgi_string(cgi, "cdn_url")
+            local images = extract_cgi_images(cgi)
+            return {
+                title = cgi_title ~= "" and cgi_title or title,
+                desc = desc,
+                cover = (cgi_cover ~= "" and cgi_cover) or cover or (images[1] or ""),
+                account = cgi_account ~= "" and cgi_account or account,
+                content = truncate(content),
+                images = images,
+                image_mode = "all",
+            }, nil
+        end
+    end
+    -- 另一种形式：无 js_content，正文在 meta description（字面 \x0a 为换行），图片从整页提取
     local desc_content = body:match('<meta name="description" content="(.-)"') or ""
     if desc_content == "" then
         return nil, "文章内容为空"
@@ -353,6 +485,7 @@ local function parse_article(body)
         account = account,
         content = truncate(content),
         images = extract_page_images(body),
+        image_mode = "cover",
     }, nil
 end
 
@@ -367,9 +500,10 @@ local function article_cache_get(e)
     if not v.summary then return nil end
     -- 缓存结构升级：旧缓存无 account、无 cover 或图文支持前无 images，视为未命中重建
     if not v.account or not v.cover or not v.images then return nil end
-    -- 恢复抓取期 meta（标题/公众号名/封面图/图片），缓存命中时输出段完整
+    -- 恢复抓取期 meta（标题/公众号名/封面图/图片/图片模式），缓存命中时输出段完整
+    -- 旧缓存没有 image_mode：按普通文章处理，只发封面
     e.meta = { title = v.title or "", account = v.account or "", cover = v.cover or "", desc = "",
-               images = v.images or {} }
+               images = v.images or {}, image_mode = v.image_mode or "cover" }
     return v
 end
 
@@ -432,38 +566,58 @@ end
 -- 组装单篇段
 local function compose_section(e)
     local lines = {}
-    local title = (e.meta and e.meta.title) or "微信公众号文章"
-    lines[#lines + 1] = "📰 " .. title .. WATERMARK -- 标题尾部附零宽水印（编码 WM_TEXT）
-    -- 公众号名（来自 var nickname），抓不到则不显示该行
+    local title = (e.meta and e.meta.title) or ""
+    local watermark_attached = false
+    if title ~= "" then
+        lines[#lines + 1] = "📰 " .. title .. WATERMARK -- 标题尾部附零宽水印（编码 WM_TEXT）
+        watermark_attached = true
+    end
+    -- 公众号名（来自 var nickname），抓不到则不显示该行；无标题时水印挂到公众号名行
     local account = (e.meta and e.meta.account) or ""
     if account ~= "" then
-        lines[#lines + 1] = "📖 " .. account
+        lines[#lines + 1] = "📖 " .. account .. (not watermark_attached and WATERMARK or "")
+        watermark_attached = true
     end
 
     local llm = e.llm
     local summary = (llm and llm.summary) or ""
     if summary ~= "" then
-        lines[#lines + 1] = summary
+        lines[#lines + 1] = summary .. (not watermark_attached and WATERMARK or "")
+        watermark_attached = true
+    end
+    -- 标题/公众号名/摘要全为空时，水印独立成行；绝不贴到链接行
+    if not watermark_attached then
+        lines[#lines + 1] = WATERMARK
     end
     lines[#lines + 1] = "🔗 原文链接：" .. e.url
     return table.concat(lines, "\n")
 end
 
--- 单篇封面：og:image 优先，其次正文第一张图；只要一张，避免多图刷屏
+-- 普通文章封面：只认 og:image，不再回退正文第一张图
 local function cover_of(e)
     if not (e and e.meta) then return nil end
     local c = e.meta.cover
     if c and c ~= "" then return c end
-    if e.meta.images and #e.meta.images > 0 then return e.meta.images[1] end
     return nil
 end
 
--- 单篇节点：文本段 + 一张封面
+-- 单篇节点：普通文章只发封面；cgiDataNew 图文形态发送全部正文图片
 local function section_segments(e)
     local segs = { { type = "text", data = { text = compose_section(e) } } }
     if cfg_bool("send_cover", true) then
-        local img = cover_of(e)
-        if img then segs[#segs + 1] = { type = "image", data = { file = img } } end
+        local mode = (e.meta and e.meta.image_mode) or "cover"
+        local images = {}
+        if mode == "all" then
+            images = (e.meta and e.meta.images) or {} -- 图文：全量发送
+        else
+            local img = cover_of(e)
+            if img then images = { img } end -- 普通文章：只发封面
+        end
+        for _, img in ipairs(images) do
+            if img and img ~= "" then
+                segs[#segs + 1] = { type = "image", data = { file = img } }
+            end
+        end
     end
     return segs
 end
@@ -703,6 +857,7 @@ function on_chat_response(req_id, content, err)
                     cover = (e.meta and e.meta.cover) or "",
                     summary = r.summary and tostring(r.summary) or "",
                     images = (e.meta and e.meta.images) or {},
+                    image_mode = (e.meta and e.meta.image_mode) or "cover",
                 }
                 e.llm = content_tbl
                 article_cache_set(e, content_tbl)

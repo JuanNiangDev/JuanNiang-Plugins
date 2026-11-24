@@ -69,14 +69,36 @@ configs:
   - key: max_readme_chars
     type: string
     label: README 最大输入字数
-    description: 送入 LLM 的 README 最大字符数，默认 10000
+    description: 送入 LLM 的 README 最大字符数，默认 10000；GitHub 项目改用 github_readme_max_chars，Hugging Face / ModelScope 模型页改用 model_readme_max_chars
     default: "10000"
+  - key: github_readme_max_chars
+    type: string
+    label: GitHub README 最大输入字数
+    description: GitHub 项目 README 送入 LLM 的最大字符数，默认 30000，避免架构/能力/用法章节被截断导致总结空泛
+    default: "30000"
+  - key: model_readme_max_chars
+    type: string
+    label: 模型 README 最大输入字数
+    description: HF/MS 模型页送入 LLM 的 README 最大字符数，默认 30000，确保 benchmark 与架构章节不被截断
+    default: "30000"
 
   - key: llm_timeout
     type: string
     label: LLM 超时（秒）
     description: 调用主程序 LLM 的超时秒数，默认 60
     default: "60"
+
+  - key: llm_min_interval
+    type: string
+    label: LLM 最小调用间隔（秒）
+    description: 串行排队调用 LLM 的最小间隔秒数，默认 3；用于防止连续发多个链接触发频率限制
+    default: "3"
+
+  - key: llm_max_retries
+    type: string
+    label: LLM 失败最大重试次数
+    description: LLM 报错或返回无效 JSON 时的退避重试次数（4s/8s/12s），默认 3
+    default: "3"
 
   - key: max_repos
     type: string
@@ -87,14 +109,24 @@ configs:
   - key: summary_min_chars
     type: string
     label: 总结最小字数
-    description: LLM 总结的目标字数（默认 50）；内容稀少时允许如实写短或留空，避免为凑字数写套话
+    description: LLM 总结的目标字数（默认 50）；GitHub 项目在 README 充分时按 150~500 字写，内容稀少时允许如实写短或留空
     default: "50"
 
   - key: summary_max_chars
     type: string
     label: 总结最大字数
-    description: LLM 总结的最多字数，默认 150
-    default: "150"
+    description: LLM 总结的最多字数，默认 500；GitHub 项目在内容充分时按 150~500 字写
+    default: "500"
+  - key: key_image_count
+    type: string
+    label: 随总结发送的关键图片数
+    description: HF/MS 模型页从 README 提取并随总结发送的关键图片数量，默认 2，0 关闭
+    default: "2"
+  - key: key_image_proxy
+    type: string
+    label: 关键图片代理前缀
+    description: HF/MS 模型页关键图片走该代理再发图，默认 wsrv.nl；留空则直接发原图 URL
+    default: "https://wsrv.nl/?url="
 
   - key: card_enabled
     type: bool

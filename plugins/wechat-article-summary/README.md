@@ -43,16 +43,17 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 📖 公众号名（抓不到则不显示该行）
 核心内容总结（50~200 字；早报/新闻汇总类为前 5 条新闻标题 + "共 X 条"）
 🔗 原文链接
-[封面图]（每篇一张，og:image 优先，其次正文第一张；send_cover 可关）
+[封面图]（普通文章只发 og:image 封面；cgiDataNew 图文形态发送全部正文图片；send_cover 可关）
 ```
 
-（多篇时每段之间空两行，一次发送；图片按每篇的正文顺序依次附加，不再只发封面图。）
+（多篇时每段之间空两行，一次发送；图片随对应文章追加。）
 
 ## 图文支持
 
-- **经典格式**：`js_content` 容器内的 `<img data-src>` 按文档顺序提取为图片列表
-- **新格式**（部分文章无 `js_content`，正文在 `meta description`、图片在 JS 配置）：正文从 `meta description` 兜底（`\x0a` 解码为换行），图片按页序提取（去重、排除作者头像、解码 `\x26`/`&amp;` 实体）
-- 图片 URL 统一 http→https；每篇只发一张封面（og:image 优先），避免多图刷屏
+- **经典格式**：`js_content` 容器内的 `<img data-src>` 按文档顺序提取为图片列表；普通文章默认只发 og:image 封面，不刷多图
+- **cgiDataNew 图文形态**：无 `js_content`，正文在 `content_noencode`，图片全量提取并全部发送（去重、排除作者头像、解码 `\x26`/`&amp;` 实体）
+- **meta description 兜底形态**：正文从 description 解码；只发 og:image 封面，没有封面则不发图
+- 图片 URL 统一 http→https
 
 ## 抓取说明
 
@@ -65,7 +66,7 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 | enabled | 总开关 | true |
 | enable_summary | LLM 总结开关（关闭只发标题与公众号名） | true |
 | reply_quote | 回复时引用原消息 | true |
-| send_cover | 发送图文全部图片（按正文顺序依次） | true |
+| send_cover | 普通文章发封面；cgiDataNew 图文形态发全部正文图片 | true |
 | group_only | 仅群聊生效 | false |
 | cache_ttl | 总结结果缓存秒数 | 604800（7 天） |
 | max_content_chars | 送入 LLM 的正文最大字数 | 10000 |

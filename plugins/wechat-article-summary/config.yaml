@@ -32,8 +32,8 @@ configs:
 
   - key: send_cover
     type: bool
-    label: 发送图文图片
-    description: 每篇总结附一张封面图（og:image 优先，其次正文第一张）；关闭则不发送
+    label: 发送文章图片
+    description: 普通文章只发封面（og:image）；cgiDataNew 图文形态发送全部正文图片；关闭则都不发
     default: true
 
   - key: group_only

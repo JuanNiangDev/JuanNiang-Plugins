@@ -10,5 +10,6 @@ permissions:
   - llm
   - file
   - t2i
+  - timer
 system: false
 enabled: true

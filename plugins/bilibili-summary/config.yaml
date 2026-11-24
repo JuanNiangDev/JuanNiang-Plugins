@@ -39,8 +39,32 @@ configs:
   - key: reply_quote
     type: bool
     label: 引用原消息
-    description: 回复时引用触发总结的那条消息
+    description: 回复时引用触发总结的那条消息（仅普通消息模式生效；合并转发为独立转发卡片）
     default: true
+
+  - key: merge_forward
+    type: bool
+    label: 合并转发投递（总开关）
+    description: 开启后，单条消息内成功总结的 B 站链接数量 ≥ 合并转发阈值时合并成一条转发；关闭则逐条发普通消息
+    default: true
+
+  - key: merge_threshold
+    type: string
+    label: 合并转发阈值（条）
+    description: 同条消息内至少有几条总结结果时才使用合并转发；1 = 单条链接也合并转发，2/3 = 至少 2/3 条链接才合并转发
+    default: "1"
+
+  - key: forward_sender_name
+    type: string
+    label: 转发节点昵称
+    description: 合并转发内各节点展示的昵称；留空则用机器人自己的昵称
+    default: ""
+
+  - key: send_interval
+    type: string
+    label: 串行发送间隔（秒）
+    description: 多条连续发送（非合并模式/补发图片/跨任务连发）之间的最小等待秒数，默认 15；0 表示不等待
+    default: "15"
 
   - key: send_cover
     type: bool

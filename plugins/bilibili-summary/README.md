@@ -3,7 +3,6 @@
 识别群聊/私聊里的 B 站内容并自动总结，支持：
 
 - 视频长链 `https://www.bilibili.com/video/BV.../?p=2`
-- 裸 BV 号 `BV1B2oaB8ETM`
 - 短链 `https://b23.tv/xxxxxxx`（302 到视频 / 专栏 / 动态）
 - QQ 小程序卡片（`meta.detail_1.qqdocurl` 里的 b23 链接）
 - 专栏 `https://www.bilibili.com/opus/<id>`、旧版 `read/cv<id>`
@@ -42,7 +41,7 @@ persona 模式下这一段改为人设口吻讲解内容（默认 ≤600 字）
 
 ## 字幕与 Cookie
 
-字幕接口 `x/player/v2` 需要登录态：`cookie` 填浏览器里 bilibili.com 的 Cookie（至少 `SESSDATA`）。留空时视频只能按标题/简介总结，多 P 视频退化为分 P 标题概括。
+字幕接口 `x/player/wbi/v2?aid=&cid=` 需要登录态：`cookie` 填浏览器里 bilibili.com 的 Cookie（至少 `SESSDATA`）。插件会补 `Origin` / `Sec-Fetch-Site: same-origin`，并自动从 `x/frontend/finger/spi` 取 `buvid3`/`buvid4`（缓存 7 天，失败则跳过）。留空时视频只能按标题/简介总结，多 P 视频退化为分 P 标题概括。
 
 字幕选择：优先非 AI 字幕（`lan` 不以 `ai` 开头），否则取 AI 字幕。字幕文本默认每 P 最多送 50000 字给模型。
 
@@ -51,9 +50,9 @@ persona 模式下这一段改为人设口吻讲解内容（默认 ≤600 字）
 ## 抓取说明
 
 - 视频信息：`api.bilibili.com/x/web-interface/view`（免登录）
-- 字幕列表：`api.bilibili.com/x/player/v2?bvid=&cid=` → `subtitle_url`（需 Cookie）
+- 字幕列表：`api.bilibili.com/x/player/wbi/v2?aid=&cid=` → `subtitle_url`（带 Cookie + 同源请求头；字幕 JSON 本身直连，不携带 Cookie）
 - 专栏：桌面页 `__INITIAL_STATE__` 的 `detail.modules`（标题/作者/时间/段落/正文图片/头图相册/视频卡片）
-- 短链：直接 GET `b23.tv/<code>`（引擎自动跟随 302），从落地页解析 BV / opus / cv
+- 短链：经本地 `media-proxy` 的 `/b23?code=` 只取 Location，不跟随跳转到 B 站网页，避免 412
 - 图片统一 `http→https`，可选 `image_proxy_prefix` 走图片代理
 
 ## 配置要点
@@ -66,7 +65,10 @@ persona 模式下这一段改为人设口吻讲解内容（默认 ≤600 字）
 | `max_subtitle_chars` | 单 P 字幕送入 LLM 的字数上限，默认 50000 |
 | `max_images` | 专栏配图上限，默认 9 |
 | `target_groups` | 留空 = 全部群/私聊；填写后只处理这些群 |
-| `cookie` | 字幕登录 Cookie，默认空 |
+| `merge_forward` | 是否开启合并转发投递（默认 `true`） |
+| `merge_threshold` | 同条消息达到至少几条结果时合并转发（默认 `"1"`，即单条也合并转发；设为 `"2"`/`"3"` 则达到阈值才合并） |
+| `forward_sender_name` | 合并转发内节点昵称（留空用机器人自身昵称） |
+| `cookie` | 字幕登录 Cookie，默认空；可再填 `buvid3` / `buvid4` 手动覆盖自动获取值 |
 
 ## 其它
 

@@ -5,21 +5,21 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    width: 1200px;
-    background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-    color: #333;
+    width: 1280px;
+    background: linear-gradient(135deg, #fdf2f7 0%, #f1f5f9 100%);
+    font-family: "WenQuanYi Zen Hei", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Color Emoji", sans-serif;
+    color: #1e293b;
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 30px 20px 40px;
+    padding: 24px 20px 32px;
   }
   .card-container {
-    width: 1160px;
+    width: 1240px;
     background: #ffffff;
     border-radius: 20px;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.06);
-    border: 1px solid rgba(255, 182, 193, 0.4);
+    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+    border: 1px solid rgba(244, 114, 182, 0.35);
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -27,61 +27,220 @@
   }
   .header {
     width: 100%;
-    padding: 24px 30px 18px;
-    background: linear-gradient(90deg, #ff9a9e 0%, #fecfef 99%, #fecfef 100%);
+    padding: 22px 28px 18px;
+    background: linear-gradient(100deg, #f43f5e 0%, #ec4899 55%, #f472b6 100%);
     color: #fff;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 16px;
   }
   .title-box h1 {
     font-size: 26px;
     font-weight: 700;
-    text-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    letter-spacing: 1px;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.18);
+    letter-spacing: 0.5px;
     display: flex;
     align-items: center;
     gap: 8px;
   }
   .title-box p {
     font-size: 14px;
-    opacity: 0.92;
-    margin-top: 4px;
+    opacity: 0.95;
+    margin-top: 5px;
   }
   .stats-badges {
     display: flex;
-    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
   }
   .badge {
-    background: rgba(255, 255, 255, 0.25);
-    backdrop-filter: blur(8px);
+    background: rgba(255, 255, 255, 0.92);
+    color: #be185d;
     padding: 6px 14px;
     border-radius: 20px;
     font-size: 13px;
-    font-weight: 600;
-    border: 1px solid rgba(255, 255, 255, 0.4);
+    font-weight: 700;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
   }
+  .badge.green {
+    color: #047857;
+  }
+
+  /* 顶部聚焦卡片区 */
+  .summary-section {
+    width: 100%;
+    padding: 18px 24px 8px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 14px;
+    background: #fffafc;
+    border-bottom: 1px solid #fce7f3;
+  }
+  .spot-card {
+    background: #ffffff;
+    border: 1px solid #fbcfe8;
+    border-radius: 14px;
+    padding: 12px 14px;
+  }
+  .spot-card.green { border-color: #a7f3d0; background: #f0fdf9; }
+  .spot-card.harem { border-color: #fde68a; background: #fffdf0; }
+  .spot-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #334155;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .spot-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .spot-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: #1e293b;
+  }
+  .spot-row img {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid #f9a8d4;
+    flex-shrink: 0;
+  }
+  .spot-card.green .spot-row img { border-color: #34d399; }
+  .spot-card.harem .spot-row img { border-color: #fbbf24; }
+  .spot-name {
+    font-weight: 700;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .spot-desc {
+    color: #475569;
+    font-size: 12px;
+    flex: 1;
+    line-height: 1.4;
+  }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 700;
+    background: #fce7f3;
+    color: #be185d;
+    flex-shrink: 0;
+  }
+  .pill.green { background: #d1fae5; color: #065f46; }
+  .pill.gold { background: #fef3c7; color: #92400e; }
+
   .svg-wrap {
     width: 100%;
     display: flex;
     justify-content: center;
     align-items: center;
-    padding: 10px 0;
+    padding: 12px 10px;
   }
+  .empty-tip {
+    margin: 16px 24px;
+    padding: 14px 20px;
+    border-radius: 12px;
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+    color: #475569;
+    font-size: 13px;
+    text-align: center;
+  }
+
+  /* 全员 / 后宫成员图鉴网格 */
+  .roster-section {
+    width: 100%;
+    padding: 14px 24px 20px;
+    border-top: 1px solid #f1f5f9;
+    background: #fafafa;
+  }
+  .roster-head {
+    font-size: 14px;
+    font-weight: 700;
+    color: #334155;
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .roster-sub {
+    font-size: 12px;
+    font-weight: 400;
+    color: #64748b;
+  }
+  .roster-grid {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .member-tile {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 8px 6px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    text-align: center;
+  }
+  .member-tile.is-green { border-color: #6ee7b7; background: #f0fdf9; }
+  .member-tile.is-bi { border-color: #f9a8d4; background: #fff5f8; }
+  .member-tile.is-harem { border-color: #fcd34d; background: #fffbeb; }
+  .member-tile img {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid #fbcfe8;
+  }
+  .member-tile.is-green img { border-color: #10b981; }
+  .member-tile.is-bi img { border-color: #ec4899; }
+  .member-tile.is-harem img { border-color: #f59e0b; }
+  .member-name {
+    width: 100%;
+    font-size: 12px;
+    font-weight: 600;
+    color: #1e293b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .member-meta {
+    font-size: 10px;
+    color: #64748b;
+    line-height: 1.25;
+  }
+
   .footer {
     width: 100%;
-    padding: 14px 30px;
-    background: #fafafa;
-    border-top: 1px solid #f0f0f0;
+    padding: 14px 26px;
+    background: #f8fafc;
+    border-top: 1px solid #e2e8f0;
     display: flex;
     justify-content: space-between;
     align-items: center;
     font-size: 12px;
-    color: #888;
+    color: #64748b;
   }
   .legend {
     display: flex;
-    gap: 20px;
+    flex-wrap: wrap;
+    gap: 16px;
     align-items: center;
   }
   .legend-item {
@@ -89,18 +248,10 @@
     align-items: center;
     gap: 6px;
   }
-  .legend-line-single {
-    width: 24px;
-    height: 3px;
-    background: #90caf9;
-    border-radius: 2px;
-  }
-  .legend-line-bi {
-    width: 24px;
-    height: 4px;
-    background: #ff4081;
-    border-radius: 2px;
-  }
+  .legend-line-single { width: 20px; height: 3px; background: #60a5fa; border-radius: 2px; }
+  .legend-line-green { width: 20px; height: 3px; background: #10b981; border-radius: 2px; }
+  .legend-line-bi { width: 20px; height: 4px; background: #ff4081; border-radius: 2px; }
+  .legend-line-fixed { width: 20px; height: 3px; background: #e11d48; border-radius: 2px; }
 </style>
 </head>
 <body>
@@ -113,24 +264,25 @@
       <div class="stats-badges">
         <div class="badge">👥 群友 __NODE_COUNT__ 人</div>
         <div class="badge">🔗 配对 __EDGE_COUNT__ 条</div>
+        <div class="badge green">💚 抢手焦点 __GREEN_COUNT__ 人</div>
         <div class="badge">❤️ 双向奔赴 __BI_COUNT__ 对</div>
       </div>
     </div>
+
+    __SUMMARY_HTML__
 
     <div class="svg-wrap">
       __SVG_CONTENT__
     </div>
 
+    __EXTRA_HTML__
+
     <div class="footer">
       <div class="legend">
-        <div class="legend-item">
-          <div class="legend-line-single"></div>
-          <span>单向钟情（箭头指向老婆）</span>
-        </div>
-        <div class="legend-item">
-          <div class="legend-line-bi"></div>
-          <span>❤️ 永恒/双向爱意（双向奔赴）</span>
-        </div>
+        <div class="legend-item"><div class="legend-line-single"></div><span>单向娶走（箭头指向老婆）</span></div>
+        <div class="legend-item"><div class="legend-line-green"></div><span>💚 绿帽/多人争抢</span></div>
+        <div class="legend-item"><div class="legend-line-bi"></div><span>💗 双向奔赴</span></div>
+        <div class="legend-item"><div class="legend-line-fixed"></div><span>💍 永恒固定</span></div>
       </div>
       <div>卷娘今日老婆插件 · 生成时间：__GEN_TIME__</div>
     </div>

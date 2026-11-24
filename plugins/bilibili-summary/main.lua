@@ -1,9 +1,8 @@
 -- ====================================================================
 -- bilibili-summary 哔哩哔哩内容总结插件
 -- --------------------------------------------------------------------
--- 识别一条消息中的 B 站链接（可混合多种）：
+-- 识别一条消息中的 B 站链接（可混合多种；裸 BV 不触发）：
 --   · 视频长链  https://www.bilibili.com/video/BVxxxxxxxxxx/?p=2
---   · 裸 BV 号   BV1B2oaB8ETM
 --   · 短链      https://b23.tv/xxxxxxx（302 到视频 / opus / 专栏）
 --   · 小程序卡片 [CQ:json,data=...]（meta.detail_1.qqdocurl 为 b23 链接）
 --   · 专栏      https://www.bilibili.com/opus/<id>、/read/cv<id>
@@ -196,9 +195,6 @@ local function img_for_send(url)
     if url == "" then return "" end
     local prefix = cstr("image_proxy_prefix", "")
     if prefix ~= "" then
-        if prefix:find("?url=", 1, true) then
-            return prefix .. url
-        end
         return prefix .. url
     end
     return url
@@ -211,10 +207,26 @@ local function ua()
     return cstr("ua", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
 end
 
+local function buvid_cookie()
+    local parts = {}
+    local v = jn.cache.get("bili:buvid")
+    if type(v) == "table" then
+        if v.b3 and v.b3 ~= "" then parts[#parts + 1] = "buvid3=" .. v.b3 end
+        if v.b4 and v.b4 ~= "" then parts[#parts + 1] = "buvid4=" .. v.b4 end
+    end
+    local b3 = cstr("buvid3", "")
+    local b4 = cstr("buvid4", "")
+    if b3 ~= "" then parts[#parts + 1] = "buvid3=" .. b3 end
+    if b4 ~= "" then parts[#parts + 1] = "buvid4=" .. b4 end
+    return table.concat(parts, "; ")
+end
+
 local function cookie_header()
     local ck = cstr("cookie", "")
-    if ck == "" then return nil end
-    return ck
+    local extra = buvid_cookie()
+    if ck == "" then return extra ~= "" and extra or nil end
+    if extra == "" then return ck end
+    return ck .. "; " .. extra
 end
 
 local function headers_for(referer, with_cookie, html)
@@ -224,6 +236,9 @@ local function headers_for(referer, with_cookie, html)
             or "application/json, text/plain, */*",
         ["Accept-Language"] = "zh-CN,zh;q=0.9",
         ["Origin"] = "https://www.bilibili.com",
+        ["Sec-Fetch-Site"] = "same-origin",
+        ["Sec-Fetch-Mode"] = "cors",
+        ["Sec-Fetch-Dest"] = "empty",
     }
     if referer and referer ~= "" then h["Referer"] = referer end
     if with_cookie then
@@ -235,6 +250,35 @@ end
 
 local function http_get(url, ctx, referer, with_cookie, html)
     return jn.http.get_async(url, ctx, headers_for(referer, with_cookie, html), cstr("proxy", ""))
+end
+
+-- B 站视频页会带 buvid3/buvid4；服务端手工 Cookie 通常没有，补一次并缓存。
+-- 不阻塞主流程：取不到也继续用现有 Cookie。
+local function ensure_buvid(job, next_fn)
+    local v = jn.cache.get("bili:buvid")
+    if type(v) == "table" and v.b3 and v.b4 then
+        next_fn()
+        return
+    end
+    job.after_spi = next_fn
+    local rid = http_get("https://api.bilibili.com/x/frontend/finger/spi",
+        { jid = job.id, stage = "spi" }, "https://www.bilibili.com/", false)
+    if not rid or rid == 0 then
+        job.after_spi = nil
+        next_fn()
+    end
+end
+
+local function handle_spi(job, result, next_fn)
+    job.after_spi = nil
+    local ok, data = pcall(function() return jn.json.decode(result and result.body or "") end)
+    if ok and type(data) == "table" and type(data.data) == "table" then
+        local d = data.data
+        if type(d.b_3) == "string" and d.b_3 ~= "" and type(d.b_4) == "string" and d.b_4 ~= "" then
+            jn.cache.set("bili:buvid", { b3 = d.b_3, b4 = d.b_4 }, 7 * 24 * 3600)
+        end
+    end
+    if next_fn then next_fn() end
 end
 
 -- --------------------------------------------------------------------
@@ -251,18 +295,15 @@ local function parse_entries(raw)
         entries[#entries + 1] = e
     end
 
-    -- 1) BV 号（长链与裸号都在这里命中；先取 p 参数再判定）
+    -- 1) 只从 bilibili.com/video/ 链接里取 BV；裸 BV 不再识别
     local pos = 1
     while true do
-        local s, e, bv = raw:find("BV([1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z])", pos)
+        local s, e, bv = raw:find("bilibili%.com/video/BV([1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z][1-9A-HJ-NP-Za-km-z])", pos)
         if not s then break end
         bv = "BV" .. bv
         local tail = raw:sub(e + 1, e + 80)
         local pm = tail:match("^[^%s]-[?&]p=(%d+)")
         local p = pm and tonumber(pm) or nil
-        if not p then
-            -- p 出现在当前匹配之前（如 BV... 前面有 ?p=2 的情况极少），忽略
-        end
         add({
             kind = "video", bvid = bv, page = p,
             key = "v:" .. bv .. (p and (":" .. p) or ""),
@@ -382,6 +423,15 @@ local function cache_set(e, payload)
     jn.cache.set(cache_key(e), payload, cnum("cache_ttl", 604800))
 end
 
+-- 只有相关度通过且未被分类器剔除的字幕才允许写入缓存。
+local function subtitle_clean(job)
+    if not job or job.subtitle_lost then return false end
+    for _, s in ipairs(job.subs or {}) do
+        if s and s.weak then return false end
+    end
+    return true
+end
+
 -- --------------------------------------------------------------------
 -- 任务队列（同一会话串行）
 -- --------------------------------------------------------------------
@@ -399,6 +449,8 @@ local function new_job(target, entry)
         id = jid,
         target = target,
         entry = entry,
+        batch = entry and entry._batch or nil,
+        batch_order = entry and entry._batch_order or nil,
         subs = {},
         page_list = {},
         idx = 1,
@@ -407,13 +459,117 @@ local function new_job(target, entry)
     return job
 end
 
+local deliver_batch  -- 前向声明：批处理完成后投递
+
 local function finish_job(job)
+    if not job or job.finished then return end
+    job.finished = true
     jobs[job.id] = nil
+    local b = job.batch
+    if b and not job.batch_counted then
+        job.batch_counted = true
+        b.done = b.done + 1
+        if b.want_forward and b.done >= b.total and not b.flushed then
+            b.flushed = true
+            deliver_batch(b)
+        end
+    end
     advance_queue(job.target)
 end
 
 local function chat_key(t)
     return tostring(t.message_type) .. ":" .. tostring(t.target_id)
+end
+
+local function bot_identity()
+    local uin, nick = 0, "Bot"
+    if jn.onebot11 and jn.onebot11.get_login_info then
+        local info = jn.onebot11.get_login_info()
+        if info then
+            if info.user_id then uin = tonumber(info.user_id) or 0 end
+            if info.nickname and info.nickname ~= "" then nick = tostring(info.nickname) end
+        end
+    end
+    if uin <= 0 then uin = 1772023368 end
+    return uin, nick
+end
+
+local send_queue, send_pump_scheduled, last_send_at = {}, false, 0
+
+local function get_send_interval()
+    return math.max(0, cnum("send_interval", 15))
+end
+
+local function send_onebot_msg_raw(target, segs)
+    if target.message_type == "group" then
+        return jn.onebot11.send_group_msg(target.target_id, segs)
+    end
+    return jn.onebot11.send_private_msg(target.target_id, segs)
+end
+
+local pump_send_queue
+
+local function schedule_send_pump()
+    if send_pump_scheduled or #send_queue == 0 then return end
+    local interval = get_send_interval()
+    local elapsed = os.time() - last_send_at
+    if interval <= 0 or last_send_at == 0 or elapsed >= interval then
+        pump_send_queue()
+        return
+    end
+    if jn.timer and jn.timer.after then
+        send_pump_scheduled = true
+        jn.timer.after(math.max(1, interval - elapsed), { stage = "send_pump" })
+    else
+        while #send_queue > 0 do
+            local task = table.remove(send_queue, 1)
+            send_onebot_msg_raw(task.target, task.segs)
+            last_send_at = os.time()
+        end
+    end
+end
+
+pump_send_queue = function()
+    send_pump_scheduled = false
+    if #send_queue == 0 then return end
+    local interval = get_send_interval()
+    local elapsed = os.time() - last_send_at
+    if interval > 0 and last_send_at > 0 and elapsed < interval then
+        schedule_send_pump()
+        return
+    end
+    local task = table.remove(send_queue, 1)
+    send_onebot_msg_raw(task.target, task.segs)
+    last_send_at = os.time()
+    if #send_queue > 0 then
+        schedule_send_pump()
+    end
+end
+
+local function send_onebot_msg(target, segs)
+    local interval = get_send_interval()
+    local elapsed = os.time() - last_send_at
+    if #send_queue == 0 and (interval <= 0 or last_send_at == 0 or elapsed >= interval) then
+        local res, err = send_onebot_msg_raw(target, segs)
+        last_send_at = os.time()
+        return res, err
+    end
+    send_queue[#send_queue + 1] = { target = target, segs = segs }
+    schedule_send_pump()
+    return true, nil
+end
+
+local function send_onebot_forward_sync(target, nodes)
+    local res, err
+    if target.message_type == "group" then
+        if not jn.onebot11.send_group_forward_msg_sync then return nil, "no_forward_api" end
+        res, err = jn.onebot11.send_group_forward_msg_sync(target.target_id, nodes)
+    else
+        if not jn.onebot11.send_private_forward_msg_sync then return nil, "no_forward_api" end
+        res, err = jn.onebot11.send_private_forward_msg_sync(target.target_id, nodes)
+    end
+    if err == nil then last_send_at = os.time() end
+    return res, err
 end
 
 -- 发送文本 + 图片（quote 仅首条）
@@ -431,17 +587,118 @@ local function send_payload(target, text, images, quote)
             end
         end
     end
-    if target.message_type == "group" then
-        return jn.onebot11.send_group_msg(target.target_id, segs)
-    end
-    return jn.onebot11.send_private_msg(target.target_id, segs)
+    return send_onebot_msg(target, segs)
 end
 
+local function send_images_only(target, imgs)
+    for i = 1, #imgs, 4 do
+        local segs = {}
+        for k = i, math.min(i + 3, #imgs) do
+            segs[#segs + 1] = { type = "image", data = { file = imgs[k] } }
+        end
+        send_onebot_msg(target, segs)
+    end
+end
+
+local function node_content(text, images)
+    if not images or #images == 0 then return text end
+    local segs = { { type = "text", data = { text = text } } }
+    for _, url in ipairs(images) do
+        if url and url ~= "" then
+            segs[#segs + 1] = { type = "image", data = { file = url } }
+        end
+    end
+    return segs
+end
+
+deliver_batch = function(batch)
+    if not batch then return end
+    local items = {}
+    for i = 1, batch.total do
+        local it = batch.results[i]
+        if it and type(it.text) == "string" and it.text ~= "" then
+            items[#items + 1] = it
+        end
+    end
+    if #items == 0 then return end
+
+    local t = batch.target
+    local threshold = math.max(1, cnum("merge_threshold", 1))
+    local want_forward = cbool("merge_forward", true) and #items >= threshold
+    local can_forward = (t.message_type == "group" and jn.onebot11.send_group_forward_msg_sync ~= nil)
+        or (t.message_type ~= "group" and jn.onebot11.send_private_forward_msg_sync ~= nil)
+
+    if want_forward and can_forward then
+        local uin, nick = bot_identity()
+        local custom = cstr("forward_sender_name", "")
+        if custom ~= "" then nick = custom end
+        local nodes = {}
+        for _, it in ipairs(items) do
+            nodes[#nodes + 1] = { user_id = uin, nickname = nick, content = node_content(it.text, it.images) }
+        end
+        local _, ferr = send_onebot_forward_sync(t, nodes)
+        if ferr == nil then return end
+
+        -- 带图转发可能被 QQ 拒绝：先退成纯文本合并转发并单独补图，仍失败再降级普通消息
+        local has_imgs = false
+        for _, it in ipairs(items) do
+            if it.images and #it.images > 0 then has_imgs = true; break end
+        end
+        if has_imgs then
+            local text_nodes = {}
+            for _, it in ipairs(items) do
+                text_nodes[#text_nodes + 1] = { user_id = uin, nickname = nick, content = it.text }
+            end
+            local _, ferr2 = send_onebot_forward_sync(t, text_nodes)
+            if ferr2 == nil then
+                jn.log.warn("[" .. PLUGIN .. "] 合并转发带图失败，已改纯文本转发并单独补图: " .. tostring(ferr))
+                local all_imgs = {}
+                for _, it in ipairs(items) do
+                    for _, u in ipairs(it.images or {}) do
+                        if u and u ~= "" then all_imgs[#all_imgs + 1] = u end
+                    end
+                end
+                if #all_imgs > 0 then send_images_only(t, all_imgs) end
+                return
+            end
+        end
+        jn.log.warn("[" .. PLUGIN .. "] 合并转发失败，改用普通消息: " .. tostring(ferr))
+    end
+
+    for i, it in ipairs(items) do
+        send_payload(t, it.text, it.images, i == 1)
+    end
+end
+
+local function emit_job_output(job, text, images)
+    if not job then return end
+    local b = job.batch
+    if b and b.want_forward and job.batch_order then
+        b.results[job.batch_order] = { text = text, images = images }
+        return
+    end
+    local quote = true
+    if b then
+        quote = not b.quoted_sent
+        b.quoted_sent = true
+    end
+    send_payload(job.target, text, images, quote)
+end
+
+local render_video, render_article  -- 前向声明：send_error 失败时只渲染元信息
+
 local function send_error(job, reason)
-    local e = job.entry
-    local label = "哔哩哔哩"
-    if e.kind == "opus" or e.kind == "read" then label = "专栏" end
-    send_payload(job.target, "❌ " .. label .. "总结失败：" .. reason, nil, true)
+    jn.log.warn("[" .. PLUGIN .. "] 总结失败，降级为元信息：" .. tostring(reason))
+    if not job then return end
+    local e = job.entry or {}
+    if e.kind == "opus" or e.kind == "read" then
+        if not job.meta then return end
+        local text, images = render_article(job)
+        emit_job_output(job, text, images)
+        return
+    end
+    local text, images = render_video(job)
+    emit_job_output(job, text, images)
 end
 
 -- --------------------------------------------------------------------
@@ -473,7 +730,21 @@ local function video_url(meta, page)
     return "https://www.bilibili.com/video/" .. bvid
 end
 
-local function render_video(job)
+local function append_summary_lines(lines, llm)
+    if llm.no_content then return end
+    local style = cstr("summary_style", "objective")
+    local summary = trim(llm.summary or "")
+    local persona = trim(llm.persona or "")
+    if style == "persona" and persona ~= "" then
+        lines[#lines + 1] = "🧠 内容总结"
+        lines[#lines + 1] = persona
+    elseif summary ~= "" then
+        lines[#lines + 1] = "🧠 内容总结"
+        lines[#lines + 1] = summary
+    end
+end
+
+render_video = function(job)
     local m = job.meta or {}
     local llm = job.llm or {}
     local lines = {}
@@ -505,18 +776,7 @@ local function render_video(job)
         lines[#lines + 1] = "🎬 共 " .. tostring(#m.pages) .. " P：" .. table.concat(names, "｜")
     end
 
-    local style = cstr("summary_style", "objective")
-    local summary = trim(llm.summary or "")
-    local persona = trim(llm.persona or "")
-    if not llm.no_content then
-        if style == "persona" and persona ~= "" then
-            lines[#lines + 1] = "🧠 内容总结"
-            lines[#lines + 1] = persona
-        elseif summary ~= "" then
-            lines[#lines + 1] = "🧠 内容总结"
-            lines[#lines + 1] = summary
-        end
-    end
+    append_summary_lines(lines, llm)
 
     local images = {}
     if cbool("send_cover", true) and trim(m.cover or "") ~= "" then
@@ -525,41 +785,27 @@ local function render_video(job)
     return table.concat(lines, "\n"), images
 end
 
-local function render_article(job)
+render_article = function(job)
     local m = job.meta or {}
     local llm = job.llm or {}
     local lines = {}
     local title = trim(m.title or "")
     if title ~= "" then
-        lines[#lines + 1] = "📄 " .. title .. WATERMARK
+        lines[#lines + 1] = "📄 " .. title
     end
     if trim(m.author or "") ~= "" then
         lines[#lines + 1] = "👤 " .. m.author
     end
     local link = display_link(job)
     lines[#lines + 1] = "🔗 " .. link
-    local summary = trim(llm.summary or "")
-    local persona = trim(llm.persona or "")
-    if not llm.no_content then
-        if cstr("summary_style", "objective") == "persona" and persona ~= "" then
-            lines[#lines + 1] = "🧠 内容总结"
-            lines[#lines + 1] = persona
-        elseif summary ~= "" then
-            lines[#lines + 1] = "🧠 内容总结"
-            lines[#lines + 1] = summary
-        end
-    end
+    append_summary_lines(lines, llm)
     local vc = m.video_card
     if type(vc) == "table" and trim(vc.title or "") ~= "" then
         lines[#lines + 1] = "🎬 引用视频：" .. vc.title
         if trim(vc.url or "") ~= "" then lines[#lines + 1] = vc.url end
     end
-    local persona = trim(llm.persona or "")
-    if persona ~= "" and trim(m.content or "") ~= "" then
-        lines[#lines + 1] = "💭 " .. persona
-    end
 
-    -- 水印不能贴在链接后面：零宽字符会被一起复制，URL 直接失效
+    -- 水印只挂一次，且不能贴在链接后面：零宽字符会被一起复制，URL 直接失效
     local marked = false
     for i = 1, #lines do
         if lines[i]:sub(1, 3) ~= "🔗 " then
@@ -733,6 +979,7 @@ local function fetch_view(job)
 end
 
 local PLAYER_RETRIES = 3   -- B 站字幕接口会间歇性返回空数组，重试几次再判定无字幕
+local QUEUE_WATCHDOG_SECONDS = 300   -- 单任务超时上限：异常中断未 finish_job 时强制推进队列
 
 local next_page  -- 前向声明（fetch_player 与 next_page 互相调用）
 
@@ -742,7 +989,13 @@ local function fetch_player(job, attempt)
         start_llm(job)
         return
     end
-    local url = "https://api.bilibili.com/x/player/v2?bvid=" .. job.entry.bvid .. "&cid=" .. tostring(page.cid)
+    local aid = job.meta and job.meta.aid or 0
+    if aid <= 0 then
+        job.subs[job.idx] = { text = "" }
+        next_page(job)
+        return
+    end
+    local url = "https://api.bilibili.com/x/player/wbi/v2?aid=" .. tostring(aid) .. "&cid=" .. tostring(page.cid)
     local rid = http_get(url, { jid = job.id, stage = "player", idx = job.idx, attempt = attempt or 0 },
         "https://www.bilibili.com/video/" .. job.entry.bvid .. "/", true)
     if not rid or rid == 0 then
@@ -781,7 +1034,7 @@ end
 local function start_entry(job)
     local e = job.entry
     if e.kind == "video" then
-        fetch_view(job)
+        ensure_buvid(job, function() fetch_view(job) end)
     elseif e.kind == "b23" then
         -- 直接访问 b23.tv 会跟随跳转到 www.bilibili.com/video/... 页面（B 站风控 412）；
         -- 本地代理只取 Location，不跟随跳转，再交给 handle_resolve 从 URL 里解析 BV/opus。
@@ -1029,8 +1282,8 @@ local function start_summary(job)
         if not has_sub and not multi then
             job.llm = { no_content = true, summary = "", parts = {}, persona = "" }
             local text, images = render_video(job)
-            send_payload(job.target, text, images, true)
-            if not job.subtitle_lost then cache_set(e, { text = text, images = images }) end
+            emit_job_output(job, text, images)
+            if subtitle_clean(job) then cache_set(e, { text = text, images = images }) end
             finish_job(job)
             return
         end
@@ -1040,7 +1293,7 @@ local function start_summary(job)
         jn.log.warn("[" .. PLUGIN .. "] 无可用 LLM，降级为仅元信息")
         local text, images
         if is_article then text, images = render_article(job) else text, images = render_video(job) end
-        send_payload(job.target, text, images, true)
+        emit_job_output(job, text, images)
         finish_job(job)
         return
     end
@@ -1056,7 +1309,7 @@ local function start_summary(job)
         jn.log.warn("[" .. PLUGIN .. "] chat_async 提交失败")
         local text, images
         if is_article then text, images = render_article(job) else text, images = render_video(job) end
-        send_payload(job.target, text, images, true)
+        emit_job_output(job, text, images)
         finish_job(job)
         return
     end
@@ -1095,7 +1348,7 @@ local function handle_resolve(job, result)
         end
         job.entry.url = "https://www.bilibili.com/video/" .. bv ..
             (job.entry.page and ("?p=" .. job.entry.page) or "")
-        fetch_view(job)
+        ensure_buvid(job, function() fetch_view(job) end)
         return
     end
     local opus = body:match('"detail":%s*{%s*"id_str":%s*"(%d+)"')
@@ -1132,6 +1385,7 @@ local function handle_view(job, result)
     end
     local d = data.data
     job.meta = {
+        aid = tonumber(d.aid) or 0,
         bvid = d.bvid or job.entry.bvid,
         title = d.title or "",
         owner_name = (d.owner or {}).name or "",
@@ -1186,9 +1440,10 @@ local function handle_player(job, ctx, result)
 
     if chosen then
         local u = chosen.subtitle_url
-        if u:sub(1, 2) == "//" then u = "https:" .. u end
-        local rid = http_get(u, { jid = job.id, stage = "subtitle", idx = ctx.idx },
-            "https://www.bilibili.com/video/" .. job.entry.bvid .. "/", true)
+        if u:sub(1, 2) == "//" then u = "https:" .. u
+        elseif u:sub(1, 7) == "http://" then u = "https://" .. u:sub(8) end
+        -- 字幕 JSON 是公开 CDN 文件，不携带 Cookie/Referer。
+        local rid = http_get(u, { jid = job.id, stage = "subtitle", idx = ctx.idx }, "", false)
         if rid and rid ~= 0 then return end
     end
     -- 接口会间歇性返回空 subtitles（同一 cid 多次请求结果不同），重试几次
@@ -1307,7 +1562,8 @@ local function handle_subtitle(job, ctx, result)
     if text ~= "" and score == 0 and tries < SUBTITLE_TRIES then
         job.subtitle_tries[ctx.idx] = tries + 1
         jn.log.info("[" .. PLUGIN .. "] 字幕与标题不符，重新获取 P" .. tostring(ctx.idx) .. "（" .. tries .. "/" .. SUBTITLE_TRIES .. "）")
-        fetch_player(job)
+        -- 经定时器重入，避免在异步回调里直接递归发起新请求触发 registry overflow
+        jn.timer.after(1, { jid = job.id, stage = "subtitle_retry", idx = ctx.idx })
         return
     end
     if text ~= "" and score == 0 then
@@ -1357,6 +1613,16 @@ function on_http_response(req_id, ctx, result, err)
     if not ctx or not ctx.jid then return end
     local job = jobs[ctx.jid]
     if not job then return end
+    if ctx.stage == "spi" then
+        local next_fn = job.after_spi
+        job.after_spi = nil
+        if err or not result or (result.status or 0) < 200 or (result.status or 0) >= 300 then
+            if next_fn then next_fn() end
+            return
+        end
+        handle_spi(job, result, next_fn)
+        return
+    end
     if err then
         job.err = tostring(err)
         jn.log.warn("[" .. PLUGIN .. "] 请求失败 stage=" .. tostring(ctx.stage) .. " err=" .. tostring(err))
@@ -1389,11 +1655,32 @@ end
 
 -- 定时器回调（字幕接口重试）
 function on_timer_response(req_id, ctx, result, err)
-    if not ctx or not ctx.jid then return end
+    if not ctx then return end
+    if ctx.stage == "send_pump" then
+        pump_send_queue()
+        return
+    end
+    if ctx.stage == "queue_watchdog" then
+        local q = queues[ctx.ck]
+        local job = ctx.jid and jobs[ctx.jid] or nil
+        if q and q.running and q.current_jid == ctx.jid and job then
+            jn.log.warn("[" .. PLUGIN .. "] 任务超时未结束，强制推进队列 jid=" .. tostring(ctx.jid) .. " ck=" .. tostring(ctx.ck))
+            finish_job(job)
+        end
+        return
+    end
+    if not ctx.jid then return end
     local job = jobs[ctx.jid]
     if not job then return end
     if ctx.stage == "player_retry" then
         fetch_player(job, tonumber(ctx.attempt) or 1)
+    elseif ctx.stage == "subtitle_retry" then
+        local ok, perr = pcall(fetch_player, job)
+        if not ok then
+            jn.log.warn("[" .. PLUGIN .. "] 字幕重取失败，跳过该 P: " .. tostring(perr))
+            job.subs[ctx.idx] = job.subs[ctx.idx] or { text = "" }
+            next_page(job)
+        end
     end
 end
 
@@ -1468,8 +1755,8 @@ function on_chat_response(req_id, content, err)
     local is_article = (job.entry.kind == "opus" or job.entry.kind == "read")
     local text, images
     if is_article then text, images = render_article(job) else text, images = render_video(job) end
-    send_payload(job.target, text, images, true)
-    if not job.subtitle_lost then cache_set(job.entry, { text = text, images = images }) end
+    emit_job_output(job, text, images)
+    if subtitle_clean(job) then cache_set(job.entry, { text = text, images = images }) end
     finish_job(job)
 end
 
@@ -1487,6 +1774,9 @@ local function run_next(ck)
     end
     q.running = true
     local job = new_job(q.target, entry)
+    q.current_jid = job.id
+    -- 队列看门狗：任务异常中断未调 finish_job 时，超时后强制推进，避免整个群队列永久卡死
+    jn.timer.after(QUEUE_WATCHDOG_SECONDS, { stage = "queue_watchdog", ck = ck, jid = job.id })
     start_entry(job)
 end
 
@@ -1530,11 +1820,10 @@ function on_message(event)
 
     local raw = event.raw_message or ""
     if wm_own(raw) then return false, nil end
-    if not (raw:find("BV", 1, true) or raw:find("b23.tv", 1, true)
-        or raw:find("bilibili.com", 1, true) or raw:find("com.tencent.miniapp", 1, true)) then
+    -- 只识别 b23.tv / bilibili.com；裸 BV 号和其他站点不触发
+    if not (raw:find("b23.tv", 1, true) or raw:find("bilibili.com", 1, true)) then
         return false, nil
     end
-
     local entries = collect_entries(raw)
     if #entries == 0 then return false, nil end
     local max = math.max(1, cnum("max_links", 3))
@@ -1550,18 +1839,49 @@ function on_message(event)
         reply_quote = cbool("reply_quote", true),
     }
 
-    -- 缓存命中直接发（不排队、不请求）
-    local rest = {}
+    -- 缓存命中 / 异步队列统一纳入本条消息的 batch（支持合并转发开关与阈值）
+    local slots, rest = {}, {}
     for _, e in ipairs(entries) do
         local cached = cache_get(e)
         if cached then
-            send_payload(target, cached.text, cached.images, true)
+            slots[#slots + 1] = { cached = cached }
         elseif jn.cache.get("lock:" .. e.key) then
             jn.log.info("[" .. PLUGIN .. "] 同一内容正在处理或刚发过，跳过 " .. e.key)
         else
             jn.cache.set("lock:" .. e.key, 1, 120)
+            slots[#slots + 1] = { entry = e }
             rest[#rest + 1] = e
         end
+    end
+    if #slots == 0 then return cbool("consume_matched", true), nil end
+
+    local threshold = math.max(1, cnum("merge_threshold", 1))
+    local batch = {
+        target = target,
+        total = #slots,
+        done = 0,
+        results = {},
+        want_forward = cbool("merge_forward", true) and #slots >= threshold,
+        quoted_sent = false,
+        flushed = false,
+    }
+    for idx, slot in ipairs(slots) do
+        if slot.cached then
+            if batch.want_forward then
+                batch.results[idx] = { text = slot.cached.text, images = slot.cached.images }
+            else
+                send_payload(target, slot.cached.text, slot.cached.images, not batch.quoted_sent)
+                batch.quoted_sent = true
+            end
+            batch.done = batch.done + 1
+        else
+            slot.entry._batch = batch
+            slot.entry._batch_order = idx
+        end
+    end
+    if batch.want_forward and batch.done >= batch.total and not batch.flushed then
+        batch.flushed = true
+        deliver_batch(batch)
     end
     if #rest == 0 then return cbool("consume_matched", true), nil end
 

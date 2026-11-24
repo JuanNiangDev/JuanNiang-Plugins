@@ -28,7 +28,7 @@ AI 早报 2026-11-18
 #2 微软在 Ignite 上公布七款新模型
 …
 #1 【要闻】OpenAI 发布 GPT-6.2 Astra 与 Sol…
-<摘要，默认截断 160 字>
+<摘要原文，完整展示，不截断>
 https://openai.com/index/introducing-gpt-6-2-astra-sol/
 https://mp.weixin.qq.com/s/xxxx           ← 同一事件的多家来源都会列出
 [配图] ← 该条新闻的正文配图全部跟在这个节点里，位于链接之后
@@ -47,7 +47,6 @@ https://mp.weixin.qq.com/s/xxxx           ← 同一事件的多家来源都会�
 | `send_time` | 每日发送时间，默认 `11:30` |
 | `feeds` | 数据源列表（RSS + 期号模板） |
 | `max_items` | 单期最多推送条数，默认 70 |
-| `summary_max_chars` | 摘要截断字数，默认 160 |
 | `links_max` | 每条新闻最多列几个来源链接，默认 6 |
 | `node_nickname` | 合并转发卡片里的昵称 |
 | `forward` | 是否使用合并转发 |

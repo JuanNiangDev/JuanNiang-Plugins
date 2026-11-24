@@ -68,18 +68,6 @@ local function get_bot_uin()
     return state.bot_uin
 end
 
--- 按 UTF-8 边界截断，避免切出半个汉字
-local function truncate(s, max)
-    s = tostring(s or "")
-    max = tonumber(max) or 160
-    if max <= 0 or #s <= max then return s end
-    local cut = max
-    while cut > 1 do
-        local b = s:byte(cut + 1)
-        if b and b >= 0x80 and b <= 0xBF then cut = cut - 1 else break end
-    end
-    return s:sub(1, cut) .. "…"
-end
 
 -- 配置里的 feeds：RSS（.xml / rss / atom）与期号模板（含 {date}）分开
 local function resolve_feeds()
@@ -107,7 +95,7 @@ end
 -- ============================================================================
 -- 2. 抓取 + 组节点 + 发送
 -- ============================================================================
-local function build_nodes(cats, max_items, summary_max, links_max, nickname, issue_date, bili)
+local function build_nodes(cats, max_items, links_max, nickname, issue_date, bili)
     local bot_uin = get_bot_uin()
     if bot_uin <= 0 then bot_uin = 1772023368 end
     local nodes, count = {}, 0
@@ -144,8 +132,10 @@ local function build_nodes(cats, max_items, summary_max, links_max, nickname, is
             count = count + 1
             idx = idx + 1
             local parts = { string.format("#%d 【%s】%s", idx, c.name, it.title) }
-            local summary = truncate(it.summary, summary_max)
+            local summary = tostring(it.summary or "")
             if summary ~= "" then parts[#parts + 1] = summary end
+            local detail = tostring(it.detail or "")
+            if detail ~= "" and detail ~= summary then parts[#parts + 1] = detail end
             local links = juya.links_text(it.links, links_max)
             if links ~= "" then parts[#parts + 1] = links end
             local text = table.concat(parts, "\n")
@@ -199,6 +189,26 @@ local function get_targets()
     return list
 end
 
+
+-- 图片会让合并转发接口超时；保留全部文本，单独出一份无图节点用于重试
+local function strip_images(nodes)
+    local out = {}
+    for _, n in ipairs(nodes) do
+        if type(n.content) == "string" then
+            out[#out + 1] = n
+        else
+            local segs = {}
+            for _, seg in ipairs(n.content or {}) do
+                if seg.type ~= "image" then segs[#segs + 1] = seg end
+            end
+            if #segs > 0 then
+                out[#out + 1] = { user_id = n.user_id, nickname = n.nickname, content = segs }
+            end
+        end
+    end
+    return out
+end
+
 local function send_to_target(target_type, target_id, nodes)
     if #nodes == 0 then return false, "节点为空" end
     local forward = cfg_bool("forward", true)
@@ -214,7 +224,19 @@ local function send_to_target(target_type, target_id, nodes)
     local function send_nodes_as_text()
         local parts = {}
         for _, n in ipairs(nodes) do
-            if type(n.content) == "string" and n.content ~= "" then parts[#parts + 1] = n.content end
+            local content = n.content
+            if type(content) == "string" then
+                if content ~= "" then parts[#parts + 1] = content end
+            elseif type(content) == "table" then
+                local texts = {}
+                for _, seg in ipairs(content) do
+                    if seg.type == "text" and seg.data and seg.data.text then
+                        texts[#texts + 1] = seg.data.text
+                    end
+                end
+                local txt = table.concat(texts, "\n")
+                if txt ~= "" then parts[#parts + 1] = txt end
+            end
         end
         local chunks = chunk_text(table.concat(parts, "\n\n"), 1500)
         for _, c in ipairs(chunks) do send_text(c) end
@@ -229,9 +251,21 @@ local function send_to_target(target_type, target_id, nodes)
         return send_nodes_as_text()
     end
     if forward and target_type ~= "private" and jn.onebot11.send_group_forward_msg_sync then
-        local id, err = jn.onebot11.send_group_forward_msg_sync(target_id, nodes)
-        if err == nil then return true end
-        jn.log.warn("[" .. PLUGIN_NAME .. "] 群合并转发失败: " .. tostring(err))
+        local plain = strip_images(nodes)
+        local attempts = {
+            { nodes = nodes, label = "原始" },
+            { nodes = plain, label = "纯文本" },
+        }
+        for _, attempt in ipairs(attempts) do
+            local id, err = jn.onebot11.send_group_forward_msg_sync(target_id, attempt.nodes)
+            if err == nil then
+                jn.log.info(string.format("[%s] 群合并转发成功（%s，%d 节点）",
+                    PLUGIN_NAME, attempt.label, #attempt.nodes))
+                return true
+            end
+            jn.log.warn(string.format("[%s] 群合并转发失败（%s，%d 节点）: %s",
+                PLUGIN_NAME, attempt.label, #attempt.nodes, tostring(err)))
+        end
         return send_nodes_as_text()
     end
     return send_nodes_as_text()
@@ -295,7 +329,6 @@ function push_briefing(force)
         local nodes, count = build_nodes(
             cats,
             cfg_num("max_items", 70),
-            cfg_num("summary_max_chars", 160),
             cfg_num("links_max", 6),
             cfg_string("node_nickname", "橘鸦·AI早报"),
             issue_date,
