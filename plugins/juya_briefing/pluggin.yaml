@@ -1,5 +1,5 @@
 name: "juya_briefing"
-version: "1.0.0"
+version: "1.0.1"
 author: "Churnie HXCN"
 description: "橘鸦 AI 早报自动推送：每日定时抓取 daily.juya.uk 当期早报，按分类合并转发到指定群（分类标题节点 + 每条新闻一个节点，含摘要与全部来源链接）"
 entry: "main.lua"
