@@ -192,8 +192,13 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         return {}
     end
 
-    function M.build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages)
-        local projects, articles = sources.collect_sources(messages or {})
+    function M.build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, precollected)
+        local projects, articles
+        if type(precollected) == "table" and precollected.projects and precollected.articles then
+            projects, articles = precollected.projects, precollected.articles
+        else
+            projects, articles = sources.collect_sources(messages or {})
+        end
         if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects) end
 
         local sec_configs = M.parse_sections_config()

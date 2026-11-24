@@ -41,7 +41,7 @@ end
 
 local common = load_module("common")
 local sources = load_module("sources", common)
-local enrich = load_module("enrich", common)
+local enrich = load_module("enrich", common, sources)
 
 local PLUGIN_NAME = common.PLUGIN_NAME
 local TABLE_MESSAGES = common.TABLE_MESSAGES
@@ -54,6 +54,8 @@ local state = {
     last_daily_date = "",
     manual_running = false,
     manual_triggered_once = false,
+    wx_jobs = {},
+    wx_seq = 0,
 }
 
 local function get_bot_uin()
@@ -348,7 +350,11 @@ local function build_stream_messages(messages)
     local out = {}
     for _, r in ipairs(runs) do
         local m = r.first
-        local content = common.clip_head_tail(m.content or "", max_chars)
+        local msg_limit = max_chars
+        if tostring(m.raw_message or ""):find("[CQ:forward,", 1, true) then
+            msg_limit = math.max(max_chars, 2000)
+        end
+        local content = common.clip_head_tail(m.content or "", msg_limit)
         if r.count > 1 then
             if #r.user_names <= 1 then
                 content = content .. string.format("（连发 %d 次）", r.count)
@@ -479,7 +485,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
 ## 核心任务要求：
 1. 话题分析：%s。
    - summary 必须写成 150-300 字的叙事段落：交代起因、谁抛出了什么、群里怎么交锋、最后的结论或笑点；点名具体发言人（真实昵称），可以引用短句。
-   - 禁止把「某人分享了一个链接/一篇公众号文章/一个仓库」单独列为话题——除非群里围绕它展开了讨论。零散分享并入最相关的话题，或合并成一条「资讯搬运」概述。
+   - 禁止把「某人分享了一个链接/单篇短评/一个仓库」单独列为话题——除非群里围绕它展开了讨论。零散分享并入最相关的话题；若群里有成批合并转发的多篇公众号/资讯合集且未展开讨论，可合并成一条「资讯搬运」概述。
    - 提及发言人必须使用真实【QQ昵称】（nickname 属性），严禁只写参与者编号或纯 QQ 号。
    - 标题不超过 20 字，禁止「讨论 XX」「关于 XX」这种空壳标题。
 2. 群圣经甄选：%s。
@@ -687,127 +693,203 @@ local function do_group_analysis(group_id, send_target_id, is_private_target, fo
         end
         stats.total_chars = #chat_stream
 
-        -- 3. 组装人设与 Prompt
-        local persona_prompt = get_bot_persona_prompt()
-        local prompt = build_analysis_prompt(chat_stream, stats, persona_prompt)
+        -- 2.5 预提取源码/公众号，必要时异步抓取合并转发或未触发即时总结的公众号文章
+        local precollected = nil
+        local pending_wx = {}
+        local news_cap = 0
+        for _, sc in ipairs(report.parse_sections_config()) do
+            if sc.key == "news" then
+                news_cap = sc.cap
+                break
+            end
+        end
+        if news_cap ~= 0 then
+            local projs, arts = sources.collect_sources(all_messages)
+            precollected = { projects = projs, articles = arts }
+            if common.da_bool("enable_news", true) then
+                pending_wx = enrich.prepare_article_fetch(arts, 12)
+            end
+        end
 
-        -- 4. 选择模型并调用 LLM
-        local target_provider_str = common.da_string("text_provider_id", "")
-        local old_provider_id = nil
-        local active_model_desc = "默认主模型"
+        local function finish_analysis()
+            if #pending_wx > 0 then
+                pcall(enrich.summarize_fetched_articles, pending_wx)
+            end
 
-        if jn.agent and jn.agent.get_providers then
-            local providers = jn.agent.get_providers()
-            if providers and type(providers) == "table" then
-                for _, p in ipairs(providers) do
-                    local p_type = tostring(p.Type or p.type or "")
-                    local p_active = (p.IsActive == true) or (p.is_active == true) or (p.active == true)
-                    local p_id = tostring(p.ID or p.id or "")
-                    local p_name = tostring(p.Name or p.name or "")
-                    local p_model = tostring(p.Model or p.model or "")
-                    if p_active and p_type == "text_model" then
-                        old_provider_id = p_id
-                        active_model_desc = p_model ~= "" and p_model or p_name
-                        break
-                    end
-                end
-                if target_provider_str ~= "" then
-                    local chosen_p = match_text_provider(target_provider_str, providers)
-                    if chosen_p and jn.agent.switch_provider then
-                        local chosen_id = tostring(chosen_p.ID or chosen_p.id or "")
-                        local chosen_name = tostring(chosen_p.Name or chosen_p.name or "")
-                        local chosen_model = tostring(chosen_p.Model or chosen_p.model or "")
-                        if old_provider_id ~= chosen_id then
-                            jn.agent.switch_provider(chosen_id)
-                            jn.log.info(string.format("[%s] 临时挂载指定总结模型: %s",
-                                PLUGIN_NAME, chosen_model ~= "" and chosen_model or chosen_name))
+            -- 3. 组装人设与 Prompt
+            local persona_prompt = get_bot_persona_prompt()
+            local prompt = build_analysis_prompt(chat_stream, stats, persona_prompt)
+
+            -- 4. 选择模型并调用 LLM
+            local target_provider_str = common.da_string("text_provider_id", "")
+            local old_provider_id = nil
+            local active_model_desc = "默认主模型"
+
+            if jn.agent and jn.agent.get_providers then
+                local providers = jn.agent.get_providers()
+                if providers and type(providers) == "table" then
+                    for _, p in ipairs(providers) do
+                        local p_type = tostring(p.Type or p.type or "")
+                        local p_active = (p.IsActive == true) or (p.is_active == true) or (p.active == true)
+                        local p_id = tostring(p.ID or p.id or "")
+                        local p_name = tostring(p.Name or p.name or "")
+                        local p_model = tostring(p.Model or p.model or "")
+                        if p_active and p_type == "text_model" then
+                            old_provider_id = p_id
+                            active_model_desc = p_model ~= "" and p_model or p_name
+                            break
                         end
-                        active_model_desc = chosen_model ~= "" and chosen_model or chosen_name
-                    elseif not chosen_p then
-                        jn.log.warn(string.format("[%s] 未找到匹配的文本模型: %q，回退使用系统激活模型: %s",
-                            PLUGIN_NAME, target_provider_str, active_model_desc))
+                    end
+                    if target_provider_str ~= "" then
+                        local chosen_p = match_text_provider(target_provider_str, providers)
+                        if chosen_p and jn.agent.switch_provider then
+                            local chosen_id = tostring(chosen_p.ID or chosen_p.id or "")
+                            local chosen_name = tostring(chosen_p.Name or chosen_p.name or "")
+                            local chosen_model = tostring(chosen_p.Model or chosen_p.model or "")
+                            if old_provider_id ~= chosen_id then
+                                jn.agent.switch_provider(chosen_id)
+                                jn.log.info(string.format("[%s] 临时挂载指定总结模型: %s",
+                                    PLUGIN_NAME, chosen_model ~= "" and chosen_model or chosen_name))
+                            end
+                            active_model_desc = chosen_model ~= "" and chosen_model or chosen_name
+                        elseif not chosen_p then
+                            jn.log.warn(string.format("[%s] 未找到匹配的文本模型: %q，回退使用系统激活模型: %s",
+                                PLUGIN_NAME, target_provider_str, active_model_desc))
+                        end
                     end
                 end
             end
-        end
 
-        local llm_timeout = math.max(30, common.da_num("llm_timeout", 300))
-        jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 超时: %ds, 模型: %s)...",
-            PLUGIN_NAME, group_id, #prompt, llm_timeout, active_model_desc))
-        local resp_text, err = jn.llm.chat({
-            { role = "system", content = persona_prompt },
-            { role = "user", content = prompt },
-        }, { timeout = llm_timeout })
+            local llm_timeout = math.max(30, common.da_num("llm_timeout", 300))
+            jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 超时: %ds, 模型: %s)...",
+                PLUGIN_NAME, group_id, #prompt, llm_timeout, active_model_desc))
+            local resp_text, err = jn.llm.chat({
+                { role = "system", content = persona_prompt },
+                { role = "user", content = prompt },
+            }, { timeout = llm_timeout })
 
-        if target_provider_str ~= "" and old_provider_id and jn.agent and jn.agent.switch_provider then
-            jn.agent.switch_provider(old_provider_id)
-        end
-        if err or not resp_text or resp_text == "" then
-            jn.log.error("[" .. PLUGIN_NAME .. "] LLM 分析失败: " .. tostring(err))
-            return false, "LLM 调用失败: " .. tostring(err)
-        end
-
-        -- 5. 解析、组装板块、发送与落库
-        local analysis_data = (common.decode_llm_json(resp_text, "LLM")) or {}
-        local dur_sec = math.max(1, os.difftime(os.time(), start_time))
-        local est_tokens = math.floor((#prompt + #resp_text) / 2)
-        local group_name = "本群"
-        if jn.onebot11.get_group_info then
-            local ginfo = jn.onebot11.get_group_info(group_id)
-            if ginfo and ginfo.group_name and ginfo.group_name ~= "" then
-                group_name = ginfo.group_name
+            if target_provider_str ~= "" and old_provider_id and jn.agent and jn.agent.switch_provider then
+                jn.agent.switch_provider(old_provider_id)
             end
-        end
+            if err or not resp_text or resp_text == "" then
+                jn.log.error("[" .. PLUGIN_NAME .. "] LLM 分析失败: " .. tostring(err))
+                return false, "LLM 调用失败: " .. tostring(err)
+            end
 
-        local sections = report.build_sections(
-            stats, analysis_data, group_name, group_id, dur_sec, est_tokens,
-            active_model_desc, all_messages, stream_messages
-        )
-        local dest_id = send_target_id or group_id
-        local resolved_private = is_private_target
-        if resolved_private == nil then
-            resolved_private = false
-            if send_target_id and send_target_id ~= group_id then
-                local in_group = false
-                if jn.onebot11.get_group_list then
-                    local groups = jn.onebot11.get_group_list()
-                    if type(groups) == "table" then
-                        for _, g in ipairs(groups) do
-                            if tonumber(g.group_id or g.groupId or 0) == dest_id then
-                                in_group = true
-                                break
+            -- 5. 解析、组装板块、发送与落库
+            local analysis_data = (common.decode_llm_json(resp_text, "LLM")) or {}
+            local dur_sec = math.max(1, os.difftime(os.time(), start_time))
+            local est_tokens = math.floor((#prompt + #resp_text) / 2)
+            local group_name = "本群"
+            if jn.onebot11.get_group_info then
+                local ginfo = jn.onebot11.get_group_info(group_id)
+                if ginfo and ginfo.group_name and ginfo.group_name ~= "" then
+                    group_name = ginfo.group_name
+                end
+            end
+
+            local sections = report.build_sections(
+                stats, analysis_data, group_name, group_id, dur_sec, est_tokens,
+                active_model_desc, all_messages, stream_messages, precollected
+            )
+            local dest_id = send_target_id or group_id
+            local resolved_private = is_private_target
+            if resolved_private == nil then
+                resolved_private = false
+                if send_target_id and send_target_id ~= group_id then
+                    local in_group = false
+                    if jn.onebot11.get_group_list then
+                        local groups = jn.onebot11.get_group_list()
+                        if type(groups) == "table" then
+                            for _, g in ipairs(groups) do
+                                if tonumber(g.group_id or g.groupId or 0) == dest_id then
+                                    in_group = true
+                                    break
+                                end
                             end
                         end
                     end
-                end
-                if not in_group and jn.onebot11.get_group_info then
-                    local gi = jn.onebot11.get_group_info(dest_id)
-                    if type(gi) == "table" and tonumber(gi.group_id or 0) == dest_id then
-                        in_group = true
+                    if not in_group and jn.onebot11.get_group_info then
+                        local gi = jn.onebot11.get_group_info(dest_id)
+                        if type(gi) == "table" and tonumber(gi.group_id or 0) == dest_id then
+                            in_group = true
+                        end
                     end
+                    if not in_group then resolved_private = true end
                 end
-                if not in_group then resolved_private = true end
             end
-        end
-        local target_type = resolved_private and "private" or "group"
-        local sent, nodes = report.send_report(sections, target_type, dest_id)
-        if not sent or sent == 0 then
-            jn.log.error(string.format("[%s] 日报发送失败或内容为空 (target=%s:%d)", PLUGIN_NAME, target_type, dest_id))
-            return false, "发送失败"
+            local target_type = resolved_private and "private" or "group"
+            local sent, nodes = report.send_report(sections, target_type, dest_id)
+            if not sent or sent == 0 then
+                jn.log.error(string.format("[%s] 日报发送失败或内容为空 (target=%s:%d)", PLUGIN_NAME, target_type, dest_id))
+                return false, "发送失败"
+            end
+
+            local mode = common.da_string("report_mode", "forward")
+            if mode == "" then mode = "forward" end
+            jn.log.info(string.format("[%s] 群 %d 日报已发送到 %s:%d（模式=%s，板块 %d 个，发送 %d 次 / 节点 %d）",
+                PLUGIN_NAME, group_id, target_type, dest_id, mode, #sections, sent, nodes))
+
+            pcall(report.persist_report, group_id, dest_id, sections, mode, nodes)
+            prune_expired_messages()
+            return true, nil
         end
 
-        local mode = common.da_string("report_mode", "forward")
-        if mode == "" then mode = "forward" end
-        jn.log.info(string.format("[%s] 群 %d 日报已发送到 %s:%d（模式=%s，板块 %d 个，发送 %d 次 / 节点 %d）",
-            PLUGIN_NAME, group_id, target_type, dest_id, mode, #sections, sent, nodes))
+        local function run_finish_wrapped()
+            local ok2, res2, err2 = pcall(finish_analysis)
+            state.is_analyzing[group_id] = nil
+            if not ok2 then
+                jn.log.error(string.format("[%s] 群 %d 总结后半程异常: %s", PLUGIN_NAME, group_id, tostring(res2)))
+                return false, tostring(res2)
+            end
+            return res2, err2
+        end
 
-        pcall(report.persist_report, group_id, dest_id, sections, mode, nodes)
-        prune_expired_messages()
-        return true, nil
+        if #pending_wx > 0 and jn.http and jn.http.get_async then
+            state.wx_seq = (state.wx_seq or 0) + 1
+            local job_id = string.format("%d_%d_%d", group_id, state.wx_seq, os.time())
+            local job = {
+                id = job_id,
+                group_id = group_id,
+                pending = pending_wx,
+                remaining = #pending_wx,
+                done = false,
+                run_finish = run_finish_wrapped,
+            }
+            state.wx_jobs = state.wx_jobs or {}
+            state.wx_jobs[job_id] = job
+            jn.log.info(string.format("[%s] 群 %d 检测到 %d 篇待补全公众号文章，启动异步抓取...",
+                PLUGIN_NAME, group_id, #pending_wx))
+            for idx, item in ipairs(pending_wx) do
+                local ok_req = pcall(jn.http.get_async, item.url, {
+                    action = "da_wx_fetch",
+                    job_id = job_id,
+                    idx = idx,
+                }, enrich.WX_HEADERS)
+                if not ok_req then
+                    item.finished = true
+                    item.status = 0
+                    job.remaining = job.remaining - 1
+                end
+            end
+            if job.remaining <= 0 then
+                job.done = true
+                state.wx_jobs[job_id] = nil
+                return run_finish_wrapped(), nil, true
+            end
+            if jn.timer and jn.timer.after then
+                jn.timer.after(35, { action = "da_wx_timeout", job_id = job_id })
+            end
+            return true, "异步抓取公众号文章中", true
+        end
+
+        return finish_analysis()
     end
 
-    local ok, res, err_msg = pcall(run_task)
-    state.is_analyzing[group_id] = nil
+    local ok, res, err_msg, keep_async = pcall(run_task)
+    if not ok or not keep_async then
+        state.is_analyzing[group_id] = nil
+    end
     if not ok then
         jn.log.error(string.format("[%s] 群 %d 总结执行异常: %s", PLUGIN_NAME, group_id, tostring(res)))
         return false, tostring(res)
@@ -916,6 +998,38 @@ function on_timer_response(req_id, ctx, result, err)
         check_daily_timer()
     elseif ctx.action == "report_send_pump" then
         report.pump_send_queue()
+    elseif ctx.action == "da_wx_timeout" then
+        local job = state.wx_jobs and state.wx_jobs[ctx.job_id]
+        if job and not job.done then
+            jn.log.warn(string.format("[%s] 群 %d 公众号文章抓取等待超时，使用已就绪结果继续生成报告",
+                PLUGIN_NAME, job.group_id))
+            job.done = true
+            state.wx_jobs[job.id] = nil
+            job.run_finish()
+        end
+    end
+end
+
+function on_http_response(req_id, ctx, result, err)
+    if not ctx or type(ctx) ~= "table" or ctx.action ~= "da_wx_fetch" then return end
+    local job = state.wx_jobs and state.wx_jobs[ctx.job_id]
+    if not job or job.done then return end
+    local item = job.pending[ctx.idx]
+    if item and not item.finished then
+        item.finished = true
+        if not err and type(result) == "table" then
+            item.status = tonumber(result.status_code or result.status or 0) or 0
+            item.body = tostring(result.body or "")
+        else
+            item.status = 0
+            item.err = tostring(err or "http error")
+        end
+        job.remaining = job.remaining - 1
+    end
+    if job.remaining <= 0 then
+        job.done = true
+        state.wx_jobs[job.id] = nil
+        job.run_finish()
     end
 end
 

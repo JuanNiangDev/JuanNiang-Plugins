@@ -23,9 +23,142 @@ return function(jn, common)
         return da_vision_used
     end
 
-    function M.da_forward_text(fid, full)
-        local ck = "da:fwd:" .. fid .. (full and ":full" or "")
+    local function html_unescape_basic(s)
+        s = tostring(s or "")
+        return (s:gsub("&nbsp;", " "):gsub("&lt;", "<"):gsub("&gt;", ">")
+                 :gsub("&quot;", '"'):gsub("&#39;", "'"):gsub("&amp;", "&"))
+    end
+
+    local function unescape_card_url(u)
+        u = cq_unescape(tostring(u or ""))
+        u = u:gsub("\\/", "/")
+        return normalize_url(u)
+    end
+
+    function M.wx_article_key(u)
+        u = unescape_card_url(u)
+        local id = u:match("mp%.weixin%.qq%.com/s/([%w%-_]+)")
+        if id then return "wx:" .. id, "https://mp.weixin.qq.com/s/" .. id end
+        local q = u:match("mp%.weixin%.qq%.com/s%?([%w%+%/%_%%%&%.%-=]+)")
+        if q and q:find("__biz", 1, true) then
+            local sn = q:match("[?&]sn=([^&]+)")
+            if sn then
+                return "wx?sn=" .. sn, "https://mp.weixin.qq.com/s?" .. q
+            end
+            local biz = q:match("__biz=([^&]+)") or ""
+            local mid = q:match("[?&]mid=([^&]+)") or ""
+            local idx = q:match("[?&]idx=([^&]+)") or ""
+            return "wx?" .. biz .. "/" .. mid .. "/" .. idx, "https://mp.weixin.qq.com/s?" .. q
+        end
+        return nil, nil
+    end
+
+    function M.extract_wx_urls_from_text(raw)
+        local out, seen = {}, {}
+        if type(raw) ~= "string" or raw == "" then return out end
+        local s = cq_unescape(raw):gsub("\\/", "/")
+        local function add_hit(u)
+            local k, norm = M.wx_article_key(u)
+            if k and norm and not seen[k] then
+                seen[k] = true
+                out[#out + 1] = { key = k, url = norm }
+            end
+        end
+        local pos = 1
+        while true do
+            local hit = s:find("mp.weixin.qq.com/s/", pos, true)
+            if not hit then break end
+            local id = s:sub(hit + #"mp.weixin.qq.com/s/"):match("^([%w%-_]+)")
+            if id then add_hit("https://mp.weixin.qq.com/s/" .. id) end
+            pos = hit + 1
+        end
+        pos = 1
+        while true do
+            local hit = s:find("mp.weixin.qq.com/s?", pos, true)
+            if not hit then break end
+            local q = s:sub(hit + #"mp.weixin.qq.com/s?"):match("^([%w%+%/%_%%%&%.%-=]+)")
+            if q then add_hit("https://mp.weixin.qq.com/s?" .. q) end
+            pos = hit + 1
+        end
+        return out
+    end
+
+    function M.extract_json_card_info(raw_json)
+        if type(raw_json) ~= "string" or raw_json == "" then return nil end
+        local raw = cq_unescape(raw_json)
+        local ok, obj = pcall(jn.json.decode, raw)
+        local title, desc, url = "", "", ""
+        if ok and type(obj) == "table" then
+            local function walk(t, depth)
+                if type(t) ~= "table" or depth > 6 then return end
+                if title == "" then
+                    local tv = t.title or t.prompt
+                    if type(tv) == "string" and tv ~= "" then title = tv end
+                end
+                if desc == "" then
+                    local dv = t.desc or t.summary
+                    if type(dv) == "string" and dv ~= "" then desc = dv end
+                end
+                for _, k in ipairs({ "qqdocurl", "jumpUrl", "url", "uri", "targetUrl", "sourcelink" }) do
+                    local uv = t[k]
+                    if type(uv) == "string" and uv:find("^https?://") then
+                        local cand = unescape_card_url(uv)
+                        if url == "" or cand:find("mp%.weixin%.qq%.com", 1) then
+                            url = cand
+                        end
+                    end
+                end
+                for _, v in pairs(t) do
+                    if type(v) == "table" then walk(v, depth + 1) end
+                end
+            end
+            walk(obj, 0)
+        end
+        if url == "" then
+            local norm_raw = raw:gsub("\\/", "/")
+            local wx = M.extract_wx_urls_from_text(norm_raw)
+            if wx[1] then url = wx[1].url end
+        end
+        title = html_unescape_basic(title):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        desc = html_unescape_basic(desc):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        if title == "" and desc == "" and url == "" then return nil end
+        return { title = title, desc = desc, url = url }
+    end
+
+    function M.extract_xml_card_info(raw_xml)
+        if type(raw_xml) ~= "string" or raw_xml == "" then return nil end
+        local xml = cq_unescape(raw_xml)
+        local title = xml:match("<title[^>]*>([^<]*)</title>") or ""
+        local desc = xml:match("<des[^>]*>([^<]*)</des>") or xml:match("<summary[^>]*>([^<]*)</summary>") or ""
+        local url = xml:match('<item[^>]-url="(https?://[^"]+)"')
+            or xml:match('url="(https?://[^"]+)"')
+            or xml:match("<url[^>]*>(https?://[^<]+)</url>")
+            or ""
+        title = html_unescape_basic(title):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        desc = html_unescape_basic(desc):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        url = unescape_card_url(url)
+        if title == "" and desc == "" and url == "" then return nil end
+        return { title = title, desc = desc, url = url }
+    end
+
+    local function format_card_text(info, full)
+        if not info then return "" end
+        local head = {}
+        if info.title ~= "" then head[#head + 1] = info.title end
+        if info.desc ~= "" and info.desc ~= info.title then head[#head + 1] = da_clip(info.desc, 120) end
+        local label = (#head > 0) and ("【分享卡片：" .. table.concat(head, " | ") .. "】") or "【分享卡片】"
+        if info.url ~= "" then
+            return full and (label .. "\n" .. info.url) or (label .. info.url)
+        end
+        return label
+    end
+
+    function M.da_forward_text(fid, full, depth)
+        depth = tonumber(depth) or 0
+        if depth > 2 then return "【合并转发】" end
+        local ck = "da:fwd:v2:" .. tostring(fid) .. (full and ":full" or "")
         local cached = jn.cache.get(ck)
+        if type(cached) == "table" and type(cached.text) == "string" then return cached.text end
         if type(cached) == "string" then return cached end
         if not jn.onebot11 or not jn.onebot11.get_forward_msg_sync then
             return "【合并转发】"
@@ -45,23 +178,37 @@ return function(jn, common)
             local content = n.content
             if type(content) == "table" then
                 for _, seg in ipairs(content) do
-                    if type(seg) == "table" and seg.type == "text" and type(seg.data) == "table" then
-                        local t = seg.data.text
-                        if type(t) == "string" and t ~= "" then texts[#texts + 1] = t end
-                    elseif type(seg) == "table" and seg.type == "image" then
-                        texts[#texts + 1] = "[图]"
-                    elseif type(seg) == "table" and seg.type == "xml" and type(seg.data) == "table" then
-                        local xml = tostring(seg.data.data or "")
-                        local titles = {}
-                        for title in xml:gmatch("<title[^>]*>([^<]*)</title>") do
-                            local v = title:gsub("^%s+", ""):gsub("%s+$", "")
-                            if v ~= "" then titles[#titles + 1] = v end
+                    if type(seg) == "table" and type(seg.data) == "table" then
+                        if seg.type == "text" then
+                            local t = tostring(seg.data.text or "")
+                            t = t:gsub("%[CQ:json,data=([^%]]+)%]", function(d)
+                                return format_card_text(M.extract_json_card_info(d), full)
+                            end)
+                            t = t:gsub("%[CQ:xml,data=([^%]]+)%]", function(d)
+                                return format_card_text(M.extract_xml_card_info(d), full)
+                            end)
+                            if t ~= "" then texts[#texts + 1] = t end
+                        elseif seg.type == "image" then
+                            texts[#texts + 1] = "[图]"
+                        elseif seg.type == "json" then
+                            local card_txt = format_card_text(M.extract_json_card_info(tostring(seg.data.data or "")), full)
+                            if card_txt ~= "" then texts[#texts + 1] = card_txt end
+                        elseif seg.type == "xml" then
+                            local card_txt = format_card_text(M.extract_xml_card_info(tostring(seg.data.data or "")), full)
+                            if card_txt ~= "" then texts[#texts + 1] = card_txt end
+                        elseif seg.type == "forward" and seg.data.id and tostring(seg.data.id) ~= tostring(fid) then
+                            texts[#texts + 1] = M.da_forward_text(tostring(seg.data.id), full, depth + 1)
                         end
-                        if #titles > 0 then texts[#texts + 1] = table.concat(titles, " / ") end
                     end
                 end
             elseif type(content) == "string" and content ~= "" then
-                texts[#texts + 1] = content
+                local t = content:gsub("%[CQ:json,data=([^%]]+)%]", function(d)
+                    return format_card_text(M.extract_json_card_info(d), full)
+                end)
+                t = t:gsub("%[CQ:xml,data=([^%]]+)%]", function(d)
+                    return format_card_text(M.extract_xml_card_info(d), full)
+                end)
+                texts[#texts + 1] = t
             end
             local who = tostring(n.name or ("群友" .. tostring(n.uin or "")))
             local joiner = full and "\n" or " "
@@ -74,7 +221,7 @@ return function(jn, common)
             out = "【合并转发 " .. inner .. " 条】" .. table.concat(parts, " / ")
             if inner > limit then out = out .. " …（另 " .. (inner - limit) .. " 条）" end
         end
-        jn.cache.set(ck, out, 7 * 86400)
+        jn.cache.set(ck, { text = out }, 7 * 86400)
         return out
     end
 
@@ -137,6 +284,14 @@ return function(jn, common)
         if da_bool("expand_forward", true) then
             s = s:gsub("%[CQ:forward,id=([^,%]]+)%]", function(fid) return M.da_forward_text(fid) end)
         end
+        s = s:gsub("%[CQ:json,data=([^%]]+)%]", function(d)
+            local txt = format_card_text(M.extract_json_card_info(d), false)
+            return txt ~= "" and txt or "[卡片]"
+        end)
+        s = s:gsub("%[CQ:xml,data=([^%]]+)%]", function(d)
+            local txt = format_card_text(M.extract_xml_card_info(d), false)
+            return txt ~= "" and txt or "[卡片]"
+        end)
         s = s:gsub("%[CQ:image,([^%]]+)%]", function(attrs)
             local url = attrs:match("url=([^,%]]+)")
             local file = attrs:match("file=([^,%]]+)")
@@ -264,52 +419,113 @@ return function(jn, common)
     function M.collect_sources(messages)
         local projects, pindex = {}, {}
         local projects_on = da_bool("enable_projects", true)
-        local bot_article, bot_raw = {}, {}
+        local bot_article, bot_raw, card_articles = {}, {}, {}
         local img_total = 0
+
+        local function register_bot_blocks(src_text)
+            for _, b in ipairs(M.parse_bot_blocks(src_text)) do
+                if projects_on and b.kind == "repo" and b.name ~= "" then
+                    local key = b.name:lower()
+                    b.key = key
+                    b.degraded = M.is_degraded_repo_block(b)
+                    if b.degraded then
+                        b.repo_kind = infer_repo_kind(b.url)
+                        b.text = nil
+                    end
+                    local prev_idx = pindex[key]
+                    if prev_idx then
+                        local prev = projects[prev_idx]
+                        if not b.degraded or prev.degraded then
+                            img_total = img_total + #b.images
+                            projects[prev_idx] = b
+                        end
+                    else
+                        img_total = img_total + #b.images
+                        pindex[key] = #projects + 1
+                        projects[#projects + 1] = b
+                    end
+                elseif b.kind == "article" and b.url and b.url ~= "" then
+                    local ak, norm = M.wx_article_key(b.url)
+                    local map_key = ak or normalize_url(b.url)
+                    if norm then b.url = norm end
+                    bot_article[map_key] = b
+                end
+            end
+        end
+
+        local function collect_card_articles(scan_raw)
+            if type(scan_raw) ~= "string" or scan_raw == "" then return end
+            for d in scan_raw:gmatch("%[CQ:json,data=([^%]]+)%]") do
+                local info = M.extract_json_card_info(d)
+                if info and info.url ~= "" then
+                    local ak, norm = M.wx_article_key(info.url)
+                    if ak and norm and (info.title ~= "" or info.desc ~= "") then
+                        card_articles[ak] = card_articles[ak] or {
+                            url = norm,
+                            title = info.title,
+                            summary = (info.desc ~= "" and info.desc ~= info.title) and info.desc or "",
+                        }
+                    end
+                end
+            end
+            for d in scan_raw:gmatch("%[CQ:xml,data=([^%]]+)%]") do
+                local info = M.extract_xml_card_info(d)
+                if info and info.url ~= "" then
+                    local ak, norm = M.wx_article_key(info.url)
+                    if ak and norm and (info.title ~= "" or info.desc ~= "") then
+                        card_articles[ak] = card_articles[ak] or {
+                            url = norm,
+                            title = info.title,
+                            summary = (info.desc ~= "" and info.desc ~= info.title) and info.desc or "",
+                        }
+                    end
+                end
+            end
+            for title, desc, url in scan_raw:gmatch("【分享卡片：([^|】]+)%s*|?%s*([^】]*)】%s*(https?://[^%s]+)") do
+                local ak, norm = M.wx_article_key(url)
+                if ak and norm then
+                    title = title:gsub("^%s+", ""):gsub("%s+$", "")
+                    desc = desc:gsub("^%s+", ""):gsub("%s+$", "")
+                    card_articles[ak] = card_articles[ak] or {
+                        url = norm,
+                        title = title,
+                        summary = (desc ~= "" and desc ~= title) and desc or "",
+                    }
+                end
+            end
+        end
 
         for _, m in ipairs(messages) do
             local raw = m.raw_message or ""
             local text = m.content or ""
+            local fid = raw:match("%[CQ:forward,id=([^,%]]+)%]")
+            local full_fwd = fid and M.da_forward_text(fid, true) or nil
+
             local is_bot = is_bot_output(raw) or is_bot_output(text)
-            if not is_bot and raw:find("[CQ:forward,", 1, true)
-                and not (text:find("📰", 1, true) or text:find("📦", 1, true)) then
-                local fid = raw:match("%[CQ:forward,id=([^,%]]+)%]")
-                if fid then
-                    local ex = M.da_forward_text(fid, true)
-                    if is_bot_output(ex) then
-                        is_bot = true
-                        text = ex
+            local pure_bot_fwd = false
+            if not is_bot and full_fwd and is_bot_output(full_fwd) then
+                is_bot = true
+                -- 若整条转发里没有非 Bot 的分享卡片/裸链接，视为纯 Bot 转发；否则保留给后续链接扫描
+                pure_bot_fwd = true
+                for _, hit in ipairs(M.extract_wx_urls_from_text(full_fwd)) do
+                    if not full_fwd:find("原文链接：" .. hit.url, 1, true) then
+                        pure_bot_fwd = false
+                        break
                     end
                 end
             end
+
             if is_bot then
-                bot_raw[raw] = true
-                local src = raw:find("📦", 1, true) and raw or text
-                for _, b in ipairs(M.parse_bot_blocks(src)) do
-                    if projects_on and b.kind == "repo" and b.name ~= "" then
-                        local key = b.name:lower()
-                        b.key = key
-                        b.degraded = M.is_degraded_repo_block(b)
-                        if b.degraded then
-                            b.repo_kind = infer_repo_kind(b.url)
-                            b.text = nil
-                        end
-                        local prev_idx = pindex[key]
-                        if prev_idx then
-                            local prev = projects[prev_idx]
-                            if not b.degraded or prev.degraded then
-                                img_total = img_total + #b.images
-                                projects[prev_idx] = b
-                            end
-                        else
-                            img_total = img_total + #b.images
-                            pindex[key] = #projects + 1
-                            projects[#projects + 1] = b
-                        end
-                    elseif b.kind == "article" and b.url and b.url ~= "" then
-                        bot_article[normalize_url(b.url)] = b
-                    end
+                if is_bot_output(raw) or pure_bot_fwd then
+                    bot_raw[raw] = true
                 end
+                local src = (raw:find("📦", 1, true) and raw)
+                    or (full_fwd and (full_fwd:find("📰", 1, true) or full_fwd:find("📦", 1, true)) and full_fwd)
+                    or text
+                register_bot_blocks(src)
+            elseif full_fwd and (full_fwd:find("📰", 1, true) or full_fwd:find("📦", 1, true)) then
+                -- 用户转发的不带水印的机器人汇总块，同样尝试提取 📰 / 📦
+                register_bot_blocks(full_fwd)
             end
         end
 
@@ -339,20 +555,28 @@ return function(jn, common)
         end
 
         local articles, aindex = {}, {}
-        local function add_article(url)
+        local function add_article(url, explicit_key)
             url = normalize_url(url)
             if url == "" then return end
-            if not aindex[url] then
-                aindex[url] = #articles + 1
-                articles[#articles + 1] = { url = url, count = 0 }
+            local ak, norm = M.wx_article_key(url)
+            local key = explicit_key or ak or url
+            local clean_u = norm or url
+            if not aindex[key] then
+                aindex[key] = #articles + 1
+                articles[#articles + 1] = { url = clean_u, canon_key = key, count = 0 }
             end
-            articles[aindex[url]].count = articles[aindex[url]].count + 1
+            articles[aindex[key]].count = articles[aindex[key]].count + 1
         end
 
         for _, m in ipairs(messages) do
             local raw = m.raw_message or ""
             if not is_bot_output(raw) and not bot_raw[raw] then
-                local scan = (m.content and m.content ~= "") and m.content or raw
+                local fid = raw:match("%[CQ:forward,id=([^,%]]+)%]")
+                local scan = (fid and M.da_forward_text(fid, true))
+                    or ((m.content and m.content ~= "") and m.content or raw)
+                collect_card_articles(raw)
+                if scan ~= raw then collect_card_articles(scan) end
+
                 for owner, repo in scan:gmatch("github%.com/([%w%-_%.]+)/([%w%-_%.]+)") do
                     add_repo("github", owner .. "/" .. repo, "https://github.com/" .. owner .. "/" .. repo)
                 end
@@ -371,17 +595,37 @@ return function(jn, common)
                             "https://modelscope." .. host .. "/" .. sub .. "/" .. owner .. "/" .. repo)
                     end
                 end
-                for u in scan:gmatch("(https?://mp%.weixin%.qq%.com/s[%w%-_%.%?%%&=/#]+)") do
-                    add_article(u)
+                for _, hit in ipairs(M.extract_wx_urls_from_text(scan)) do
+                    add_article(hit.url, hit.key)
+                end
+                if scan ~= raw then
+                    for _, hit in ipairs(M.extract_wx_urls_from_text(raw)) do
+                        add_article(hit.url, hit.key)
+                    end
                 end
             end
         end
 
+        -- 补收仅在 Bot 合并转发或用户转发的 📰 摘要里出现的公众号文章
+        for key, b in pairs(bot_article) do
+            if b.url and b.url ~= "" and not aindex[key] then
+                add_article(b.url, key)
+            end
+        end
+
         for _, a in ipairs(articles) do
-            local b = bot_article[normalize_url(a.url)]
+            local key = a.canon_key or normalize_url(a.url)
+            local b = bot_article[key] or bot_article[normalize_url(a.url)]
             if b then
                 a.title = (b.title ~= "" and b.title) or nil
                 a.summary = (b.summary ~= "" and b.summary) or nil
+            end
+            if (not a.title or a.title == "") and card_articles[key] then
+                local ca = card_articles[key]
+                if ca.title and ca.title ~= "" then a.title = ca.title end
+                if (not a.summary or a.summary == "") and ca.summary and ca.summary ~= "" then
+                    a.summary = ca.summary
+                end
             end
         end
 

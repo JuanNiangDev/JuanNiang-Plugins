@@ -1,6 +1,6 @@
 -- enrich.lua — 无水印/降级开源项目补全（缓存桥 → 本地缓存 → 元数据+README 批量 LLM）
 
-return function(jn, common)
+return function(jn, common, sources)
     local M = {}
 
     local HF_PROXY = "socks5://172.27.0.1:20170"
@@ -251,6 +251,395 @@ return function(jn, common)
         if #need_llm > 0 then
             jn.log.info(string.format("[%s] 补全总结 %d 个无水印开源项目", common.PLUGIN_NAME, #need_llm))
             pcall(summarize_missing_repos, need_llm)
+        end
+    end
+
+    -- ========================================================================
+    -- 公众号文章补全（浏览器 UA 异步抓取 + 正文解析 + LLM 摘要）
+    -- ========================================================================
+
+    M.WX_HEADERS = {
+        ["User-Agent"] = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        ["Referer"] = "https://mp.weixin.qq.com/",
+        ["Accept-Language"] = "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+
+    local function utf8_char(cp)
+        cp = tonumber(cp) or 0
+        if cp <= 0 or cp > 0x10FFFF then return "" end
+        if cp < 0x80 then return string.char(cp) end
+        if cp < 0x800 then
+            return string.char(0xC0 + math.floor(cp / 64), 0x80 + (cp % 64))
+        end
+        if cp < 0x10000 then
+            return string.char(
+                0xE0 + math.floor(cp / 4096),
+                0x80 + (math.floor(cp / 64) % 64),
+                0x80 + (cp % 64)
+            )
+        end
+        return string.char(
+            0xF0 + math.floor(cp / 262144),
+            0x80 + (math.floor(cp / 4096) % 64),
+            0x80 + (math.floor(cp / 64) % 64),
+            0x80 + (cp % 64)
+        )
+    end
+
+    local function decode_html_entities(s)
+        s = tostring(s or "")
+        if s == "" then return "" end
+        local named = {
+            amp = "&", lt = "<", gt = ">", quot = "\"",
+            apos = "'", nbsp = " ", mdash = "—", ndash = "–",
+            hellip = "…", lsquo = "‘", rsquo = "’", ldquo = "“", rdquo = "”",
+        }
+        s = s:gsub("&([%a]+);", function(name)
+            return named[name] or ("&" .. name .. ";")
+        end)
+        s = s:gsub("&#(%d+);", function(num)
+            return utf8_char(tonumber(num))
+        end)
+        s = s:gsub("&#[xX]([%da-fA-F]+);", function(hex)
+            return utf8_char(tonumber(hex, 16))
+        end)
+        return s
+    end
+
+    local function unescape_js_str(s)
+        s = tostring(s or "")
+        if s == "" then return "" end
+        s = s:gsub("\\x([%da-fA-F][%da-fA-F])", function(h)
+            return string.char(tonumber(h, 16))
+        end)
+        s = s:gsub("\\u([%da-fA-F][%da-fA-F][%da-fA-F][%da-fA-F])", function(h)
+            return utf8_char(tonumber(h, 16))
+        end)
+        s = s:gsub("\\n", "\n"):gsub("\\r", ""):gsub("\\t", " ")
+        s = s:gsub('\\"', '"'):gsub("\\'", "'"):gsub("\\/", "/"):gsub("\\\\", "\\")
+        return s
+    end
+
+    local function html_to_text(html)
+        html = tostring(html or "")
+        if html == "" then return "" end
+        html = html:gsub("<[sS][cC][rR][iI][pP][tT][^>]*>.-</[sS][cC][rR][iI][pP][tT]>", " ")
+        html = html:gsub("<[sS][tT][yY][lL][eE][^>]*>.-</[sS][tT][yY][lL][eE]>", " ")
+        html = html:gsub("<[nN][oO][sS][cC][rR][iI][pP][tT][^>]*>.-</[nN][oO][sS][cC][rR][iI][pP][tT]>", " ")
+        html = html:gsub("<[bB][rR]%s*/?>", "\n")
+        html = html:gsub("</[pP]>", "\n")
+        html = html:gsub("</[dD][iI][vV]>", "\n")
+        html = html:gsub("</[hH][1-6]>", "\n")
+        html = html:gsub("</[lL][iI]>", "\n")
+        html = html:gsub("</[tT][rR]>", "\n")
+        html = html:gsub("<[^>]+>", " ")
+        html = decode_html_entities(html)
+        local lines = {}
+        for line in (html .. "\n"):gmatch("([^\n]*)\n") do
+            local clean = trim(line)
+            if clean ~= "" then lines[#lines + 1] = clean end
+        end
+        return table.concat(lines, "\n")
+    end
+
+    local function extract_meta(html, key)
+        local lk = key:lower()
+        for tag in html:gmatch("<[mM][eE][tT][aA]%s+([^>]+)>") do
+            local ltag = tag:lower()
+            if ltag:find('property="' .. lk .. '"', 1, true)
+                or ltag:find("property='" .. lk .. "'", 1, true)
+                or ltag:find('name="' .. lk .. '"', 1, true)
+                or ltag:find("name='" .. lk .. "'", 1, true) then
+                local content = tag:match('[cC][oO][nN][tT][eE][nN][tT]%s*=%s*"([^"]*)"')
+                    or tag:match("[cC][oO][nN][tT][eE][nN][tT]%s*=%s*'([^']*)'")
+                if content and content ~= "" then
+                    return trim(decode_html_entities(content))
+                end
+            end
+        end
+        return ""
+    end
+
+    local function extract_div_by_id(html, target_id)
+        local start_pos
+        local patterns = {
+            'id%s*=%s*"' .. target_id .. '"',
+            "id%s*=%s*'" .. target_id .. "'",
+        }
+        for _, pat in ipairs(patterns) do
+            local p = html:find(pat)
+            if p then
+                local tag_start = html:sub(1, p):match(".*()<[dD][iI][vV]%s")
+                    or html:sub(1, p):match(".*()<[a-zA-Z]+%s")
+                if tag_start then
+                    start_pos = tag_start
+                    break
+                end
+            end
+        end
+        if not start_pos then return "" end
+        local open_end = html:find(">", start_pos)
+        if not open_end then return "" end
+        local tag_name = html:sub(start_pos + 1, open_end):match("^([%a]+)") or "div"
+        local ltag = tag_name:lower()
+        if ltag ~= "div" then
+            local close_pos = html:find("</" .. tag_name .. "%s*>", open_end + 1)
+            return close_pos and html:sub(open_end + 1, close_pos - 1) or ""
+        end
+        local depth = 1
+        local pos = open_end + 1
+        while pos <= #html do
+            local next_open = html:find("<[dD][iI][vV][%s>]", pos)
+            local next_close, next_close_end = html:find("</[dD][iI][vV]%s*>", pos)
+            if not next_close then break end
+            if next_open and next_open < next_close then
+                depth = depth + 1
+                pos = next_open + 4
+            else
+                depth = depth - 1
+                if depth == 0 then
+                    return html:sub(open_end + 1, next_close - 1)
+                end
+                pos = next_close_end + 1
+            end
+        end
+        return ""
+    end
+
+    local function extract_js_string_field(html, field)
+        local patterns = {
+            "['\"]?" .. field .. "['\"]?%s*:%s*(%a*)%s*(['\"])",
+            "var%s+" .. field .. "%s*=%s*(%a*)%s*(['\"])",
+        }
+        for _, pat in ipairs(patterns) do
+            local idx = 1
+            while true do
+                local s, e, fn_wrap, quote = html:find(pat, idx)
+                if not s then break end
+                if fn_wrap == "" or fn_wrap == "JsDecode" then
+                    local buf, i = {}, e + 1
+                    local closed = false
+                    while i <= #html do
+                        local ch = html:sub(i, i)
+                        if ch == "\\" and i < #html then
+                            buf[#buf + 1] = html:sub(i, i + 1)
+                            i = i + 2
+                        elseif ch == quote then
+                            closed = true
+                            break
+                        else
+                            buf[#buf + 1] = ch
+                            i = i + 1
+                        end
+                    end
+                    if closed then
+                        local val = decode_html_entities(unescape_js_str(table.concat(buf)))
+                        if val ~= "" then return val end
+                    end
+                end
+                idx = e + 1
+            end
+        end
+        return ""
+    end
+
+    function M.parse_wechat_html(body)
+        local html = tostring(body or "")
+        local out = { title = "", account = "", desc = "", content = "", blocked = false }
+        if html == "" then return out end
+
+        if html:find("当前环境异常", 1, true)
+            or html:find("完成验证后即可继续访问", 1, true)
+            or html:find("该内容已被发布者删除", 1, true)
+            or html:find("此内容因违规无法查看", 1, true)
+            or html:find("此内容已被投诉", 1, true) then
+            out.blocked = true
+        end
+
+        out.title = extract_meta(html, "og:title")
+        if out.title == "" then out.title = extract_meta(html, "twitter:title") end
+        if out.title == "" then out.title = trim(extract_js_string_field(html, "msg_title")) end
+        if out.title == "" then out.title = trim(extract_js_string_field(html, "title")) end
+        if out.title == "" then
+            local t = html:match("<[tT][iI][tT][lL][eE][^>]*>(.-)</[tT][iI][tT][lL][eE]>")
+            if t then out.title = trim(decode_html_entities(t)) end
+        end
+
+        local acc_html = extract_div_by_id(html, "js_name")
+        if acc_html ~= "" then out.account = trim(html_to_text(acc_html)) end
+        if out.account == "" then out.account = trim(extract_js_string_field(html, "nick_name")) end
+        if out.account == "" then out.account = trim(extract_js_string_field(html, "nickname")) end
+        if out.account == "" then out.account = extract_meta(html, "author") end
+
+        out.desc = extract_meta(html, "og:description")
+        if out.desc == "" then out.desc = extract_meta(html, "description") end
+        if out.desc == "" then out.desc = trim(extract_js_string_field(html, "msg_desc")) end
+        if out.desc == "" then out.desc = trim(extract_js_string_field(html, "desc")) end
+
+        local js_content = extract_div_by_id(html, "js_content")
+        local text = html_to_text(js_content)
+        if text == "" then
+            local cno = extract_js_string_field(html, "content_noencode")
+            if cno ~= "" then text = html_to_text(cno) end
+        end
+        if #text > 3500 then text = common.clip_head_tail(text, 3500) end
+        out.content = text
+        return out
+    end
+
+    local function article_cache_key(a)
+        local key = (a.canon_key and a.canon_key ~= "") and a.canon_key
+            or (sources and sources.wx_article_key and sources.wx_article_key(a.url))
+            or tostring(a.url or "")
+        key = key:gsub("[^%w%-_.:/]", "_")
+        if #key > 140 then key = key:sub(1, 140) end
+        return "da:wx_sum:v1:" .. key
+    end
+
+    function M.prepare_article_fetch(articles, max_fetch)
+        if type(articles) ~= "table" or #articles == 0 then return {} end
+        local limit = tonumber(max_fetch) or 12
+        local pending = {}
+        for _, a in ipairs(articles) do
+            local u = tostring(a.url or "")
+            if u:find("mp%.weixin%.qq%.com", 1) then
+                if (a.title or "") == "" or (a.summary or "") == "" then
+                    if jn.cache and jn.cache.get then
+                        local cached = jn.cache.get(article_cache_key(a))
+                        if type(cached) == "table" then
+                            if (a.title or "") == "" and type(cached.title) == "string" and cached.title ~= "" then
+                                a.title = trim(cached.title)
+                            end
+                            if (a.summary or "") == "" and type(cached.summary) == "string" and cached.summary ~= "" then
+                                a.summary = trim(cached.summary)
+                            end
+                            if (a.account or "") == "" and type(cached.account) == "string" and cached.account ~= "" then
+                                a.account = trim(cached.account)
+                            end
+                        end
+                    end
+                end
+                if ((a.title or "") == "" or (a.summary or "") == "") and #pending < limit then
+                    pending[#pending + 1] = {
+                        article = a,
+                        url = u,
+                        cache_key = article_cache_key(a),
+                    }
+                end
+            end
+        end
+        return pending
+    end
+
+    function M.summarize_fetched_articles(fetched_items)
+        if type(fetched_items) ~= "table" or #fetched_items == 0 then return end
+        local need_llm = {}
+        for _, item in ipairs(fetched_items) do
+            local a = item.article
+            if a then
+                local parsed = nil
+                if item.status == 200 and type(item.body) == "string" and item.body ~= "" then
+                    parsed = M.parse_wechat_html(item.body)
+                    item.parsed = parsed
+                    if not parsed.blocked then
+                        if (a.title or "") == "" and parsed.title ~= "" then
+                            a.title = parsed.title
+                        end
+                        if (a.account or "") == "" and parsed.account ~= "" then
+                            a.account = parsed.account
+                        end
+                    end
+                end
+                if (a.summary or "") == "" then
+                    if parsed and not parsed.blocked and parsed.content ~= "" and #parsed.content >= 40 then
+                        need_llm[#need_llm + 1] = item
+                    elseif parsed and not parsed.blocked and parsed.desc ~= "" then
+                        a.summary = trim(common.clip(parsed.desc, 120))
+                    end
+                end
+            end
+        end
+
+        if #need_llm > 0 and jn.llm and jn.llm.chat then
+            local timeout = math.max(30, common.da_num("llm_timeout", 300))
+            local sys = [[你是公众号新闻摘要助手。用户会给你若干篇微信公众号文章的标题、来源与正文摘录，请为每篇文章提取清晰标题与简明摘要，并严格返回 JSON：
+{"articles":[{"index":1,"title":"文章标题(≤36字，若原文已给准确标题可直接沿用或略微精简)","summary":"50~100字简体中文摘要：提炼核心事实、结论、发布内容或核心观点；严禁编造原文未提及的信息"}]}]]
+            jn.log.info(string.format("[%s] 补全总结 %d 篇未捕获全文的公众号文章", common.PLUGIN_NAME, #need_llm))
+
+            for start = 1, #need_llm, 4 do
+                local chunk, parts = {}, {}
+                for k = start, math.min(start + 3, #need_llm) do
+                    local it = need_llm[k]
+                    chunk[#chunk + 1] = it
+                    local a = it.article
+                    local p = it.parsed or {}
+                    local block = {
+                        string.format("【文章 %d】URL: %s", #chunk, a.url or ""),
+                        "已知标题：" .. ((a.title and a.title ~= "") and a.title or "（待提取）"),
+                    }
+                    if a.account and a.account ~= "" then
+                        block[#block + 1] = "公众号：" .. a.account
+                    end
+                    if p.desc and p.desc ~= "" then
+                        block[#block + 1] = "导语/描述：" .. p.desc
+                    end
+                    block[#block + 1] = "正文摘录：\n" .. (p.content or "")
+                    parts[#parts + 1] = table.concat(block, "\n")
+                end
+
+                local obj = nil
+                for attempt = 1, 2 do
+                    local resp, err = jn.llm.chat({
+                        { role = "system", content = sys },
+                        { role = "user", content = table.concat(parts, "\n\n") },
+                    }, { timeout = timeout })
+                    if not err and resp and resp ~= "" then
+                        obj = common.decode_llm_json(resp, "文章补全")
+                        if obj and type(obj.articles) == "table" then break end
+                    else
+                        jn.log.warn(string.format("[%s] 公众号文章总结失败(第 %d 次): %s",
+                            common.PLUGIN_NAME, attempt, tostring(err or "空响应")))
+                    end
+                end
+
+                if obj and type(obj.articles) == "table" then
+                    for _, res_item in ipairs(obj.articles) do
+                        if type(res_item) == "table" and res_item.index then
+                            local it = chunk[tonumber(res_item.index)]
+                            if it and it.article then
+                                local t = trim(res_item.title or "")
+                                local s = trim(res_item.summary or "")
+                                if (it.article.title or "") == "" and t ~= "" then
+                                    it.article.title = t
+                                end
+                                if s ~= "" then
+                                    it.article.summary = common.clip(s, 120)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        for _, item in ipairs(fetched_items) do
+            local a = item.article
+            local p = item.parsed
+            if a and p and not p.blocked and (a.summary or "") == "" then
+                if p.desc ~= "" then
+                    a.summary = trim(common.clip(p.desc, 120))
+                elseif p.content ~= "" then
+                    a.summary = trim(common.clip(p.content, 100))
+                end
+            end
+            if a and ((a.title or "") ~= "" or (a.summary or "") ~= "")
+                and jn.cache and jn.cache.set and (not p or not p.blocked) then
+                jn.cache.set(item.cache_key, {
+                    title = a.title or "",
+                    summary = a.summary or "",
+                    account = a.account or "",
+                }, 604800)
+            end
         end
     end
 

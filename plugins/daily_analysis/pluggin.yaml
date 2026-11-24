@@ -1,5 +1,5 @@
 name: "daily_analysis"
-version: "1.2.0"
+version: "1.2.1"
 author: "Churnie HXCN"
 description: "群聊日常分析与总结：提取热门话题、群友头衔画像、群圣经高光发言与聊天质量毒舌锐评，复用系统人设并以合并转发卡片发送（复刻自 astrbot_plugin_qq_group_daily_analysis）"
 entry: "main.lua"
