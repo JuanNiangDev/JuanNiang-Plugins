@@ -104,7 +104,8 @@ python3 data/rebuild-modeldb.py
 | `enable_github` | bool | `true` | 启用 GitHub 仓库介绍 |
 | `enable_huggingface` | bool | `true` | 启用 Hugging Face 介绍 |
 | `enable_modelscope` | bool | `true` | 启用 ModelScope 介绍 |
-| `proxy` | string | 空 | 海外平台代理（如 `socks5://172.27.0.1:20170`），用于请求 `huggingface.co` 与 `github.com`；留空直连 |
+| `hf_mirror` | bool | `true` | Hugging Face 请求走 `hf-mirror.com` 镜像（国内直连常不通；有代理可关闭改走官方） |
+| `proxy` | string | 空 | 海外平台代理（如 `socks5://172.27.0.1:20170`），用于请求 Hugging Face / GitHub；留空直连 |
 | `enable_summary` | bool | `true` | 用主程序 LLM 判定类型并总结 |
 | `use_context_text` | bool | `true` | 附带文本参与总结：消息中除链接外的说明文字（推文/推荐语）一并交给 LLM；噪声由 LLM 自动忽略 |
 | `reply_quote` | bool | `true` | 回复时引用原消息 |

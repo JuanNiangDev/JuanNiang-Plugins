@@ -135,11 +135,16 @@ end
 -- --------------------------------------------------------------------
 local HF_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
+local function hf_host()
+    if cfg_bool("hf_mirror", true) then return "hf-mirror.com" end
+    return "huggingface.co"
+end
+
 local function meta_api_url(e)
     if e.kind == "github" then
         return "https://api.github.com/repos/" .. e.owner .. "/" .. e.repo
     elseif e.kind == "hf" then
-        return "https://huggingface.co/api/" .. (e.sub or "models") .. "/" .. e.owner .. "/" .. e.repo
+        return "https://" .. hf_host() .. "/api/" .. (e.sub or "models") .. "/" .. e.owner .. "/" .. e.repo
     elseif e.kind == "ms" then
         return "https://modelscope.cn/api/v1/" .. (e.sub or "models") .. "/" .. e.owner .. "/" .. e.repo
     end
@@ -158,7 +163,7 @@ end
 local function dataset_tree_url(e)
     if e.sub ~= "datasets" then return nil end
     if e.kind == "hf" then
-        return "https://huggingface.co/api/datasets/" .. e.owner .. "/" .. e.repo .. "/tree/main"
+        return "https://" .. hf_host() .. "/api/datasets/" .. e.owner .. "/" .. e.repo .. "/tree/main"
     elseif e.kind == "ms" then
         return "https://modelscope.cn/api/v1/datasets/" .. e.owner .. "/" .. e.repo .. "/repo/tree?Revision=master"
     end
@@ -169,7 +174,7 @@ local function readme_url_for(e)
     if e.kind == "github" then
         return "https://api.github.com/repos/" .. e.owner .. "/" .. e.repo .. "/readme", "readme"
     elseif e.kind == "hf" then
-        return "https://huggingface.co/" .. e.owner .. "/" .. e.repo .. "/raw/main/README.md", "readme"
+        return "https://" .. hf_host() .. "/" .. e.owner .. "/" .. e.repo .. "/raw/main/README.md", "readme"
     elseif e.kind == "ms" then
         if e.sub == "datasets" and e.meta and e.meta.readme_content and e.meta.readme_content ~= "" then
             return nil, nil
@@ -222,7 +227,7 @@ end
 -- --------------------------------------------------------------------
 local function image_base_for(e)
     if e.kind == "hf" then
-        return "https://huggingface.co/" .. e.owner .. "/" .. e.repo .. "/resolve/main/"
+        return "https://" .. hf_host() .. "/" .. e.owner .. "/" .. e.repo .. "/resolve/main/"
     elseif e.kind == "ms" then
         return "https://modelscope.cn/models/" .. e.owner .. "/" .. e.repo .. "/resolve/master/"
     end
@@ -263,7 +268,9 @@ local function collect_readme_images(e)
             and not pseen[u] and pages < 2 then
             pseen[u] = true
             pages = pages + 1
-            local fetch_url = u:gsub("^https://hf%.co", "https://huggingface.co")
+            local target_hf = "https://" .. hf_host()
+            local fetch_url = u:gsub("^https://huggingface%.co", target_hf)
+                :gsub("^https://hf%.co", target_hf)
             local ok, res = pcall(function()
                 if http_proxy ~= "" and not fetch_url:find("modelscope%.cn", 1) then
                     return jn.http.get(fetch_url, http_proxy)
@@ -649,7 +656,7 @@ local function handle_meta(ctx, result, err)
         batch.pending = batch.pending + 1
         local ca = copy_ctx(ctx)
         ca.stage = "avatar"
-        local page = (e.kind == "hf") and ("https://huggingface.co/" .. e.owner)
+        local page = (e.kind == "hf") and ("https://" .. hf_host() .. "/" .. e.owner)
             or ("https://modelscope.cn/" .. (e.sub == "datasets" and "datasets" or "models")
                 .. "/" .. e.owner .. "/" .. e.repo)
         local rid2 = http_get_for(e, page, ca)
@@ -668,7 +675,7 @@ local function dataset_sample_url(e, files)
     end
     if not pick then return nil end
     if e.kind == "hf" then
-        return "https://huggingface.co/datasets/" .. e.owner .. "/" .. e.repo .. "/resolve/main/" .. pick
+        return "https://" .. hf_host() .. "/datasets/" .. e.owner .. "/" .. e.repo .. "/resolve/main/" .. pick
     elseif e.kind == "ms" then
         return "https://modelscope.cn/api/v1/datasets/" .. e.owner .. "/" .. e.repo
             .. "/repo?Revision=master&FilePath=" .. pick
@@ -797,7 +804,7 @@ local function handle_readme(ctx, result, err)
             local c = copy_ctx(ctx)
             c.stage = "readme"
             c.readme_attempt = attempt
-            local url = "https://huggingface.co/" .. e.owner .. "/" .. e.repo .. "/raw/master/README.md"
+            local url = "https://" .. hf_host() .. "/" .. e.owner .. "/" .. e.repo .. "/raw/master/README.md"
             local rid = http_get_for(e, url, c)
             if rid and rid ~= 0 then return end
         end
