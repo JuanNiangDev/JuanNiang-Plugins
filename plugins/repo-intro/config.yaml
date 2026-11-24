@@ -88,6 +88,18 @@ configs:
     description: 调用主程序 LLM 的超时秒数，默认 60
     default: "60"
 
+  - key: llm_min_interval
+    type: string
+    label: LLM 最小调用间隔（秒）
+    description: 串行排队调用 LLM 的最小间隔秒数，默认 3；用于防止连续发多个链接触发频率限制
+    default: "3"
+
+  - key: llm_max_retries
+    type: string
+    label: LLM 失败最大重试次数
+    description: LLM 报错或返回无效 JSON 时的退避重试次数（4s/8s/12s），默认 3
+    default: "3"
+
   - key: max_repos
     type: string
     label: 单条消息最多处理链接数
