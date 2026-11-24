@@ -1,0 +1,160 @@
+# ====================================================================
+# ai_reset_monitor 插件配置（AI 额度重置与官方故障提醒）
+# ====================================================================
+# 每个配置项由 key / type / label / description / default 声明。
+# 改配置后热重载生效；不注册聊天指令，全部在后台管理面板控制。
+# ====================================================================
+
+configs:
+  - key: enabled
+    type: bool
+    label: 启用 AI 重置与故障监控
+    description: 总开关；关闭后停止后台轮询与消息推送（手动触发也会跳过）
+    default: true
+
+  - key: group_subscriptions
+    type: list
+    label: 分群订阅规则
+    description: "每行一条，格式：群号|订阅键(all / reset_all / status_all / 逗号分隔产品键)|可选风格覆写(objective/persona/both/major_persona)。产品键：codex, antigravity, claude, grok, grok_bot, glm, qoder, kimi, gemini_cli, cursor, openai_status, claude_status, deepseek_status。示例：1007385018|all|both"
+    default: []
+
+  - key: summary_style
+    type: string
+    label: 默认播报风格
+    description: "objective=纯客观快报；persona=纯Bot人格播报；both=客观快报+人格吐槽；major_persona=仅全员直接重置/发重置卡/重大故障追加人格播报，其余发客观"
+    default: "both"
+    options:
+      - objective
+      - persona
+      - both
+      - major_persona
+
+  - key: poll_interval_minutes
+    type: string
+    label: 轮询间隔（分钟）
+    description: 后台定时查询全部启用信源的间隔分钟数，默认 60（即每小时 1 次；最小 1 分钟；填 0 可关闭自动轮询仅靠 CronJob/手动触发）
+    default: "60"
+
+  - key: quiet_hours
+    type: string
+    label: 夜间静默时段（北京时间）
+    description: "格式 HH:MM-HH:MM（支持跨零点如 01:00-07:30）；留空表示 7×24 全天推送。静默时段命中的事件会暂存数据库，静默结束后的首次轮询合并补发"
+    default: ""
+
+  - key: cold_start_skip_history
+    type: bool
+    label: 冷启动仅建基线（防历史刷屏）
+    description: 首次上线或清空数据库后第一次拉取时，仅记录现有条目作为已见基线而不重发历史旧消息；只推送此后新增事件
+    default: true
+
+  - key: notify_event_kinds
+    type: list
+    label: 启用的重置事件类型
+    description: 控制哪些重置/变更级别触发推送；可选 direct_reset（直接重置）、banked_reset（发重置卡）、scheduled_reset（官方预告）、rule_change（重大规则/额度变动）
+    default:
+      - direct_reset
+      - banked_reset
+      - scheduled_reset
+      - rule_change
+
+  - key: enable_fxtwitter_sources
+    type: bool
+    label: 启用官方 X 时间线 RSS
+    description: 直连 fxtwitter.com/<handle>/feed.xml 抓取 @thsottiaux/@OpenAIDevs/@_mohansolo/@ClaudeDevs/@bcherny/@claudeai/@AnthropicAI/@bot/@grok/@elonmusk/@qoder_ai_ide 并回源原帖
+    default: true
+
+  - key: enable_aggregator_sources
+    type: bool
+    label: 启用多源交叉与补全源
+    description: 启用 whenaireset.com/feed.xml、agyresets.com/api/v1/status、whenreset.dev/api/reset-feed 补全 GLM/Kimi/Gemini CLI/Cursor 并与 X 原帖交叉核验
+    default: true
+
+  - key: enable_status_sources
+    type: bool
+    label: 启用官方故障状态监控
+    description: 监控 OpenAI (status.openai.com)、Claude (status.claude.com) 与 DeepSeek 官方故障/恢复进展（每次状态阶段推进均推送）
+    default: true
+
+  - key: deepseek_try_official_first
+    type: bool
+    label: DeepSeek 优先直探官网状态页
+    description: 优先请求 status.deepseek.com/history.rss（与 feed.rss），握手失败或超时时自动回退至 entireweb 实时状态页面
+    default: true
+
+  - key: deepseek_entireweb_threshold
+    type: string
+    label: Entireweb DeepSeek 1小时报错告警阈值
+    description: 当 status.deepseek.com 不可达并回退到 entireweb 时，过去 1 小时报错数达到该阈值（或页面直接标示宕机/异常）才触发告警，默认 50
+    default: "50"
+
+  - key: extra_rss_feeds
+    type: list
+    label: 自定义额外 RSS / Atom 源
+    description: "参考 juya 插件，支持扩展自建 RSSHub 或官网 Feed。格式：url（由 LLM 自动识别产品）或 产品键|url（如 glm|http://127.0.0.1:1200/twitter/user/Zai_org 或 kimi|http://127.0.0.1:1200/twitter/user/Kimi_Moonshot）"
+    default: []
+
+  - key: foreign_proxy
+    type: string
+    label: 海外信源代理
+    description: "抓取 X/FxTwitter/WhenAIReset/OpenAI/Claude 等海外源使用的代理，如 socks5://172.27.0.1:20170；服务器可直连海外时留空"
+    default: ""
+
+  - key: cn_proxy
+    type: string
+    label: 国内/DeepSeek 状态源代理（可选）
+    description: 抓取 status.deepseek.com 时使用的代理，留空直连；仅在需单独走中转代理时填写
+    default: ""
+
+  - key: text_provider_id
+    type: string
+    label: 指定文本模型（可选）
+    description: 留空默认使用系统当前激活的文本模型；可填后台服务商名称或模型名（如 volcengine / qianfan / deepseek）支持模糊匹配
+    default: ""
+
+  - key: fallback_provider_id
+    type: string
+    label: 备选文本模型（可选）
+    description: 主模型报错（如 503 no_healthy_account / 429 限流）时自动临时切换使用的备选文本模型（如 volcengine / qianfan），用完自动切回原模型
+    default: ""
+
+  - key: max_msg_chars
+    type: string
+    label: 单条提醒最大字数
+    description: 单条推送消息的总字数上限（默认 450 字），优先保留标题、时间与原帖链接
+    default: "450"
+
+  - key: llm_min_interval
+    type: string
+    label: LLM 串行调用间隔（秒）
+    description: 多条事件进入 LLM 时串行排队发送，每次调用间隔秒数（默认 1.5 秒，避免并发打满号池）
+    default: "1.5"
+
+  - key: llm_timeout
+    type: string
+    label: LLM 超时（秒）
+    description: 调用主程序文本模型做语义鉴真与风格润色的超时秒数，默认 60
+    default: "60"
+
+  - key: llm_confidence_min
+    type: string
+    label: LLM 最低置信度阈值
+    description: 0~1 之间，低于此值视为噪点或不够明确，不触发推送（默认 0.6）
+    default: "0.6"
+
+  - key: manual_trigger
+    type: bool
+    label: 手动触发测试诊断
+    description: 打开后将在下一次检测（最多 30 秒内）立即抓取各启用信源并发送到 test_group（manual_replay_hours=0 发最新状态诊断汇总；>0 如 72 则回放最近 N 小时实况通知）；测完请关闭
+    default: false
+
+  - key: manual_replay_hours
+    type: string
+    label: 手动测试回放窗口（小时）
+    description: "0 = 仅发送一条各产品最新状态诊断汇总（默认）；填正数如 72 = 触发手动测试时抓取并走 LLM 润色后真实发送最近 72 小时内的命中记录到 test_group（不影响正常去重基线）"
+    default: "0"
+
+  - key: test_group
+    type: string
+    label: 手动测试目标群号
+    description: 打开 manual_trigger 后接收测试诊断/回放消息的 QQ 群号；留空则发往 group_subscriptions 中的第一个群
+    default: ""
