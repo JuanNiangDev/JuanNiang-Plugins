@@ -350,7 +350,88 @@ return function(jn)
             return ep
         end
 
+        -- Twitter/X API created_at: Tue Nov 24 00:43:26 +0000 2026
+        local x_mon, x_day, x_h, x_m, x_s, x_tz, x_yr = s:match(
+            "^%a+%s+(%a%a%a)%s+(%d%d?)%s+(%d%d):(%d%d):(%d%d)%s+([%+%-]%d%d%d%d)%s+(%d%d%d%d)$"
+        )
+        if x_mon and MONTHS[x_mon:lower()] then
+            local ep = utc_table_to_epoch(tonumber(x_yr), MONTHS[x_mon:lower()], tonumber(x_day),
+                tonumber(x_h), tonumber(x_m), tonumber(x_s))
+            local sign, th, tm = x_tz:match("^([%+%-])(%d%d)(%d%d)$")
+            if sign then
+                local off = (tonumber(th) * 3600 + tonumber(tm) * 60) * (sign == "+" and 1 or -1)
+                ep = ep - off
+            end
+            return ep
+        end
+
         return nil
+    end
+
+    function M.url_encode(str)
+        if str == nil then return "" end
+        return (tostring(str):gsub("([^%w%-_%.~])", function(c)
+            return string.format("%%%02X", string.byte(c))
+        end))
+    end
+
+    -- 解析用户配置的 x_cookies（支持 Cookie 头字符串或 Cookie-Editor JSON 数组）
+    function M.parse_x_cookies(raw)
+        local s = M.trim(raw)
+        if s == "" then return nil end
+
+        local kv = {}
+        if s:sub(1, 1) == "[" or s:sub(1, 1) == "{" then
+            local ok, decoded = pcall(jn.json.decode, s)
+            if ok and type(decoded) == "table" then
+                if decoded[1] ~= nil then
+                    for _, item in ipairs(decoded) do
+                        if type(item) == "table" and item.name and item.value then
+                            kv[tostring(item.name)] = tostring(item.value)
+                        end
+                    end
+                else
+                    for k, v in pairs(decoded) do
+                        if v ~= nil then kv[tostring(k)] = tostring(v) end
+                    end
+                end
+            end
+        end
+
+        if next(kv) == nil then
+            -- 兼容前缀带 "Cookie:" 的粘贴格式
+            s = s:gsub("^[Cc]ookie:%s*", "")
+            for seg in (s .. ";"):gmatch("(.-);") do
+                local eq = seg:find("=", 1, true)
+                if eq then
+                    local k = M.trim(seg:sub(1, eq - 1))
+                    local v = M.trim(seg:sub(eq + 1))
+                    if k ~= "" and v ~= "" then
+                        kv[k] = v
+                    end
+                end
+            end
+        end
+
+        local auth_token = M.trim(kv.auth_token or "")
+        local ct0 = M.trim(kv.ct0 or "")
+        if auth_token == "" or ct0 == "" then
+            return nil
+        end
+
+        local parts = {
+            "auth_token=" .. auth_token,
+            "ct0=" .. ct0,
+        }
+        if kv.twid and kv.twid ~= "" then
+            parts[#parts + 1] = "twid=" .. M.trim(kv.twid)
+        end
+
+        return {
+            auth_token = auth_token,
+            ct0 = ct0,
+            cookie_header = table.concat(parts, "; "),
+        }
     end
 
     function M.format_cst(epoch_or_raw)

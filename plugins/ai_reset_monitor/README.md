@@ -71,6 +71,7 @@
 
 ### 常用开关与代理
 
+- `enable_fxtwitter_sources` / `enable_x_cookie_sources` / `x_cookies`：默认直连公开 FxTwitter RSS（无需登录）；若填入 X 登录态 `x_cookies`（含 `auth_token` 与 `ct0`），插件会额外直连 X 官方 GraphQL 时间线并作原帖回源兜底，跨源按推文 ID 自动去重。
 - `poll_interval_minutes`：默认 `"60"`（每小时查一次），最小 `"1"`；设 `"0"` 可关闭自动轮询仅使用后台 CronJob。
 - `cold_start_skip_history`：默认开启，首次上线或新增信源只建立已见基线，不刷屏推送历史旧消息。
 - `quiet_hours`：夜间静默时段（北京时间 `HH:MM-HH:MM`，如 `01:00-07:30`）；静默期命中的消息暂存 PostgreSQL，静默结束后自动合并补发。

@@ -63,6 +63,18 @@ configs:
     description: 直连 fxtwitter.com/<handle>/feed.xml 抓取 @thsottiaux/@OpenAIDevs/@_mohansolo/@ClaudeDevs/@bcherny/@claudeai/@AnthropicAI/@bot/@grok/@elonmusk/@qoder_ai_ide 并回源原帖
     default: true
 
+  - key: enable_x_cookie_sources
+    type: bool
+    label: 启用 X Cookie 直连官方源
+    description: 配置 x_cookies 后直连 X 官方 GraphQL 接口抓取最新推文并回源原帖详情，与 FxTwitter RSS 互补兜底
+    default: true
+
+  - key: x_cookies
+    type: string
+    label: X (Twitter) 登录态 Cookies（可选）
+    description: 填入登录 X 后的 Cookie（支持完整 Cookie 请求头、auth_token=...; ct0=... 或 Cookie-Editor 导出的 JSON；留空不启用）。用于 X 官方接口直连抓取与推文回源核验
+    default: ""
+
   - key: enable_aggregator_sources
     type: bool
     label: 启用多源交叉与补全源

@@ -18,6 +18,240 @@ return function(jn, common)
         { handle = "qoder_ai_ide",  product = "qoder",       name = "Qoder (@qoder_ai_ide)" },
     }
 
+    M.X_BEARER = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+
+    local X_USER_FEATURES = {
+        hidden_profile_subscriptions_enabled = true,
+        profile_label_improvements_pcf_label_in_post_enabled = true,
+        responsive_web_profile_redirect_enabled = false,
+        rweb_tipjar_consumption_enabled = true,
+        verified_phone_label_enabled = false,
+        subscriptions_verification_info_is_identity_verified_enabled = true,
+        subscriptions_verification_info_verified_default_enabled = true,
+        highlights_tweets_tab_ui_enabled = true,
+        responsive_web_twitter_article_notes_tab_enabled = true,
+        subscriptions_feature_can_gift_premium = true,
+        creator_subscriptions_tweet_preview_api_enabled = true,
+        responsive_web_graphql_skip_user_profile_image_extensions_enabled = false,
+        responsive_web_graphql_timeline_navigation_enabled = true,
+    }
+
+    local X_TWEET_FEATURES = {
+        rweb_video_screen_enabled = false,
+        profile_label_improvements_pcf_label_in_post_enabled = true,
+        responsive_web_profile_redirect_enabled = false,
+        rweb_tipjar_consumption_enabled = true,
+        verified_phone_label_enabled = false,
+        creator_subscriptions_tweet_preview_api_enabled = true,
+        responsive_web_graphql_timeline_navigation_enabled = true,
+        responsive_web_graphql_skip_user_profile_image_extensions_enabled = false,
+        premium_content_api_read_enabled = false,
+        communities_web_enable_tweet_community_results_fetch = true,
+        c9s_tweet_anatomy_moderator_badge_enabled = true,
+        responsive_web_grok_analyze_button_fetch_trends_enabled = false,
+        responsive_web_grok_analyze_post_followups_enabled = true,
+        responsive_web_jetfuel_frame = true,
+        responsive_web_grok_share_attachment_enabled = true,
+        articles_preview_enabled = true,
+        responsive_web_edit_tweet_api_enabled = true,
+        graphql_is_translatable_rweb_tweet_is_translatable_enabled = true,
+        view_counts_everywhere_api_enabled = true,
+        longform_notetweets_consumption_enabled = true,
+        responsive_web_twitter_article_tweet_consumption_enabled = true,
+        tweet_awards_web_tipping_enabled = false,
+        responsive_web_grok_show_grok_translated_post = false,
+        responsive_web_grok_analysis_button_from_backend = true,
+        creator_subscriptions_quote_tweet_preview_api_enabled = false,
+        freedom_of_speech_not_reach_fetch_enabled = true,
+        standardized_nudges_misinfo = true,
+        tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled = true,
+        longform_notetweets_rich_text_read_enabled = true,
+        longform_notetweets_inline_media_enabled = true,
+        responsive_web_grok_image_annotation_enabled = true,
+        responsive_web_grok_imagine_annotation_enabled = true,
+        responsive_web_grok_community_note_auto_translation_enabled = false,
+        responsive_web_enhance_cards_enabled = false,
+    }
+
+    function M.x_api_headers(x_auth)
+        return {
+            ["User-Agent"] = common.UA,
+            ["Accept"] = "*/*",
+            ["Accept-Language"] = "en-US,en;q=0.9",
+            ["Cookie"] = x_auth.cookie_header,
+            ["X-Csrf-Token"] = x_auth.ct0,
+            ["Authorization"] = M.X_BEARER,
+            ["X-Twitter-Auth-Type"] = "OAuth2Session",
+            ["X-Twitter-Active-User"] = "yes",
+            ["Referer"] = "https://x.com/",
+            ["Origin"] = "https://x.com",
+        }
+    end
+
+    function M.build_x_targets(needed_products, fetch_all)
+        local targets = {}
+        if not common.cfg_bool("enable_x_cookie_sources", true) then
+            return targets
+        end
+        local function need(prod)
+            if fetch_all then return true end
+            if not needed_products then return false end
+            return needed_products[prod] == true
+        end
+        for _, item in ipairs(FXTWITTER_HANDLES) do
+            local want = need(item.product)
+            if not want and item.product == "grok" and need("grok_bot") then
+                want = true
+            end
+            if want then
+                targets[#targets + 1] = {
+                    id = "xapi_" .. item.handle,
+                    kind = "x_gql_tweets",
+                    product = item.product,
+                    name = item.name .. " (X Cookie 直连)",
+                    handle = item.handle,
+                    proxy = common.cfg_string("foreign_proxy", ""),
+                }
+            end
+        end
+        return targets
+    end
+
+    function M.extract_main_js_url(html)
+        if type(html) ~= "string" then return nil end
+        return html:match("https://abs%.twimg%.com/responsive%-web/client%-web/main%.[%w_%-]+%.js")
+    end
+
+    function M.extract_gql_query_ids(js_body)
+        if type(js_body) ~= "string" then return {} end
+        local qids = {}
+        local wanted = {
+            UserByScreenName = true,
+            UserTweets = true,
+            TweetResultByRestId = true,
+        }
+        for qid, op in js_body:gmatch('queryId%s*:%s*"([%w_%-]+)"%s*,%s*operationName%s*:%s*"([%w_]+)"') do
+            if wanted[op] then qids[op] = qid end
+        end
+        if not qids.UserTweets or not qids.UserByScreenName then
+            for op, qid in js_body:gmatch('operationName%s*:%s*"([%w_]+)"%s*,%s*queryId%s*:%s*"([%w_%-]+)"') do
+                if wanted[op] and not qids[op] then qids[op] = qid end
+            end
+        end
+        return qids
+    end
+
+    function M.build_user_by_screen_name_url(qid, handle)
+        local vars = jn.json.encode({ screen_name = handle, withGrokTranslatedBio = false })
+        local feats = jn.json.encode(X_USER_FEATURES)
+        return "https://x.com/i/api/graphql/" .. qid .. "/UserByScreenName?variables="
+            .. common.url_encode(vars) .. "&features=" .. common.url_encode(feats)
+    end
+
+    function M.build_user_tweets_url(qid, user_id, count)
+        local vars = jn.json.encode({
+            userId = tostring(user_id),
+            count = count or 15,
+            includePromotedContent = false,
+            withQuickPromoteEligibilityTweetFields = false,
+            withVoice = true,
+        })
+        local feats = jn.json.encode(X_TWEET_FEATURES)
+        return "https://x.com/i/api/graphql/" .. qid .. "/UserTweets?variables="
+            .. common.url_encode(vars) .. "&features=" .. common.url_encode(feats)
+    end
+
+    function M.build_tweet_detail_url(qid, tweet_id)
+        local vars = jn.json.encode({
+            tweetId = tostring(tweet_id),
+            withCommunity = false,
+            includePromotedContent = false,
+            withVoice = false,
+        })
+        local feats = jn.json.encode(X_TWEET_FEATURES)
+        return "https://x.com/i/api/graphql/" .. qid .. "/TweetResultByRestId?variables="
+            .. common.url_encode(vars) .. "&features=" .. common.url_encode(feats)
+    end
+
+    function M.extract_x_user_rest_id(body)
+        local ok, data = pcall(jn.json.decode, body)
+        if not ok or type(data) ~= "table" then return nil end
+        local res = data.data and data.data.user and data.data.user.result
+        if type(res) == "table" and res.rest_id and res.rest_id ~= "" then
+            return tostring(res.rest_id)
+        end
+        return nil
+    end
+
+    function M.extract_x_tweet_from_result(node)
+        if type(node) ~= "table" then return nil end
+        if node.__typename == "TweetWithVisibilityResults" and type(node.tweet) == "table" then
+            node = node.tweet
+        end
+        local rid = node.rest_id
+        local leg = node.legacy
+        if not rid or type(leg) ~= "table" or type(leg.full_text) ~= "string" then
+            return nil
+        end
+        -- 跳过纯转推，仅保留本人原创/引用/长文帖
+        if leg.retweeted_status_result ~= nil then
+            return nil
+        end
+        local text = leg.full_text
+        local note = node.note_tweet and node.note_tweet.note_tweet_results and node.note_tweet.note_tweet_results.result
+        if type(note) == "table" and type(note.text) == "string" and note.text ~= "" then
+            text = note.text
+        end
+        local screen = ""
+        local ur = node.core and node.core.user_results and node.core.user_results.result
+        if type(ur) == "table" then
+            screen = (ur.core and ur.core.screen_name) or (ur.legacy and ur.legacy.screen_name) or ""
+        end
+        return {
+            id = tostring(rid),
+            text = common.trim(text),
+            created_at = tostring(leg.created_at or ""),
+            ts = common.parse_timestamp(leg.created_at or "") or 0,
+            screen_name = tostring(screen or ""),
+        }
+    end
+
+    function M.parse_x_tweet_detail_json(body)
+        local ok, data = pcall(jn.json.decode, body)
+        if not ok or type(data) ~= "table" then return nil end
+        local res = data.data and data.data.tweetResult and data.data.tweetResult.result
+        return M.extract_x_tweet_from_result(res)
+    end
+
+    function M.parse_x_user_tweets_json(body, default_handle)
+        local ok, data = pcall(jn.json.decode, body)
+        if not ok or type(data) ~= "table" then return {} end
+        local out, seen = {}, {}
+        local function walk(v, depth)
+            if type(v) ~= "table" or depth > 24 then return end
+            if v.rest_id and type(v.legacy) == "table" and type(v.legacy.full_text) == "string" then
+                local tw = M.extract_x_tweet_from_result(v)
+                if tw and not seen[tw.id] then
+                    -- 若接口返回带 screen_name 且与监控号不同（如他人的插入推文），跳过
+                    if tw.screen_name == "" or not default_handle
+                        or tw.screen_name:lower() == default_handle:lower() then
+                        seen[tw.id] = true
+                        out[#out + 1] = tw
+                    end
+                end
+                return
+            end
+            for _, child in pairs(v) do
+                if type(child) == "table" then
+                    walk(child, depth + 1)
+                end
+            end
+        end
+        walk(data, 0)
+        table.sort(out, function(a, b) return (a.ts or 0) > (b.ts or 0) end)
+        return out
+    end
+
     local RESET_KEYWORDS = {
         "reset", "quota", "rate limit", "usage limit", "limit", "banked",
         "bonus", "allowance", "credit", "replenish", "refresh", "cap",
@@ -422,6 +656,32 @@ return function(jn, common)
                 entireweb_state = state_tag,
                 skip_unless_state_changed = true,
             }
+            return candidates
+        end
+
+        if src.kind == "x_gql_tweets" then
+            local tweets = M.parse_x_user_tweets_json(body, src.handle)
+            for _, tw in ipairs(tweets) do
+                if M.looks_like_reset_tweet(tw.text, src.handle) then
+                    local prod = src.product
+                    if prod == "grok" and tw.text:lower():find("grok bot", 1, true) then
+                        prod = "grok_bot"
+                    end
+                    if wants(prod) then
+                        local handle_use = tw.screen_name ~= "" and tw.screen_name or src.handle
+                        candidates[#candidates + 1] = {
+                            event_key = "x:" .. tw.id,
+                            product = prod,
+                            source_name = src.name,
+                            source_url = "https://x.com/" .. tostring(handle_use) .. "/status/" .. tw.id,
+                            x_status_id = tw.id,
+                            title = common.clip(tw.text, 120),
+                            raw_text = tw.text,
+                            announced_ts = tw.ts,
+                        }
+                    end
+                end
+            end
             return candidates
         end
 

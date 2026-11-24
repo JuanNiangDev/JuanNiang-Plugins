@@ -157,6 +157,7 @@ local function build_diagnostic_summary(batch)
         "🕒 检测时间：" .. common.format_cst(os.time()),
         string.format("📡 信源统计：总计 %d 个（成功 %d / 失败 %d）",
             batch.total_sources, batch.ok_sources, batch.fail_sources),
+        "🍪 X Cookie：" .. tostring(batch.x_cookie_status or "未配置"),
     }
     if #batch.errors > 0 then
         lines[#lines + 1] = "⚠️ 异常信源：" .. common.clip(table.concat(batch.errors, "；"), 300)
@@ -559,6 +560,62 @@ local function process_source_candidates(batch, src, body)
 end
 
 -- --------------------------------------------------------------------
+-- X Cookie 官方 GraphQL 辅助（queryId 缓存 + rest_id 缓存）
+-- --------------------------------------------------------------------
+local function get_cached_x_qids()
+    if not (jn.cache and jn.cache.get) then return nil end
+    local ok, cached = pcall(jn.cache.get, "x_gql_qids")
+    if ok and type(cached) == "table" and cached.UserByScreenName and cached.UserTweets then
+        local ts = tonumber(cached.ts) or 0
+        if ts > 0 and (os.time() - ts) < 43200 then
+            return cached
+        end
+    end
+    return nil
+end
+
+local function invalidate_x_qids()
+    if jn.cache and jn.cache.set then
+        pcall(jn.cache.set, "x_gql_qids", { ts = 0 }, 1)
+    end
+end
+
+local function dispatch_x_target(batch, tgt, qids)
+    local cached_uid = nil
+    if jn.cache and jn.cache.get then
+        local ok, uobj = pcall(jn.cache.get, "x_uid:" .. tgt.handle:lower())
+        if ok and type(uobj) == "table" and uobj.rest_id and uobj.rest_id ~= "" then
+            cached_uid = tostring(uobj.rest_id)
+        end
+    end
+    batch.pending_http = batch.pending_http + 1
+    if cached_uid then
+        jn.http.get_async(sources.build_user_tweets_url(qids.UserTweets, cached_uid, 15), {
+            proxy = tgt.proxy or "",
+            headers = sources.x_api_headers(batch.x_auth),
+            ctx = { batch_id = batch.id, stage = "feed", src = tgt, fb_idx = 0 },
+        })
+    else
+        jn.http.get_async(sources.build_user_by_screen_name_url(qids.UserByScreenName, tgt.handle), {
+            proxy = tgt.proxy or "",
+            headers = sources.x_api_headers(batch.x_auth),
+            ctx = { batch_id = batch.id, stage = "x_uid", src = tgt },
+        })
+    end
+end
+
+local function mark_x_targets_failed(batch, reason)
+    batch.x_cookie_status = reason
+    local n = #(batch.x_targets or {})
+    if n > 0 then
+        batch.fail_sources = batch.fail_sources + n
+        batch.errors[#batch.errors + 1] = "X Cookie(" .. reason .. ")"
+    end
+    jn.log.warn(string.format("[%s] X Cookie 直连失败（影响 %d 个账号）: %s",
+        common.PLUGIN_NAME, n, reason))
+end
+
+-- --------------------------------------------------------------------
 -- 发起一轮轮询
 -- --------------------------------------------------------------------
 local function start_poll(is_manual)
@@ -599,7 +656,11 @@ local function start_poll(is_manual)
     end
 
     local src_list = sources.build_source_list(needed, fetch_all)
-    if #src_list == 0 then
+    local raw_xcookie = common.cfg_string("x_cookies", "")
+    local x_auth = common.parse_x_cookies(raw_xcookie)
+    local x_targets = x_auth and sources.build_x_targets(needed, fetch_all) or {}
+
+    if #src_list == 0 and #x_targets == 0 then
         if is_manual then
             jn.log.warn("[" .. common.PLUGIN_NAME .. "] 手动诊断未找到启用的信源")
         end
@@ -617,6 +678,15 @@ local function start_poll(is_manual)
         end
     end
 
+    local x_cookie_status = "未配置（仅使用免登录公开源）"
+    if raw_xcookie ~= "" and not x_auth then
+        x_cookie_status = "格式无效（缺少 auth_token 或 ct0）"
+    elseif x_auth then
+        x_cookie_status = (#x_targets > 0)
+            and string.format("已启用（直连 %d 个官方 X 账号）", #x_targets)
+            or "已配置（已按开关/订阅裁剪跳过）"
+    end
+
     local bid = state.next_batch_id
     state.next_batch_id = bid + 1
     state.used_fallback_provider = false
@@ -631,7 +701,7 @@ local function start_poll(is_manual)
         need_persona = need_persona,
         pending_http = 0,
         pending_llm = 0,
-        total_sources = #src_list,
+        total_sources = #src_list + #x_targets,
         ok_sources = 0,
         fail_sources = 0,
         errors = {},
@@ -642,6 +712,11 @@ local function start_poll(is_manual)
         baseline_marks = {},
         seed_marks = {},
         latest_by_prod = {},
+        x_auth = x_auth,
+        x_targets = x_targets,
+        x_qids = x_auth and get_cached_x_qids() or nil,
+        x_cookie_status = x_cookie_status,
+        x_auth_warned = false,
         finished = false,
     }
     state.batches[bid] = batch
@@ -662,11 +737,54 @@ local function start_poll(is_manual)
             ctx = { batch_id = bid, stage = "feed", src = src, fb_idx = 0 },
         })
     end
+
+    if #x_targets > 0 then
+        if batch.x_qids then
+            for _, tgt in ipairs(x_targets) do
+                dispatch_x_target(batch, tgt, batch.x_qids)
+            end
+        else
+            batch.pending_http = batch.pending_http + 1
+            jn.http.get_async("https://x.com/home", {
+                proxy = common.cfg_string("foreign_proxy", ""),
+                headers = {
+                    ["User-Agent"] = common.UA,
+                    ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    ["Accept-Language"] = "en-US,en;q=0.9",
+                    ["Cookie"] = x_auth.cookie_header,
+                },
+                ctx = { batch_id = bid, stage = "x_home" },
+            })
+        end
+    end
 end
 
 -- --------------------------------------------------------------------
 -- 异步 HTTP 回调
 -- --------------------------------------------------------------------
+local function apply_fxtwitter_tweet(cand, body)
+    local ok, parsed = pcall(jn.json.decode, body)
+    if not (ok and type(parsed) == "table" and type(parsed.tweet) == "table") then
+        return false
+    end
+    local tw = parsed.tweet
+    local author = type(tw.author) == "table" and tw.author or {}
+    local screen = tostring(author.screen_name or "")
+    local text = common.trim(tw.text or "")
+    if text == "" then return false end
+    cand.raw_text = text
+    if screen ~= "" then
+        cand.source_name = "@" .. screen .. " (X 官方原帖)"
+    end
+    if tw.url and tw.url ~= "" then
+        cand.source_url = tw.url
+    end
+    if screen:lower() == "bot" then
+        cand.product = "grok_bot"
+    end
+    return true
+end
+
 function on_http_response(req_id, ctx, result, err)
     if type(ctx) ~= "table" then return end
     local batch = state.batches[ctx.batch_id]
@@ -677,7 +795,68 @@ function on_http_response(req_id, ctx, result, err)
     local body = (type(result) == "table" and type(result.body) == "string") and result.body or ""
     local ok_resp = (not err) and (status >= 200 and status < 300) and (body ~= "")
 
-    if ctx.stage == "feed" then
+    if ctx.stage == "x_home" then
+        if ok_resp then
+            local main_url = sources.extract_main_js_url(body)
+            if main_url then
+                batch.pending_http = batch.pending_http + 1
+                jn.http.get_async(main_url, {
+                    proxy = common.cfg_string("foreign_proxy", ""),
+                    headers = { ["User-Agent"] = common.UA },
+                    ctx = { batch_id = batch.id, stage = "x_main_js" },
+                })
+            else
+                mark_x_targets_failed(batch, "未解析到 X JS 入口（可能 Cookie 已失效）")
+            end
+        else
+            mark_x_targets_failed(batch, tostring(err or ("HTTP " .. status)))
+        end
+    elseif ctx.stage == "x_main_js" then
+        if ok_resp then
+            local qids = sources.extract_gql_query_ids(body)
+            if qids.UserByScreenName and qids.UserTweets then
+                if jn.cache and jn.cache.set then
+                    pcall(jn.cache.set, "x_gql_qids", {
+                        ts = os.time(),
+                        UserByScreenName = qids.UserByScreenName,
+                        UserTweets = qids.UserTweets,
+                        TweetResultByRestId = qids.TweetResultByRestId or "",
+                    }, 43200)
+                end
+                batch.x_qids = qids
+                for _, tgt in ipairs(batch.x_targets or {}) do
+                    dispatch_x_target(batch, tgt, qids)
+                end
+            else
+                mark_x_targets_failed(batch, "main.js 中未提取到 GraphQL queryId")
+            end
+        else
+            mark_x_targets_failed(batch, "拉取 main.js 失败(" .. tostring(err or ("HTTP " .. status)) .. ")")
+        end
+    elseif ctx.stage == "x_uid" then
+        local src = ctx.src
+        local rid = ok_resp and sources.extract_x_user_rest_id(body) or nil
+        if rid and batch.x_qids and batch.x_qids.UserTweets then
+            if jn.cache and jn.cache.set then
+                pcall(jn.cache.set, "x_uid:" .. src.handle:lower(), { rest_id = rid, ts = os.time() }, 604800)
+            end
+            batch.pending_http = batch.pending_http + 1
+            jn.http.get_async(sources.build_user_tweets_url(batch.x_qids.UserTweets, rid, 15), {
+                proxy = src.proxy or "",
+                headers = sources.x_api_headers(batch.x_auth),
+                ctx = { batch_id = batch.id, stage = "feed", src = src, fb_idx = 0 },
+            })
+        else
+            if status == 400 or status == 404 or status == 422 then invalidate_x_qids() end
+            if (status == 401 or status == 403) and not batch.x_auth_warned then
+                batch.x_auth_warned = true
+                batch.x_cookie_status = "已失效 (HTTP " .. status .. ")"
+                jn.log.warn("[" .. common.PLUGIN_NAME .. "] X Cookie 已失效或被拒(HTTP " .. status .. ")，请及时更新")
+            end
+            batch.fail_sources = batch.fail_sources + 1
+            batch.errors[#batch.errors + 1] = string.format("%s(%s)", src.name, tostring(err or ("HTTP " .. status)))
+        end
+    elseif ctx.stage == "feed" then
         local src = ctx.src
         if ok_resp then
             batch.ok_sources = batch.ok_sources + 1
@@ -687,6 +866,14 @@ function on_http_response(req_id, ctx, result, err)
                     common.PLUGIN_NAME, src.name, tostring(perr)))
             end
         else
+            if src.kind == "x_gql_tweets" then
+                if status == 400 or status == 404 or status == 422 then invalidate_x_qids() end
+                if (status == 401 or status == 403) and not batch.x_auth_warned then
+                    batch.x_auth_warned = true
+                    batch.x_cookie_status = "已失效 (HTTP " .. status .. ")"
+                    jn.log.warn("[" .. common.PLUGIN_NAME .. "] X Cookie 已失效或被拒(HTTP " .. status .. ")，请及时更新")
+                end
+            end
             local fb_idx = (ctx.fb_idx or 0) + 1
             if src.fallback_urls and src.fallback_urls[fb_idx] then
                 local fb = src.fallback_urls[fb_idx]
@@ -716,22 +903,29 @@ function on_http_response(req_id, ctx, result, err)
         end
     elseif ctx.stage == "verify_x" then
         local cand = ctx.cand
+        local applied = ok_resp and apply_fxtwitter_tweet(cand, body)
+        local can_x_gql = (not applied) and batch.x_auth and cand.x_status_id
+            and batch.x_qids and batch.x_qids.TweetResultByRestId and batch.x_qids.TweetResultByRestId ~= ""
+        if can_x_gql then
+            batch.pending_http = batch.pending_http + 1
+            jn.http.get_async(sources.build_tweet_detail_url(batch.x_qids.TweetResultByRestId, cand.x_status_id), {
+                proxy = common.cfg_string("foreign_proxy", ""),
+                headers = sources.x_api_headers(batch.x_auth),
+                ctx = { batch_id = batch.id, stage = "verify_x_gql", cand = cand },
+            })
+        else
+            submit_candidate_to_llm(batch, cand)
+        end
+    elseif ctx.stage == "verify_x_gql" then
+        local cand = ctx.cand
         if ok_resp then
-            local ok, parsed = pcall(jn.json.decode, body)
-            if ok and type(parsed) == "table" and type(parsed.tweet) == "table" then
-                local tw = parsed.tweet
-                local author = type(tw.author) == "table" and tw.author or {}
-                local screen = tostring(author.screen_name or "")
-                local text = common.trim(tw.text or "")
-                if text ~= "" then
-                    cand.raw_text = text
-                    if screen ~= "" then
-                        cand.source_name = "@" .. screen .. " (X 官方原帖)"
-                    end
-                    if tw.url and tw.url ~= "" then
-                        cand.source_url = tw.url
-                    end
-                    if screen:lower() == "bot" then
+            local tw = sources.parse_x_tweet_detail_json(body)
+            if tw and tw.text ~= "" then
+                cand.raw_text = tw.text
+                if tw.screen_name ~= "" then
+                    cand.source_name = "@" .. tw.screen_name .. " (X Cookie 回源)"
+                    cand.source_url = "https://x.com/" .. tw.screen_name .. "/status/" .. tw.id
+                    if tw.screen_name:lower() == "bot" then
                         cand.product = "grok_bot"
                     end
                 end
