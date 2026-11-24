@@ -30,11 +30,11 @@ configs:
     description: 发送 ModelScope 模型/数据集链接时自动整理并发布
     default: true
 
-  - key: hf_mirror
-    type: bool
-    label: Hugging Face 走镜像站
-    description: 元数据与 README 请求走 hf-mirror.com（国内 huggingface.co 直连常不通）；关闭则直连 huggingface.co
-    default: true
+  - key: proxy
+    type: string
+    label: 海外平台代理（可选）
+    description: 请求 huggingface.co（及 GitHub 等海外平台）使用的 HTTP/SOCKS 代理，如 socks5://172.27.0.1:20170；留空直连
+    default: ""
 
   - key: enable_summary
     type: bool

@@ -133,16 +133,13 @@ end
 -- --------------------------------------------------------------------
 -- 元数据 / README URL 与工具
 -- --------------------------------------------------------------------
-local function hf_host()
-    if cfg_bool("hf_mirror", true) then return "hf-mirror.com" end
-    return "huggingface.co"
-end
+local HF_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 local function meta_api_url(e)
     if e.kind == "github" then
         return "https://api.github.com/repos/" .. e.owner .. "/" .. e.repo
     elseif e.kind == "hf" then
-        return "https://" .. hf_host() .. "/api/" .. (e.sub or "models") .. "/" .. e.owner .. "/" .. e.repo
+        return "https://huggingface.co/api/" .. (e.sub or "models") .. "/" .. e.owner .. "/" .. e.repo
     elseif e.kind == "ms" then
         return "https://modelscope.cn/api/v1/" .. (e.sub or "models") .. "/" .. e.owner .. "/" .. e.repo
     end
@@ -161,7 +158,7 @@ end
 local function dataset_tree_url(e)
     if e.sub ~= "datasets" then return nil end
     if e.kind == "hf" then
-        return "https://" .. hf_host() .. "/api/datasets/" .. e.owner .. "/" .. e.repo .. "/tree/main"
+        return "https://huggingface.co/api/datasets/" .. e.owner .. "/" .. e.repo .. "/tree/main"
     elseif e.kind == "ms" then
         return "https://modelscope.cn/api/v1/datasets/" .. e.owner .. "/" .. e.repo .. "/repo/tree?Revision=master"
     end
@@ -172,7 +169,7 @@ local function readme_url_for(e)
     if e.kind == "github" then
         return "https://api.github.com/repos/" .. e.owner .. "/" .. e.repo .. "/readme", "readme"
     elseif e.kind == "hf" then
-        return "https://" .. hf_host() .. "/" .. e.owner .. "/" .. e.repo .. "/raw/main/README.md", "readme"
+        return "https://huggingface.co/" .. e.owner .. "/" .. e.repo .. "/raw/main/README.md", "readme"
     elseif e.kind == "ms" then
         if e.sub == "datasets" and e.meta and e.meta.readme_content and e.meta.readme_content ~= "" then
             return nil, nil
@@ -198,12 +195,34 @@ local function copy_ctx(ctx)
     return c
 end
 
+local function proxy_for(e)
+    if e and (e.kind == "hf" or e.kind == "github") then
+        return cfg_string("proxy", "")
+    end
+    return ""
+end
+
+local function http_get_for(e, url, ctx, headers)
+    local p = proxy_for(e)
+    local h = headers and copy_ctx(headers) or {}
+    if e and e.kind == "hf" and not h["User-Agent"] then
+        h["User-Agent"] = HF_UA
+    end
+    if p ~= "" then
+        return jn.http.get_async(url, ctx, h, p)
+    end
+    if next(h) ~= nil then
+        return jn.http.get_async(url, ctx, h)
+    end
+    return jn.http.get_async(url, ctx)
+end
+
 -- --------------------------------------------------------------------
 -- 关键图提取（HF/MS 模型页 README + 引用博客）
 -- --------------------------------------------------------------------
 local function image_base_for(e)
     if e.kind == "hf" then
-        return "https://" .. hf_host() .. "/" .. e.owner .. "/" .. e.repo .. "/resolve/main/"
+        return "https://huggingface.co/" .. e.owner .. "/" .. e.repo .. "/resolve/main/"
     elseif e.kind == "ms" then
         return "https://modelscope.cn/models/" .. e.owner .. "/" .. e.repo .. "/resolve/master/"
     end
@@ -232,6 +251,7 @@ local function collect_readme_images(e)
     local limit = cfg_num("key_image_count", 2)
     if limit <= 0 then return {} end
     local proxy = cfg_string("key_image_proxy", "https://wsrv.nl/?url=")
+    local http_proxy = cfg_string("proxy", "")
     local candidates, seen = {}, {}
     scan_images(e.readme, image_base_for(e), candidates, seen, 8)
 
@@ -243,9 +263,13 @@ local function collect_readme_images(e)
             and not pseen[u] and pages < 2 then
             pseen[u] = true
             pages = pages + 1
-            local fetch_url = u:gsub("^https://huggingface%.co", "https://hf-mirror.com")
-                :gsub("^https://hf%.co", "https://hf-mirror.com")
-            local ok, res = pcall(function() return jn.http.get(fetch_url) end)
+            local fetch_url = u:gsub("^https://hf%.co", "https://huggingface.co")
+            local ok, res = pcall(function()
+                if http_proxy ~= "" and not fetch_url:find("modelscope%.cn", 1) then
+                    return jn.http.get(fetch_url, http_proxy)
+                end
+                return jn.http.get(fetch_url)
+            end)
             if ok and res and res.body and res.body ~= "" then
                 scan_images(res.body, fetch_url .. "/", candidates, seen, 8)
             end
@@ -573,7 +597,7 @@ local function handle_meta(ctx, result, err)
         if attempt <= 1 then
             local c = copy_ctx(ctx)
             c.fetch_attempt = attempt
-            local rid = jn.http.get_async(meta_api_url(e), c, e.kind == "github" and gh_headers() or nil)
+            local rid = http_get_for(e, meta_api_url(e), c, e.kind == "github" and gh_headers() or nil)
             if rid and rid ~= 0 then return end
         end
         e.err = "请求失败：" .. tostring(err)
@@ -608,7 +632,7 @@ local function handle_meta(ctx, result, err)
         batch.pending = batch.pending + 1
         local ct = copy_ctx(ctx)
         ct.stage = "dataset_tree"
-        local drid = jn.http.get_async(dturl, ct)
+        local drid = http_get_for(e, dturl, ct)
         if not drid or drid == 0 then batch.pending = batch.pending - 1 end
     end
     local url, stage = readme_url_for(e)
@@ -618,17 +642,17 @@ local function handle_meta(ctx, result, err)
     end
     local c = copy_ctx(ctx)
     c.stage = stage
-    local rid = jn.http.get_async(url, c, e.kind == "github" and gh_headers() or nil)
+    local rid = http_get_for(e, url, c, e.kind == "github" and gh_headers() or nil)
     if not rid or rid == 0 then batch.pending = batch.pending - 1 end
 
     if e.kind == "hf" or e.kind == "ms" then
         batch.pending = batch.pending + 1
         local ca = copy_ctx(ctx)
         ca.stage = "avatar"
-        local page = (e.kind == "hf") and ("https://" .. hf_host() .. "/" .. e.owner)
+        local page = (e.kind == "hf") and ("https://huggingface.co/" .. e.owner)
             or ("https://modelscope.cn/" .. (e.sub == "datasets" and "datasets" or "models")
                 .. "/" .. e.owner .. "/" .. e.repo)
-        local rid2 = jn.http.get_async(page, ca)
+        local rid2 = http_get_for(e, page, ca)
         if not rid2 or rid2 == 0 then batch.pending = batch.pending - 1 end
     end
 end
@@ -644,7 +668,7 @@ local function dataset_sample_url(e, files)
     end
     if not pick then return nil end
     if e.kind == "hf" then
-        return "https://" .. hf_host() .. "/datasets/" .. e.owner .. "/" .. e.repo .. "/resolve/main/" .. pick
+        return "https://huggingface.co/datasets/" .. e.owner .. "/" .. e.repo .. "/resolve/main/" .. pick
     elseif e.kind == "ms" then
         return "https://modelscope.cn/api/v1/datasets/" .. e.owner .. "/" .. e.repo
             .. "/repo?Revision=master&FilePath=" .. pick
@@ -713,7 +737,7 @@ local function handle_dataset_tree(ctx, result, err)
                 batch.pending = batch.pending + 1
                 local cs = copy_ctx(ctx)
                 cs.stage = "dataset_sample"
-                local srid = jn.http.get_async(surl, cs, { ["Range"] = "bytes=0-2047" })
+                local srid = http_get_for(e, surl, cs, { ["Range"] = "bytes=0-2047" })
                 if not srid or srid == 0 then batch.pending = batch.pending - 1 end
             end
         end
@@ -756,7 +780,7 @@ local function handle_readme(ctx, result, err)
         end
         local c = copy_ctx(ctx)
         c.stage = "readme_raw"
-        local rid = jn.http.get_async(data.download_url, c, gh_headers())
+        local rid = http_get_for(e, data.download_url, c, gh_headers())
         if not rid or rid == 0 then batch.pending = batch.pending - 1 end
         return
     end
@@ -773,8 +797,8 @@ local function handle_readme(ctx, result, err)
             local c = copy_ctx(ctx)
             c.stage = "readme"
             c.readme_attempt = attempt
-            local url = "https://" .. hf_host() .. "/" .. e.owner .. "/" .. e.repo .. "/raw/master/README.md"
-            local rid = jn.http.get_async(url, c)
+            local url = "https://huggingface.co/" .. e.owner .. "/" .. e.repo .. "/raw/master/README.md"
+            local rid = http_get_for(e, url, c)
             if rid and rid ~= 0 then return end
         end
         batch.pending = batch.pending - 1
@@ -1006,8 +1030,9 @@ function on_message(event)
 
     for _, i in ipairs(uncached) do
         local ctx = { batch = batch, idx = i, stage = "meta" }
-        local rid = jn.http.get_async(meta_api_url(batch.entries[i]), ctx,
-            batch.entries[i].kind == "github" and gh_headers() or nil)
+        local entry = batch.entries[i]
+        local rid = http_get_for(entry, meta_api_url(entry), ctx,
+            entry.kind == "github" and gh_headers() or nil)
         if not rid or rid == 0 then
             batch.entries[i].err = "请求提交失败"
             batch.pending = batch.pending - 1
