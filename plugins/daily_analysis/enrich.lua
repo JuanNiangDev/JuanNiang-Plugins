@@ -181,12 +181,10 @@ return function(jn, common, sources)
         jn.cache.set(cache_key, { summary = summary, invalid = false }, summary ~= "" and 604800 or 86400)
     end
 
-    local function summarize_missing_repos(list)
-        if #list == 0 or not (jn.llm and jn.llm.chat) then return end
-        local timeout = math.max(30, common.da_num("llm_timeout", 300))
+    local function build_repo_batches(list)
+        local batches = {}
         local sys = [[你是开源项目介绍助手。用户会给你若干个（GitHub / Hugging Face / ModelScope）仓库的官方简介与 README 摘录，请为每个仓库写出简体中文介绍并严格返回 JSON：
 {"repos":[{"index":1,"title":"简短中文定位标题(≤30字)","desc_cn":"官方简介的简体中文翻译(≤60字，无简介则空字符串)","summary":"100~300字简体中文介绍：讲清是什么、核心功能/能力、支持哪些工具或关键用法；只依据提供的元数据与 README，禁止编造数据或写空话套话"}]}]]
-
         for start = 1, #list, 4 do
             local chunk, parts = {}, {}
             for k = start, math.min(start + 3, #list) do
@@ -201,12 +199,39 @@ return function(jn, common, sources)
                 end
                 parts[#parts + 1] = table.concat(block, "\n")
             end
+            batches[#batches + 1] = { chunk = chunk, sys = sys, user = table.concat(parts, "\n\n") }
+        end
+        return batches
+    end
 
+    local function apply_repo_batch(chunk, obj)
+        if not (obj and type(obj.repos) == "table") then return end
+        for _, item in ipairs(obj.repos) do
+            if type(item) == "table" and item.index then
+                local r = chunk[tonumber(item.index)]
+                if r then
+                    local title = trim(item.title or "")
+                    local desc_cn = trim(item.desc_cn or "")
+                    local sum = tostring(item.summary or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                    if title ~= "" or sum ~= "" then
+                        r.ri = { title = title, desc_cn = desc_cn, summary = sum }
+                        r.summary = sum
+                        jn.cache.set("da:repo_sum:v1:" .. r.key, r.ri, 604800)
+                    end
+                end
+            end
+        end
+    end
+
+    local function summarize_missing_repos(list)
+        if #list == 0 or not (jn.llm and jn.llm.chat) then return end
+        local timeout = math.max(30, common.da_num("llm_timeout", 360))
+        for _, b in ipairs(build_repo_batches(list)) do
             local obj = nil
             for attempt = 1, 2 do
                 local resp, err = jn.llm.chat({
-                    { role = "system", content = sys },
-                    { role = "user", content = table.concat(parts, "\n\n") },
+                    { role = "system", content = b.sys },
+                    { role = "user", content = b.user },
                 }, { timeout = timeout })
                 if not err and resp and resp ~= "" then
                     obj = common.decode_llm_json(resp, "项目补全")
@@ -216,31 +241,42 @@ return function(jn, common, sources)
                         common.PLUGIN_NAME, attempt, tostring(err or "空响应")))
                 end
             end
-
-            if obj and type(obj.repos) == "table" then
-                for _, item in ipairs(obj.repos) do
-                    if type(item) == "table" and item.index then
-                        local r = chunk[tonumber(item.index)]
-                        if r then
-                            local title = trim(item.title or "")
-                            local desc_cn = trim(item.desc_cn or "")
-                            local sum = tostring(item.summary or ""):gsub("^%s+", ""):gsub("%s+$", "")
-                            if title ~= "" or sum ~= "" then
-                                r.ri = { title = title, desc_cn = desc_cn, summary = sum }
-                                r.summary = sum
-                                jn.cache.set("da:repo_sum:v1:" .. r.key, r.ri, 604800)
-                            end
-                        end
-                    end
-                end
-            end
+            apply_repo_batch(b.chunk, obj)
         end
     end
 
-    function M.enrich_repos(repos)
-        if #repos == 0 then return end
+    local function run_async_batches(batches, idx, attempt, tag, list_field, apply_fn, on_done)
+        if idx > #batches then
+            on_done()
+            return
+        end
+        local b = batches[idx]
+        local timeout = math.max(30, common.da_num("llm_timeout", 360))
+        common.llm_chat_async({
+            { role = "system", content = b.sys },
+            { role = "user", content = b.user },
+        }, { timeout = timeout }, function(resp, err)
+            local obj = nil
+            if not err and resp and resp ~= "" then
+                obj = common.decode_llm_json(resp, tag)
+            else
+                jn.log.warn(string.format("[%s] %s失败(第 %d 次): %s",
+                    common.PLUGIN_NAME, tag, attempt, tostring(err or "空响应")))
+            end
+            if obj and type(obj[list_field]) == "table" then
+                pcall(apply_fn, b.chunk, obj)
+                run_async_batches(batches, idx + 1, 1, tag, list_field, apply_fn, on_done)
+            elseif attempt < 2 then
+                run_async_batches(batches, idx, attempt + 1, tag, list_field, apply_fn, on_done)
+            else
+                run_async_batches(batches, idx + 1, 1, tag, list_field, apply_fn, on_done)
+            end
+        end)
+    end
+
+    local function collect_need_llm_repos(repos)
         local need_llm = {}
-        for _, r in ipairs(repos) do
+        for _, r in ipairs(repos or {}) do
             if not r.text and ((r.summary or "") == "" or r.degraded) then
                 pcall(enrich_one, r)
                 if not r.invalid and not r.ri and r.need_llm then
@@ -248,10 +284,28 @@ return function(jn, common, sources)
                 end
             end
         end
+        return need_llm
+    end
+
+    function M.enrich_repos(repos)
+        if not repos or #repos == 0 then return end
+        local need_llm = collect_need_llm_repos(repos)
         if #need_llm > 0 then
             jn.log.info(string.format("[%s] 补全总结 %d 个无水印开源项目", common.PLUGIN_NAME, #need_llm))
             pcall(summarize_missing_repos, need_llm)
         end
+    end
+
+    function M.enrich_repos_async(repos, on_done)
+        on_done = on_done or function() end
+        if not repos or #repos == 0 then on_done(); return end
+        local need_llm = collect_need_llm_repos(repos)
+        if #need_llm == 0 or not (jn.llm and (jn.llm.chat_async or jn.llm.chat)) then
+            on_done()
+            return
+        end
+        jn.log.info(string.format("[%s] 补全总结 %d 个无水印开源项目", common.PLUGIN_NAME, #need_llm))
+        run_async_batches(build_repo_batches(need_llm), 1, 1, "项目补全", "repos", apply_repo_batch, on_done)
     end
 
     -- ========================================================================
@@ -531,8 +585,7 @@ return function(jn, common, sources)
         return pending
     end
 
-    function M.summarize_fetched_articles(fetched_items)
-        if type(fetched_items) ~= "table" or #fetched_items == 0 then return end
+    local function parse_fetched_need_llm(fetched_items)
         local need_llm = {}
         for _, item in ipairs(fetched_items) do
             local a = item.article
@@ -559,69 +612,58 @@ return function(jn, common, sources)
                 end
             end
         end
+        return need_llm
+    end
 
-        if #need_llm > 0 and jn.llm and jn.llm.chat then
-            local timeout = math.max(30, common.da_num("llm_timeout", 300))
-            local sys = [[你是公众号新闻摘要助手。用户会给你若干篇微信公众号文章的标题、来源与正文摘录，请为每篇文章提取清晰标题与简明摘要，并严格返回 JSON：
+    local function build_article_batches(need_llm)
+        local batches = {}
+        local sys = [[你是公众号新闻摘要助手。用户会给你若干篇微信公众号文章的标题、来源与正文摘录，请为每篇文章提取清晰标题与简明摘要，并严格返回 JSON：
 {"articles":[{"index":1,"title":"文章标题(≤36字，若原文已给准确标题可直接沿用或略微精简)","summary":"50~100字简体中文摘要：提炼核心事实、结论、发布内容或核心观点；严禁编造原文未提及的信息"}]}]]
-            jn.log.info(string.format("[%s] 补全总结 %d 篇未捕获全文的公众号文章", common.PLUGIN_NAME, #need_llm))
-
-            for start = 1, #need_llm, 4 do
-                local chunk, parts = {}, {}
-                for k = start, math.min(start + 3, #need_llm) do
-                    local it = need_llm[k]
-                    chunk[#chunk + 1] = it
-                    local a = it.article
-                    local p = it.parsed or {}
-                    local block = {
-                        string.format("【文章 %d】URL: %s", #chunk, a.url or ""),
-                        "已知标题：" .. ((a.title and a.title ~= "") and a.title or "（待提取）"),
-                    }
-                    if a.account and a.account ~= "" then
-                        block[#block + 1] = "公众号：" .. a.account
-                    end
-                    if p.desc and p.desc ~= "" then
-                        block[#block + 1] = "导语/描述：" .. p.desc
-                    end
-                    block[#block + 1] = "正文摘录：\n" .. (p.content or "")
-                    parts[#parts + 1] = table.concat(block, "\n")
+        for start = 1, #need_llm, 4 do
+            local chunk, parts = {}, {}
+            for k = start, math.min(start + 3, #need_llm) do
+                local it = need_llm[k]
+                chunk[#chunk + 1] = it
+                local a = it.article
+                local p = it.parsed or {}
+                local block = {
+                    string.format("【文章 %d】URL: %s", #chunk, a.url or ""),
+                    "已知标题：" .. ((a.title and a.title ~= "") and a.title or "（待提取）"),
+                }
+                if a.account and a.account ~= "" then
+                    block[#block + 1] = "公众号：" .. a.account
                 end
-
-                local obj = nil
-                for attempt = 1, 2 do
-                    local resp, err = jn.llm.chat({
-                        { role = "system", content = sys },
-                        { role = "user", content = table.concat(parts, "\n\n") },
-                    }, { timeout = timeout })
-                    if not err and resp and resp ~= "" then
-                        obj = common.decode_llm_json(resp, "文章补全")
-                        if obj and type(obj.articles) == "table" then break end
-                    else
-                        jn.log.warn(string.format("[%s] 公众号文章总结失败(第 %d 次): %s",
-                            common.PLUGIN_NAME, attempt, tostring(err or "空响应")))
-                    end
+                if p.desc and p.desc ~= "" then
+                    block[#block + 1] = "导语/描述：" .. p.desc
                 end
+                block[#block + 1] = "正文摘录：\n" .. (p.content or "")
+                parts[#parts + 1] = table.concat(block, "\n")
+            end
+            batches[#batches + 1] = { chunk = chunk, sys = sys, user = table.concat(parts, "\n\n") }
+        end
+        return batches
+    end
 
-                if obj and type(obj.articles) == "table" then
-                    for _, res_item in ipairs(obj.articles) do
-                        if type(res_item) == "table" and res_item.index then
-                            local it = chunk[tonumber(res_item.index)]
-                            if it and it.article then
-                                local t = trim(res_item.title or "")
-                                local s = trim(res_item.summary or "")
-                                if (it.article.title or "") == "" and t ~= "" then
-                                    it.article.title = t
-                                end
-                                if s ~= "" then
-                                    it.article.summary = common.clip(s, 120)
-                                end
-                            end
-                        end
+    local function apply_article_batch(chunk, obj)
+        if not (obj and type(obj.articles) == "table") then return end
+        for _, res_item in ipairs(obj.articles) do
+            if type(res_item) == "table" and res_item.index then
+                local it = chunk[tonumber(res_item.index)]
+                if it and it.article then
+                    local t = trim(res_item.title or "")
+                    local s = trim(res_item.summary or "")
+                    if (it.article.title or "") == "" and t ~= "" then
+                        it.article.title = t
+                    end
+                    if s ~= "" then
+                        it.article.summary = common.clip(s, 120)
                     end
                 end
             end
         end
+    end
 
+    local function finalize_fetched_articles(fetched_items)
         for _, item in ipairs(fetched_items) do
             local a = item.article
             local p = item.parsed
@@ -641,6 +683,52 @@ return function(jn, common, sources)
                 }, 604800)
             end
         end
+    end
+
+    function M.summarize_fetched_articles(fetched_items)
+        if type(fetched_items) ~= "table" or #fetched_items == 0 then return end
+        local need_llm = parse_fetched_need_llm(fetched_items)
+        if #need_llm > 0 and jn.llm and jn.llm.chat then
+            local timeout = math.max(30, common.da_num("llm_timeout", 360))
+            jn.log.info(string.format("[%s] 补全总结 %d 篇未捕获全文的公众号文章", common.PLUGIN_NAME, #need_llm))
+            for _, b in ipairs(build_article_batches(need_llm)) do
+                local obj = nil
+                for attempt = 1, 2 do
+                    local resp, err = jn.llm.chat({
+                        { role = "system", content = b.sys },
+                        { role = "user", content = b.user },
+                    }, { timeout = timeout })
+                    if not err and resp and resp ~= "" then
+                        obj = common.decode_llm_json(resp, "文章补全")
+                        if obj and type(obj.articles) == "table" then break end
+                    else
+                        jn.log.warn(string.format("[%s] 公众号文章总结失败(第 %d 次): %s",
+                            common.PLUGIN_NAME, attempt, tostring(err or "空响应")))
+                    end
+                end
+                apply_article_batch(b.chunk, obj)
+            end
+        end
+        finalize_fetched_articles(fetched_items)
+    end
+
+    function M.summarize_fetched_articles_async(fetched_items, on_done)
+        on_done = on_done or function() end
+        if type(fetched_items) ~= "table" or #fetched_items == 0 then
+            on_done()
+            return
+        end
+        local need_llm = parse_fetched_need_llm(fetched_items)
+        if #need_llm == 0 or not (jn.llm and (jn.llm.chat_async or jn.llm.chat)) then
+            finalize_fetched_articles(fetched_items)
+            on_done()
+            return
+        end
+        jn.log.info(string.format("[%s] 补全总结 %d 篇未捕获全文的公众号文章", common.PLUGIN_NAME, #need_llm))
+        run_async_batches(build_article_batches(need_llm), 1, 1, "文章补全", "articles", apply_article_batch, function()
+            finalize_fetched_articles(fetched_items)
+            on_done()
+        end)
     end
 
     return M

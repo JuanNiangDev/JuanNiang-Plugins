@@ -251,5 +251,83 @@ return function(jn)
         return (s:gsub("&amp;", "&"):gsub("&#44;", ","):gsub("&#91;", "["):gsub("&#93;", "]"))
     end
 
+    function M.utf8_len(s)
+        s = tostring(s or "")
+        local n = 0
+        for i = 1, #s do
+            local b = s:byte(i)
+            if b < 0x80 or b >= 0xC0 then n = n + 1 end
+        end
+        return n
+    end
+
+    -- ----------------------------------------------------------------
+    -- 统一异步 LLM 调度器（释放插件 stateMu，不阻塞消息入库与回调）
+    -- ----------------------------------------------------------------
+    local chat_pending = {}
+
+    function M.llm_chat_async(messages, opts, cb)
+        if type(cb) ~= "function" then return end
+        opts = opts or {}
+        if not (jn.llm and jn.llm.chat_async) then
+            if jn.llm and jn.llm.chat then
+                local resp, err = jn.llm.chat(messages, opts)
+                cb(resp, err)
+            else
+                cb(nil, "LLM 不可用")
+            end
+            return
+        end
+        local ok, rid, qerr = pcall(jn.llm.chat_async, messages, opts)
+        if not ok or not rid or rid == 0 then
+            cb(nil, tostring(ok and qerr or rid or "chat_async 提交失败"))
+            return
+        end
+        local entry = { cb = cb, done = false }
+        chat_pending[rid] = entry
+        if jn.timer and jn.timer.after then
+            local wait_sec = math.max(30, tonumber(opts.timeout) or 360) + 20
+            pcall(jn.timer.after, wait_sec, { action = "da_llm_timeout", rid = rid })
+        end
+    end
+
+    local function invoke_chat_cb(entry, content, err)
+        local ok, perr = pcall(entry.cb, content, err)
+        if not ok then
+            jn.log.error("[" .. M.PLUGIN_NAME .. "] 异步 LLM 回调异常: " .. tostring(perr))
+            if type(M.on_async_panic) == "function" then
+                pcall(M.on_async_panic, perr)
+            end
+        end
+    end
+
+    function M.dispatch_chat_response(req_id, content, err)
+        local entry = chat_pending[req_id]
+        if not entry or entry.done then return false end
+        entry.done = true
+        chat_pending[req_id] = nil
+        invoke_chat_cb(entry, content, err)
+        return true
+    end
+
+    function M.handle_llm_timer(ctx)
+        if not ctx or type(ctx) ~= "table" or ctx.action ~= "da_llm_timeout" then return false end
+        local entry = chat_pending[ctx.rid]
+        if not entry or entry.done then return true end
+        entry.done = true
+        chat_pending[ctx.rid] = nil
+        invoke_chat_cb(entry, nil, "llm_async_timeout")
+        return true
+    end
+
+    function M.clear_pending_chats()
+        for rid, entry in pairs(chat_pending) do
+            if not entry.done then
+                entry.done = true
+                chat_pending[rid] = nil
+            end
+        end
+    end
+
     return M
 end

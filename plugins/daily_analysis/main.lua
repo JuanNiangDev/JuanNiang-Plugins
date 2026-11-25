@@ -56,6 +56,11 @@ local state = {
     manual_triggered_once = false,
     wx_jobs = {},
     wx_seq = 0,
+    group_queue = {},
+    queued_gids = {},
+    active_group = nil,
+    active_started = 0,
+    provider_hold = nil,
 }
 
 local function get_bot_uin()
@@ -220,7 +225,7 @@ end
 -- ============================================================================
 local function fetch_group_messages(group_id, hours)
     hours = hours or 24
-    local limit = common.da_num("fetch_limit", 5000)
+    local limit = common.da_num("fetch_limit", 1500)
     if limit < 100 then limit = 100 end
     local sql = [[
         SELECT id, user_id, nickname, content, raw_message, created_at FROM (
@@ -304,50 +309,66 @@ local function norm_repeat_key(s)
     return s
 end
 
+local function is_low_signal_content(content)
+    local s = tostring(content or "")
+    if s == "" then return true end
+    -- 含链接、合并转发、分享卡片、图像识别描述一律保留
+    if s:find("https?://") or s:find("github%.com", 1, true)
+        or s:find("huggingface%.co", 1, true) or s:find("modelscope%.", 1, true)
+        or s:find("【合并转发", 1, true) or s:find("【分享卡片", 1, true)
+        or s:find("【图片：", 1, true) then
+        return false
+    end
+    local core = s:gsub("【回复.-」】", "")
+    core = core:gsub("（连发 %d+ 次）$", "")
+    core = core:gsub("（.-复读 %d+ 次）$", "")
+    core = core:gsub("%[CQ:[^%]]*%]", "")
+    for _, ph in ipairs({ "%[图片%]", "%[图%]", "%[表情%]", "%[语音%]", "%[视频%]", "%[文件%]", "%[卡片%]", "%[转发消息%]" }) do
+        core = core:gsub(ph, "")
+    end
+    core = core:gsub("[%s%p]+", "")
+    if core == "" then return true end
+    local raw_trim = s:gsub("【回复.-」】", ""):gsub("^%s+", "")
+    if raw_trim:find("^/%S+") then return true end
+    return common.utf8_len(core) <= 2
+end
+
 local function build_stream_messages(messages)
     local max_chars = math.max(100, common.da_num("max_msg_chars", 1000))
     local merge_on = common.da_bool("merge_repeats", true)
-    if not merge_on then
-        local out = {}
-        for _, m in ipairs(messages) do
-            out[#out + 1] = {
-                id = m.id,
-                user_id = m.user_id,
-                nickname = m.nickname,
-                content = common.clip_head_tail(m.content or "", max_chars),
-                raw_message = m.raw_message,
-                created_at = m.created_at,
-                _source_msg = m,
-            }
-        end
-        return out
-    end
-
+    local filter_low = common.da_bool("filter_low_signal", true)
     local runs = {}
-    for _, m in ipairs(messages) do
-        local key = norm_repeat_key(m.content or "")
-        local last = runs[#runs]
-        if key ~= "" and last and last.key == key then
-            last.count = last.count + 1
-            local uid = tostring(m.user_id or "")
-            if not last.user_seen[uid] then
-                last.user_seen[uid] = true
-                last.user_names[#last.user_names + 1] = tostring(m.nickname or ("群友" .. uid))
+
+    if not merge_on then
+        for _, m in ipairs(messages) do
+            runs[#runs + 1] = { first = m, count = 1, user_names = { tostring(m.nickname or "") } }
+        end
+    else
+        for _, m in ipairs(messages) do
+            local key = norm_repeat_key(m.content or "")
+            local last = runs[#runs]
+            if key ~= "" and last and last.key == key then
+                last.count = last.count + 1
+                local uid = tostring(m.user_id or "")
+                if not last.user_seen[uid] then
+                    last.user_seen[uid] = true
+                    last.user_names[#last.user_names + 1] = tostring(m.nickname or ("群友" .. uid))
+                end
+            else
+                local uid = tostring(m.user_id or "")
+                local nick = tostring(m.nickname or ("群友" .. uid))
+                runs[#runs + 1] = {
+                    key = key,
+                    first = m,
+                    count = 1,
+                    user_seen = { [uid] = true },
+                    user_names = { nick },
+                }
             end
-        else
-            local uid = tostring(m.user_id or "")
-            local nick = tostring(m.nickname or ("群友" .. uid))
-            runs[#runs + 1] = {
-                key = key,
-                first = m,
-                count = 1,
-                user_seen = { [uid] = true },
-                user_names = { nick },
-            }
         end
     end
 
-    local out = {}
+    local all_items, kept = {}, {}
     for _, r in ipairs(runs) do
         local m = r.first
         local msg_limit = max_chars
@@ -368,7 +389,7 @@ local function build_stream_messages(messages)
                     table.concat(preview, "、"), suffix, #r.user_names, r.count)
             end
         end
-        out[#out + 1] = {
+        local item = {
             id = m.id,
             user_id = m.user_id,
             nickname = m.nickname,
@@ -377,25 +398,35 @@ local function build_stream_messages(messages)
             created_at = m.created_at,
             _source_msg = m,
         }
+        all_items[#all_items + 1] = item
+        if not filter_low or not is_low_signal_content(content) then
+            kept[#kept + 1] = item
+        end
     end
-    return out
+    -- 若几乎全为短消息导致过滤后不足 3 条，回退保留归并结果
+    if #kept < 3 and #all_items >= 3 then
+        return all_items, #runs, 0
+    end
+    return kept, #runs, (#all_items - #kept)
 end
 
-local function format_chat_stream(messages)
+local function format_chat_stream(messages, start_idx)
+    start_idx = start_idx or 1
     local formatted = {}
     for idx, msg in ipairs(messages) do
         local created = tostring(msg.created_at or "")
         local time_str = created:match("(%d%d:%d%d)") or "未知时间"
         -- 只给昵称、绝不给 QQ 号：避免模型在话题与金句中泄露号码
         local name = tostring(msg.nickname or ("群友" .. tostring(msg.user_id)))
-        name = name:gsub('[<>\n"]', " ")
+        name = name:gsub('[<>\r\n"]', " ")
+        local body = tostring(msg.content or ""):gsub("\r", ""):gsub("%s*\n+%s*", " / ")
 
         formatted[#formatted + 1] = string.format(
-            '<msg id="%d" time="%s" user="%s">\n%s\n</msg>',
-            idx, time_str, name, msg.content or ""
+            '[#%d %s] %s: %s',
+            start_idx + idx - 1, time_str, name, body
         )
     end
-    return common.safe_concat(formatted, "\n\n")
+    return common.safe_concat(formatted, "\n")
 end
 
 -- ============================================================================
@@ -492,7 +523,7 @@ local function build_analysis_prompt(chat_stream, stats, persona_prompt)
    ⚠️【入选门槛】只收让人拍案叫绝的内容：逆天逻辑、神反转、离谱反差、精准吐槽、或者真的牛逼。纯报错、纯复读、无信息短句一律不收，宁缺毋滥。
    ⚠️【只取本人正文】只收发言人自己打出的字。严禁把「【回复 某人：「…」】」这类被引用的原文写进 content；清掉 [CQ:...] 与 [图片] 等占位符。
    ⚠️【合并同人连发】同一个人连续 2-3 条消息如果合起来才成立（铺垫 + 抖包袱），合并成一条，content 用 \n 保留原貌。
-   ⚠️【防拆分】每个 `<msg id="...">` 是一条完整发言，不得按空行拆成多条；sender 必须是真实昵称。
+   ⚠️【防拆分】每行 `[#编号 HH:MM]` 是一条完整发言，不得按空行拆成多条；msg_id 填对应的数字编号，sender 必须是真实昵称。
 3. 群友头衔：%s。user 必须填群友真实昵称。
 4. 质量锐评与人设点评：%s。
 
@@ -603,298 +634,748 @@ local function match_text_provider(input_str, providers)
 end
 
 -- ============================================================================
--- 8. 执行分析主流程 (do_group_analysis)
+-- 8. 模型槽位管理、Map-Reduce 与全异步群分析流水线
 -- ============================================================================
-local function do_group_analysis(group_id, send_target_id, is_private_target, force)
-    group_id = tonumber(group_id)
-    if not group_id then return false, "非法群号" end
-
-    local cur_date = os.date("%Y-%m-%d")
+local function is_group_done_today(group_id, cur_date)
     local cache_key = "last_analyzed:" .. tostring(group_id)
+    local last_date = nil
+    if jn.cache and jn.cache.get then
+        local v = jn.cache.get(cache_key)
+        if type(v) == "table" and type(v.date) == "string" then
+            last_date = v.date
+        elseif type(v) == "string" then
+            last_date = v
+        end
+    end
+    if not last_date and state.last_analyzed_date then
+        last_date = state.last_analyzed_date[group_id]
+    end
+    return last_date == cur_date
+end
 
-    if not force then
-        if state.is_analyzing and state.is_analyzing[group_id] then
-            jn.log.warn(string.format("[%s] 群 %d 正在执行分析中，跳过并发调用", PLUGIN_NAME, group_id))
-            return false, "正在执行中"
+local function mark_group_done(group_id, cur_date)
+    state.last_analyzed_date = state.last_analyzed_date or {}
+    -- 清理跨日残留键，避免长期运行内存增长
+    for gid, d in pairs(state.last_analyzed_date) do
+        if d ~= cur_date then state.last_analyzed_date[gid] = nil end
+    end
+    state.last_analyzed_date[group_id] = cur_date
+    if jn.cache and jn.cache.set then
+        jn.cache.set("last_analyzed:" .. tostring(group_id), { date = cur_date }, 86400 * 2)
+    end
+end
+
+local function acquire_provider_slot(target_provider_str)
+    target_provider_str = tostring(target_provider_str or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local active_desc = state.provider_hold and state.provider_hold.desc or "默认主模型"
+    if not (jn.agent and jn.agent.get_providers) then
+        return active_desc, state.provider_hold and state.provider_hold.cur_id or ""
+    end
+    local providers = jn.agent.get_providers()
+    if type(providers) ~= "table" then
+        return active_desc, state.provider_hold and state.provider_hold.cur_id or ""
+    end
+
+    local cur_id, cur_desc = "", "默认主模型"
+    for _, p in ipairs(providers) do
+        local p_type = tostring(p.Type or p.type or "")
+        local p_active = (p.IsActive == true) or (p.is_active == true) or (p.active == true)
+        if p_active and p_type == "text_model" then
+            cur_id = tostring(p.ID or p.id or "")
+            local p_name = tostring(p.Name or p.name or "")
+            local p_model = tostring(p.Model or p.model or "")
+            cur_desc = p_model ~= "" and p_model or p_name
+            break
+        end
+    end
+
+    if not state.provider_hold then
+        state.provider_hold = { old_id = cur_id, cur_id = cur_id, desc = cur_desc }
+    end
+
+    if target_provider_str ~= "" then
+        local chosen_p = match_text_provider(target_provider_str, providers)
+        if chosen_p and jn.agent.switch_provider then
+            local chosen_id = tostring(chosen_p.ID or chosen_p.id or "")
+            local chosen_name = tostring(chosen_p.Name or chosen_p.name or "")
+            local chosen_model = tostring(chosen_p.Model or chosen_p.model or "")
+            local chosen_desc = chosen_model ~= "" and chosen_model or chosen_name
+            if chosen_id ~= "" and cur_id ~= chosen_id then
+                pcall(jn.agent.switch_provider, chosen_id)
+                jn.log.info(string.format("[%s] 临时挂载文本模型: %s", PLUGIN_NAME, chosen_desc))
+            end
+            state.provider_hold.cur_id = chosen_id
+            state.provider_hold.desc = chosen_desc
+            return chosen_desc, chosen_id
+        elseif not chosen_p then
+            jn.log.warn(string.format("[%s] 未找到匹配的文本模型: %q，继续使用: %s",
+                PLUGIN_NAME, target_provider_str, state.provider_hold.desc))
+        end
+    end
+    return state.provider_hold.desc, state.provider_hold.cur_id
+end
+
+local function release_provider_slot()
+    local hold = state.provider_hold
+    state.provider_hold = nil
+    if hold and hold.old_id and hold.old_id ~= "" and hold.cur_id ~= hold.old_id
+        and jn.agent and jn.agent.switch_provider then
+        pcall(jn.agent.switch_provider, hold.old_id)
+    end
+end
+
+local function partition_stream_chunks(stream_messages, chunk_chars, max_chunks)
+    max_chunks = max_chunks or 8
+    local total = 0
+    for idx, msg in ipairs(stream_messages) do
+        local line = format_chat_stream({ msg }, idx)
+        total = total + #line + 1
+    end
+    local budget = math.max(8000, chunk_chars)
+    if total > budget * max_chunks then
+        budget = math.ceil(total / max_chunks)
+    end
+    local chunks, cur_msgs, cur_start, cur_size = {}, {}, 1, 0
+    for idx, msg in ipairs(stream_messages) do
+        local line_len = #format_chat_stream({ msg }, idx) + 1
+        if cur_size + line_len > budget and #cur_msgs > 0 then
+            chunks[#chunks + 1] = { start_idx = cur_start, msgs = cur_msgs }
+            cur_msgs, cur_start, cur_size = {}, idx, 0
+        end
+        cur_msgs[#cur_msgs + 1] = msg
+        cur_size = cur_size + line_len
+    end
+    if #cur_msgs > 0 then
+        chunks[#chunks + 1] = { start_idx = cur_start, msgs = cur_msgs }
+    end
+    return chunks
+end
+
+local function build_map_prompt(chunk_stream, part_idx, total_parts, persona_prompt)
+    return string.format([[%s
+
+你正在执行大群日报的【第 %d/%d 时段切片提炼】任务。请从以下聊天片段中提取关键话题、高光金句和该时段人物/氛围亮点，严格返回纯 JSON：
+```json
+{
+  "topics": [
+    { "title": "话题标题(≤20字)", "summary": "80-160字分段叙事（点名真实昵称、交代起因结论）", "participants": "主要讨论者昵称，逗号分隔" }
+  ],
+  "golden_quotes": [
+    { "msg_id": 1, "sender": "真实昵称", "content": "逐字原话(不含回复引用和CQ码)", "reason": "简短入选理由" }
+  ],
+  "highlights": ["1-2条时段氛围或活跃人物特点简述"]
+}
+```
+注意：每行 `[#编号 HH:MM] 昵称: 内容` 中的编号即 `msg_id`；零散分享可忽略或合并，不要输出多余说明。
+
+## 群聊切片记录：
+%s]], persona_prompt, part_idx, total_parts, chunk_stream)
+end
+
+local function build_reduce_prompt(map_items, stats, persona_prompt, full_prompt_header_fn)
+    local parts = {}
+    local idx_ok = 0
+    for k, m in ipairs(map_items) do
+        if m.data then
+            idx_ok = idx_ok + 1
+            parts[#parts + 1] = string.format("【切片 %d 结果】\n%s", k, jn.json.encode(m.data))
+        end
+    end
+    local top_lines = {}
+    for i = 1, math.min(10, #(stats.top_users or {})) do
+        local u = stats.top_users[i]
+        top_lines[#top_lines + 1] = string.format("- %s: %d 条发言", u.name, u.count)
+    end
+    local digest_stream = string.format(
+        "以下为全天 %d 个时段切片的结构化提炼结果（共原始发言 %d 条，请去重合并跨切片同话题、精炼为最终完整 JSON 报告）：\n\n### 活跃发言榜 Top10：\n%s\n\n### 分段提炼汇总：\n%s",
+        idx_ok, stats.total_count,
+        #top_lines > 0 and table.concat(top_lines, "\n") or "无",
+        table.concat(parts, "\n\n")
+    )
+    return full_prompt_header_fn(digest_stream)
+end
+
+local MODERATION_HINTS = {
+    "敏感内容", "敏感信息", "敏感词", "安全审核", "内容安全", "违规内容",
+    "无法响应您的请求", "content_filter", "data_inspection_failed", "sensitive",
+    "inappropriate", "high_risk", "safety policy",
+}
+
+local function is_moderation_rejection(resp, err)
+    local combined = (tostring(resp or "") .. " " .. tostring(err or "")):lower()
+    for _, pat in ipairs(MODERATION_HINTS) do
+        if combined:find(pat, 1, true) then return true end
+    end
+    return false
+end
+
+local function merge_map_subresults(a, b)
+    if not a then return b end
+    if not b then return a end
+    local out = { topics = {}, golden_quotes = {}, highlights = {} }
+    for _, src in ipairs({ a, b }) do
+        for _, t in ipairs(src.topics or {}) do out.topics[#out.topics + 1] = t end
+        for _, q in ipairs(src.golden_quotes or {}) do out.golden_quotes[#out.golden_quotes + 1] = q end
+        for _, h in ipairs(src.highlights or {}) do out.highlights[#out.highlights + 1] = h end
+    end
+    return out
+end
+
+local function slice_messages(msgs, s_idx, e_idx)
+    local out = {}
+    for i = s_idx, math.min(e_idx, #msgs) do out[#out + 1] = msgs[i] end
+    return out
+end
+
+local function run_map_slice_bisect(group_id, msgs, start_idx, label, total_parts, persona_prompt, llm_timeout, depth, budget, on_slice_done)
+    local c_stream = format_chat_stream(msgs, start_idx)
+    local mprompt = build_map_prompt(c_stream, label, total_parts, persona_prompt)
+    local io_chars = #mprompt
+
+    common.llm_chat_async({
+        { role = "system", content = persona_prompt },
+        { role = "user", content = mprompt },
+    }, { timeout = llm_timeout }, function(resp, err)
+        if not err and resp and resp ~= "" then
+            io_chars = io_chars + #resp
+            local obj, perr = common.decode_llm_json(resp, tostring(label))
+            if obj then
+                on_slice_done(obj, nil, io_chars)
+                return
+            end
+            err = perr or "JSON 解析失败"
         end
 
-        local last_date = nil
-        if jn.cache and jn.cache.get then
-            last_date = jn.cache.get(cache_key)
-        end
-        if not last_date and state.last_analyzed_date then
-            last_date = state.last_analyzed_date[group_id]
+        if is_moderation_rejection(resp, err) and depth < 3 and #msgs >= 20 and budget.remaining > 0 then
+            budget.remaining = budget.remaining - 1
+            local mid = math.floor(#msgs / 2)
+            local left_msgs = slice_messages(msgs, 1, mid)
+            local right_msgs = slice_messages(msgs, mid + 1, #msgs)
+            jn.log.warn(string.format("[%s] 群 %d Map-%s 命中敏感审查 (%d 条, depth=%d)，自动二分拆片挽救...",
+                PLUGIN_NAME, group_id, tostring(label), #msgs, depth))
+            run_map_slice_bisect(group_id, left_msgs, start_idx, tostring(label) .. "L", total_parts, persona_prompt, llm_timeout, depth + 1, budget, function(l_obj, l_err, l_chars)
+                run_map_slice_bisect(group_id, right_msgs, start_idx + mid, tostring(label) .. "R", total_parts, persona_prompt, llm_timeout, depth + 1, budget, function(r_obj, r_err, r_chars)
+                    local merged = merge_map_subresults(l_obj, r_obj)
+                    local final_err = merged and nil or tostring(r_err or l_err or "二分拆片均未成功")
+                    on_slice_done(merged, final_err, io_chars + (l_chars or 0) + (r_chars or 0))
+                end)
+            end)
+            return
         end
 
-        if last_date == cur_date then
-            jn.log.info(string.format("[%s] 群 %d 今日 (%s) 已完成过群总结报告，跳过重复执行", PLUGIN_NAME, group_id, cur_date))
-            return true, "今日已完成"
+        jn.log.warn(string.format("[%s] 群 %d Map-%s 失败: %s",
+            PLUGIN_NAME, group_id, tostring(label), tostring(err or "空响应")))
+        on_slice_done(nil, tostring(err or "空响应"), io_chars)
+    end)
+end
+
+local function run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, llm_timeout, chunk_chars, model_desc, on_done)
+    local chunks = partition_stream_chunks(stream_messages, chunk_chars, 8)
+    if #chunks <= 1 then
+        local stream_txt = format_chat_stream(stream_messages)
+        local prompt = build_analysis_prompt(stream_txt, stats, persona_prompt)
+        jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 超时: %ds, 模型: %s)...",
+            PLUGIN_NAME, group_id, #prompt, llm_timeout, model_desc))
+        common.llm_chat_async({
+            { role = "system", content = persona_prompt },
+            { role = "user", content = prompt },
+        }, { timeout = llm_timeout }, function(resp, err)
+            if err or not resp or resp == "" then
+                on_done(nil, tostring(err or "空响应"), #prompt)
+                return
+            end
+            local obj, perr = common.decode_llm_json(resp, "LLM")
+            if not obj then
+                local tag_err = is_moderation_rejection(resp, nil) and ("moderation_rejected: " .. common.clip(resp, 80)) or (perr or "JSON 解析失败")
+                on_done(nil, tag_err, #prompt + #resp)
+                return
+            end
+            on_done(obj, nil, math.floor((#prompt + #resp) / 2))
+        end)
+        return
+    end
+
+    jn.log.info(string.format("[%s] 群 %d 语料超阈值，启动 Map-Reduce 分段分析（%d 段，并发 2，模型: %s）...",
+        PLUGIN_NAME, group_id, #chunks, model_desc))
+    local results, next_i, in_flight, finished = {}, 1, 0, 0
+    local total_io_chars = 0
+    local aborted = false
+    local bisect_budget = { remaining = 6 }
+
+    local function maybe_reduce()
+        if finished < #chunks or aborted then return end
+        local ok_count = 0
+        for _, r in ipairs(results) do
+            if r.data then ok_count = ok_count + 1 end
+        end
+        if ok_count == 0 then
+            aborted = true
+            on_done(nil, results[1] and results[1].err or "全部分片分析失败", total_io_chars)
+            return
+        end
+        local reduce_prompt = build_reduce_prompt(results, stats, persona_prompt, function(digest)
+            return build_analysis_prompt(digest, stats, persona_prompt)
+        end)
+        total_io_chars = total_io_chars + #reduce_prompt
+        jn.log.info(string.format("[%s] 群 %d Map 完成 (%d/%d 成功)，执行 Reduce 终稿汇总 (字符数: %d)...",
+            PLUGIN_NAME, group_id, ok_count, #chunks, #reduce_prompt))
+        common.llm_chat_async({
+            { role = "system", content = persona_prompt },
+            { role = "user", content = reduce_prompt },
+        }, { timeout = llm_timeout }, function(resp, err)
+            if err or not resp or resp == "" then
+                on_done(nil, tostring(err or "Reduce 空响应"), math.floor(total_io_chars / 2))
+                return
+            end
+            total_io_chars = total_io_chars + #resp
+            local obj, perr = common.decode_llm_json(resp, "Reduce")
+            if not obj then
+                on_done(nil, perr or "Reduce JSON 解析失败", math.floor(total_io_chars / 2))
+                return
+            end
+            on_done(obj, nil, math.floor(total_io_chars / 2))
+        end)
+    end
+
+    local function dispatch_next()
+        while in_flight < 2 and next_i <= #chunks do
+            local idx = next_i
+            next_i = next_i + 1
+            in_flight = in_flight + 1
+            local c = chunks[idx]
+            run_map_slice_bisect(group_id, c.msgs, c.start_idx, idx, #chunks, persona_prompt, llm_timeout, 0, bisect_budget, function(obj, err, io_c)
+                in_flight = in_flight - 1
+                finished = finished + 1
+                total_io_chars = total_io_chars + (io_c or 0)
+                results[idx] = { data = obj, err = err }
+                if finished >= #chunks then
+                    maybe_reduce()
+                else
+                    dispatch_next()
+                end
+            end)
+        end
+    end
+    dispatch_next()
+end
+
+local function run_main_llm_with_fallback(group_id, stream_messages, stats, persona_prompt, on_done)
+    local llm_timeout = math.max(30, common.da_num("llm_timeout", 360))
+    local map_thresh = math.max(10000, common.da_num("map_reduce_threshold", 50000))
+    local chunk_chars = math.max(8000, common.da_num("map_chunk_chars", 35000))
+    local target_str = common.da_string("text_provider_id", "")
+    local fallback_str = common.da_string("fallback_text_provider", "")
+
+    local model_desc, primary_id = acquire_provider_slot(target_str)
+
+    local function run_with_msgs(msgs, cur_desc, allow_map, cb)
+        local txt = format_chat_stream(msgs)
+        if allow_map and #txt > map_thresh then
+            run_map_reduce_async(group_id, msgs, stats, persona_prompt, llm_timeout, chunk_chars, cur_desc, cb)
+            return
+        end
+        local prompt = build_analysis_prompt(txt, stats, persona_prompt)
+        jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 超时: %ds, 模型: %s)...",
+            PLUGIN_NAME, group_id, #prompt, llm_timeout, cur_desc))
+        common.llm_chat_async({
+            { role = "system", content = persona_prompt },
+            { role = "user", content = prompt },
+        }, { timeout = llm_timeout }, function(resp, err)
+            if err or not resp or resp == "" then
+                cb(nil, tostring(err or "空响应"), math.floor(#prompt / 2))
+                return
+            end
+            local obj, perr = common.decode_llm_json(resp, "LLM")
+            if not obj then
+                local tag_err = is_moderation_rejection(resp, nil) and ("moderation_rejected: " .. common.clip(resp, 80)) or (perr or "JSON 解析失败")
+                cb(nil, tag_err, math.floor((#prompt + #resp) / 2))
+                return
+            end
+            cb(obj, nil, math.floor((#prompt + #resp) / 2))
+        end)
+    end
+
+    local function shrink_recent_half(msgs)
+        if #msgs <= 20 then return msgs end
+        local start_i = math.max(1, math.floor(#msgs / 2) + 1)
+        local out = {}
+        for i = start_i, #msgs do out[#out + 1] = msgs[i] end
+        return out
+    end
+
+    run_with_msgs(stream_messages, model_desc, true, function(data, err, est_tokens)
+        if data then
+            on_done(data, nil, est_tokens, model_desc)
+            return
+        end
+        if is_moderation_rejection(nil, err) and #stream_messages >= 20 then
+            local forced_chunk = math.max(1200, math.floor(#format_chat_stream(stream_messages) / 4))
+            jn.log.warn(string.format("[%s] 群 %d 单次请求命中敏感审查，自动切分为 Map-Reduce 二分挽救模式...", PLUGIN_NAME, group_id))
+            run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, llm_timeout, forced_chunk, model_desc, function(mdata, merr, mtokens)
+                if mdata then
+                    on_done(mdata, nil, mtokens, model_desc)
+                else
+                    on_done(nil, tostring(merr or err), mtokens, model_desc)
+                end
+            end)
+            return
+        end
+        jn.log.warn(string.format("[%s] 群 %d 主分析失败 (%s)，启动自动降级重试...",
+            PLUGIN_NAME, group_id, tostring(err)))
+
+        -- 降级 1：若配置了备用模型且不同于主模型，切换备用模型重跑（缩半窗口加速兜底）
+        if fallback_str ~= "" then
+            local fb_desc, fb_id = acquire_provider_slot(fallback_str)
+            if fb_id ~= "" and fb_id ~= primary_id then
+                local half_msgs = shrink_recent_half(stream_messages)
+                run_with_msgs(half_msgs, fb_desc, true, function(fb_data, fb_err, fb_tokens)
+                    if fb_data then
+                        on_done(fb_data, nil, fb_tokens, fb_desc)
+                    else
+                        on_done(nil, "主与备用模型均失败: " .. tostring(fb_err), fb_tokens, fb_desc)
+                    end
+                end)
+                return
+            end
         end
 
-        state.last_analyzed_date = state.last_analyzed_date or {}
-        state.last_analyzed_date[group_id] = cur_date
-        state.last_daily_date = cur_date
-        if jn.cache and jn.cache.set then
-            jn.cache.set(cache_key, cur_date, 86400 * 2)
+        -- 降级 2：无可用备用模型时，收缩至最近 50% 语料（单次轻量）兜底重试
+        local half_msgs = shrink_recent_half(stream_messages)
+        if #half_msgs < #stream_messages then
+            run_with_msgs(half_msgs, model_desc, false, function(d2, e2, t2)
+                if d2 then
+                    on_done(d2, nil, t2, model_desc)
+                else
+                    on_done(nil, "降级重试失败: " .. tostring(e2), t2, model_desc)
+                end
+            end)
+        else
+            on_done(nil, tostring(err), est_tokens, model_desc)
         end
+    end)
+end
+
+local pump_group_queue
+
+local function force_release_active_group(reason)
+    local gid = state.active_group
+    if gid then
+        jn.log.warn(string.format("[%s] 强制释放群 %s 占用状态 (%s)", PLUGIN_NAME, tostring(gid), tostring(reason)))
+        state.is_analyzing = state.is_analyzing or {}
+        state.is_analyzing[gid] = nil
+    end
+    state.active_group = nil
+    state.active_started = 0
+    release_provider_slot()
+    common.clear_pending_chats()
+end
+
+local function start_group_pipeline(spec, on_pipeline_done)
+    local group_id = tonumber(spec.group_id)
+    local send_target_id = spec.send_target_id or group_id
+    local is_private_target = spec.is_private_target
+    local force = spec.force
+    local cur_date = os.date("%Y-%m-%d")
+
+    if not group_id then on_pipeline_done(false, "非法群号"); return end
+    if not force and is_group_done_today(group_id, cur_date) then
+        jn.log.info(string.format("[%s] 群 %d 今日 (%s) 已完成过群总结报告，跳过重复执行", PLUGIN_NAME, group_id, cur_date))
+        on_pipeline_done(true, "今日已完成")
+        return
     end
 
     state.is_analyzing = state.is_analyzing or {}
     state.is_analyzing[group_id] = true
+    state.active_group = group_id
+    state.active_started = os.time()
 
-    local function run_task()
-        if common.da_bool("enable_progress_feedback", false) then
-            local tip = "📊 正在提取分析近24小时群聊记录，大模型正在生成报告，请稍候..."
-            if is_private_target then
-                jn.onebot11.send_private_msg(send_target_id, tip)
-            else
-                jn.onebot11.send_group_msg(group_id, tip)
-            end
-        end
-        local start_time = os.time()
-
-        -- 1. 查询 24h 历史消息；过滤掉机器人自身消息与水印卡片
-        local all_messages = fetch_group_messages(group_id, 24)
-        local messages = {}
-        local bot_uin = get_bot_uin()
-        for _, m in ipairs(all_messages) do
-            if tonumber(m.user_id) ~= bot_uin and not common.is_bot_output(m.raw_message) then
-                messages[#messages + 1] = m
-            end
-        end
-        if #messages < 3 then
-            local msg = string.format("📊 今日群聊发言较少（当前仅 %d 条，不足 3 条），暂无足够数据生成分析报告。", #messages)
-            jn.log.warn(string.format("[%s] 群 %d 消息数不足 (%d < 3)，取消生成报告", PLUGIN_NAME, group_id, #messages))
-            if is_private_target then
-                jn.onebot11.send_private_msg(send_target_id, msg)
-            else
-                jn.onebot11.send_group_msg(group_id, msg)
-            end
-            return false, "消息过少"
-        end
-
-        -- 2. 统计概况 & 语料展开与归并
-        local stats = analyze_statistics(messages)
-        sources.reset_vision_counter()
-        local expanded = 0
-        for _, m in ipairs(messages) do
-            local before = m.content or ""
-            m.content = sources.expand_cq_content(m.raw_message, before)
-            if m.content ~= before then expanded = expanded + 1 end
-        end
-        local stream_messages = build_stream_messages(messages)
-        jn.log.info(string.format("[%s] 语料展开：%d/%d 条消息含 CQ 码，图片描述 %d 张；复读归并：%d → %d 条",
-            PLUGIN_NAME, expanded, #messages, sources.vision_used(), #messages, #stream_messages))
-        local chat_stream = format_chat_stream(stream_messages)
-        for line in chat_stream:gmatch("[^\n]+") do
-            if line:find("【合并转发", 1, true) or line:find("【图片：", 1, true) then
-                jn.log.info("[" .. PLUGIN_NAME .. "] 展开样例: " .. common.clip(line, 400))
-            end
-        end
-        stats.total_chars = #chat_stream
-
-        -- 2.5 预提取源码/公众号，必要时异步抓取合并转发或未触发即时总结的公众号文章
-        local precollected = nil
-        local pending_wx = {}
-        local news_cap = 0
-        for _, sc in ipairs(report.parse_sections_config()) do
-            if sc.key == "news" then
-                news_cap = sc.cap
-                break
-            end
-        end
-        if news_cap ~= 0 then
-            local projs, arts = sources.collect_sources(all_messages)
-            precollected = { projects = projs, articles = arts }
-            if common.da_bool("enable_news", true) then
-                pending_wx = enrich.prepare_article_fetch(arts, 12)
-            end
-        end
-
-        local function finish_analysis()
-            if #pending_wx > 0 then
-                pcall(enrich.summarize_fetched_articles, pending_wx)
-            end
-
-            -- 3. 组装人设与 Prompt
-            local persona_prompt = get_bot_persona_prompt()
-            local prompt = build_analysis_prompt(chat_stream, stats, persona_prompt)
-
-            -- 4. 选择模型并调用 LLM
-            local target_provider_str = common.da_string("text_provider_id", "")
-            local old_provider_id = nil
-            local active_model_desc = "默认主模型"
-
-            if jn.agent and jn.agent.get_providers then
-                local providers = jn.agent.get_providers()
-                if providers and type(providers) == "table" then
-                    for _, p in ipairs(providers) do
-                        local p_type = tostring(p.Type or p.type or "")
-                        local p_active = (p.IsActive == true) or (p.is_active == true) or (p.active == true)
-                        local p_id = tostring(p.ID or p.id or "")
-                        local p_name = tostring(p.Name or p.name or "")
-                        local p_model = tostring(p.Model or p.model or "")
-                        if p_active and p_type == "text_model" then
-                            old_provider_id = p_id
-                            active_model_desc = p_model ~= "" and p_model or p_name
-                            break
-                        end
-                    end
-                    if target_provider_str ~= "" then
-                        local chosen_p = match_text_provider(target_provider_str, providers)
-                        if chosen_p and jn.agent.switch_provider then
-                            local chosen_id = tostring(chosen_p.ID or chosen_p.id or "")
-                            local chosen_name = tostring(chosen_p.Name or chosen_p.name or "")
-                            local chosen_model = tostring(chosen_p.Model or chosen_p.model or "")
-                            if old_provider_id ~= chosen_id then
-                                jn.agent.switch_provider(chosen_id)
-                                jn.log.info(string.format("[%s] 临时挂载指定总结模型: %s",
-                                    PLUGIN_NAME, chosen_model ~= "" and chosen_model or chosen_name))
-                            end
-                            active_model_desc = chosen_model ~= "" and chosen_model or chosen_name
-                        elseif not chosen_p then
-                            jn.log.warn(string.format("[%s] 未找到匹配的文本模型: %q，回退使用系统激活模型: %s",
-                                PLUGIN_NAME, target_provider_str, active_model_desc))
-                        end
-                    end
-                end
-            end
-
-            local llm_timeout = math.max(30, common.da_num("llm_timeout", 300))
-            jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 超时: %ds, 模型: %s)...",
-                PLUGIN_NAME, group_id, #prompt, llm_timeout, active_model_desc))
-            local resp_text, err = jn.llm.chat({
-                { role = "system", content = persona_prompt },
-                { role = "user", content = prompt },
-            }, { timeout = llm_timeout })
-
-            if target_provider_str ~= "" and old_provider_id and jn.agent and jn.agent.switch_provider then
-                jn.agent.switch_provider(old_provider_id)
-            end
-            if err or not resp_text or resp_text == "" then
-                jn.log.error("[" .. PLUGIN_NAME .. "] LLM 分析失败: " .. tostring(err))
-                return false, "LLM 调用失败: " .. tostring(err)
-            end
-
-            -- 5. 解析、组装板块、发送与落库
-            local analysis_data = (common.decode_llm_json(resp_text, "LLM")) or {}
-            local dur_sec = math.max(1, os.difftime(os.time(), start_time))
-            local est_tokens = math.floor((#prompt + #resp_text) / 2)
-            local group_name = "本群"
-            if jn.onebot11.get_group_info then
-                local ginfo = jn.onebot11.get_group_info(group_id)
-                if ginfo and ginfo.group_name and ginfo.group_name ~= "" then
-                    group_name = ginfo.group_name
-                end
-            end
-
-            local sections = report.build_sections(
-                stats, analysis_data, group_name, group_id, dur_sec, est_tokens,
-                active_model_desc, all_messages, stream_messages, precollected
-            )
-            local dest_id = send_target_id or group_id
-            local resolved_private = is_private_target
-            if resolved_private == nil then
-                resolved_private = false
-                if send_target_id and send_target_id ~= group_id then
-                    local in_group = false
-                    if jn.onebot11.get_group_list then
-                        local groups = jn.onebot11.get_group_list()
-                        if type(groups) == "table" then
-                            for _, g in ipairs(groups) do
-                                if tonumber(g.group_id or g.groupId or 0) == dest_id then
-                                    in_group = true
-                                    break
-                                end
-                            end
-                        end
-                    end
-                    if not in_group and jn.onebot11.get_group_info then
-                        local gi = jn.onebot11.get_group_info(dest_id)
-                        if type(gi) == "table" and tonumber(gi.group_id or 0) == dest_id then
-                            in_group = true
-                        end
-                    end
-                    if not in_group then resolved_private = true end
-                end
-            end
-            local target_type = resolved_private and "private" or "group"
-            local sent, nodes = report.send_report(sections, target_type, dest_id)
-            if not sent or sent == 0 then
-                jn.log.error(string.format("[%s] 日报发送失败或内容为空 (target=%s:%d)", PLUGIN_NAME, target_type, dest_id))
-                return false, "发送失败"
-            end
-
-            local mode = common.da_string("report_mode", "forward")
-            if mode == "" then mode = "forward" end
-            jn.log.info(string.format("[%s] 群 %d 日报已发送到 %s:%d（模式=%s，板块 %d 个，发送 %d 次 / 节点 %d）",
-                PLUGIN_NAME, group_id, target_type, dest_id, mode, #sections, sent, nodes))
-
-            pcall(report.persist_report, group_id, dest_id, sections, mode, nodes)
-            prune_expired_messages()
-            return true, nil
-        end
-
-        local function run_finish_wrapped()
-            local ok2, res2, err2 = pcall(finish_analysis)
-            state.is_analyzing[group_id] = nil
-            if not ok2 then
-                jn.log.error(string.format("[%s] 群 %d 总结后半程异常: %s", PLUGIN_NAME, group_id, tostring(res2)))
-                return false, tostring(res2)
-            end
-            return res2, err2
-        end
-
-        if #pending_wx > 0 and jn.http and jn.http.get_async then
-            state.wx_seq = (state.wx_seq or 0) + 1
-            local job_id = string.format("%d_%d_%d", group_id, state.wx_seq, os.time())
-            local job = {
-                id = job_id,
-                group_id = group_id,
-                pending = pending_wx,
-                remaining = #pending_wx,
-                done = false,
-                run_finish = run_finish_wrapped,
-            }
-            state.wx_jobs = state.wx_jobs or {}
-            state.wx_jobs[job_id] = job
-            jn.log.info(string.format("[%s] 群 %d 检测到 %d 篇待补全公众号文章，启动异步抓取...",
-                PLUGIN_NAME, group_id, #pending_wx))
-            for idx, item in ipairs(pending_wx) do
-                local ok_req = pcall(jn.http.get_async, item.url, {
-                    action = "da_wx_fetch",
-                    job_id = job_id,
-                    idx = idx,
-                }, enrich.WX_HEADERS)
-                if not ok_req then
-                    item.finished = true
-                    item.status = 0
-                    job.remaining = job.remaining - 1
-                end
-            end
-            if job.remaining <= 0 then
-                job.done = true
-                state.wx_jobs[job_id] = nil
-                return run_finish_wrapped(), nil, true
-            end
-            if jn.timer and jn.timer.after then
-                jn.timer.after(35, { action = "da_wx_timeout", job_id = job_id })
-            end
-            return true, "异步抓取公众号文章中", true
-        end
-
-        return finish_analysis()
-    end
-
-    local ok, res, err_msg, keep_async = pcall(run_task)
-    if not ok or not keep_async then
+    local function complete(ok, err_msg)
         state.is_analyzing[group_id] = nil
+        state.active_group = nil
+        state.active_started = 0
+        release_provider_slot()
+        on_pipeline_done(ok, err_msg)
     end
+
+    if common.da_bool("enable_progress_feedback", false) then
+        local tip = "📊 正在提取分析近24小时群聊记录，大模型正在生成报告，请稍候..."
+        if is_private_target then
+            jn.onebot11.send_private_msg(send_target_id, tip)
+        else
+            jn.onebot11.send_group_msg(group_id, tip)
+        end
+    end
+    local start_time = os.time()
+
+    -- 1. 查询 24h 历史消息；过滤机器人自身消息与水印卡片
+    local all_messages = fetch_group_messages(group_id, 24)
+    local messages = {}
+    local bot_uin = get_bot_uin()
+    for _, m in ipairs(all_messages) do
+        if tonumber(m.user_id) ~= bot_uin and not common.is_bot_output(m.raw_message) then
+            messages[#messages + 1] = m
+        end
+    end
+    if #messages < 3 then
+        local msg = string.format("📊 今日群聊发言较少（当前仅 %d 条，不足 3 条），暂无足够数据生成分析报告。", #messages)
+        jn.log.warn(string.format("[%s] 群 %d 消息数不足 (%d < 3)，取消生成报告", PLUGIN_NAME, group_id, #messages))
+        if is_private_target then
+            jn.onebot11.send_private_msg(send_target_id, msg)
+        else
+            jn.onebot11.send_group_msg(group_id, msg)
+        end
+        complete(false, "消息过少")
+        return
+    end
+
+    -- 2. 全量统计概况（不受低质过滤影响）+ CQ 展开 + 归并过滤 + 紧凑流
+    local stats = analyze_statistics(messages)
+    sources.reset_vision_counter()
+    local expanded = 0
+    for _, m in ipairs(messages) do
+        local before = m.content or ""
+        m.content = sources.expand_cq_content(m.raw_message, before)
+        if m.content ~= before then expanded = expanded + 1 end
+    end
+    local stream_messages, merged_count, filtered_count = build_stream_messages(messages)
+    jn.log.info(string.format("[%s] 语料展开：%d/%d 条消息含 CQ 码，图片描述 %d 张；复读归并：%d → %d 条；过滤低质水贴：%d 条",
+        PLUGIN_NAME, expanded, #messages, sources.vision_used(), #messages, merged_count, filtered_count))
+    local chat_stream = format_chat_stream(stream_messages)
+    for line in chat_stream:gmatch("[^\n]+") do
+        if line:find("【合并转发", 1, true) or line:find("【图片：", 1, true) then
+            jn.log.info("[" .. PLUGIN_NAME .. "] 展开样例: " .. common.clip(line, 400))
+        end
+    end
+    stats.total_chars = #chat_stream
+
+    -- 2.5 预提取开源项目/公众号
+    local precollected, pending_wx, news_cap = nil, {}, 0
+    for _, sc in ipairs(report.parse_sections_config()) do
+        if sc.key == "news" then news_cap = sc.cap; break end
+    end
+    if news_cap ~= 0 then
+        local projs, arts = sources.collect_sources(all_messages)
+        precollected = { projects = projs, articles = arts }
+        if common.da_bool("enable_news", true) then
+            pending_wx = enrich.prepare_article_fetch(arts, 12)
+        end
+    end
+
+    local function after_wx_fetched()
+        local persona_prompt = get_bot_persona_prompt()
+        local function proceed_main_llm()
+            run_main_llm_with_fallback(group_id, stream_messages, stats, persona_prompt, function(analysis_data, err, est_tokens, active_model_desc)
+                if err or not analysis_data then
+                    jn.log.error("[" .. PLUGIN_NAME .. "] LLM 分析失败: " .. tostring(err))
+                    complete(false, "LLM 调用失败: " .. tostring(err))
+                    return
+                end
+                local dur_sec = math.max(1, os.difftime(os.time(), start_time))
+                local group_name = "本群"
+                if jn.onebot11.get_group_info then
+                    local ginfo = jn.onebot11.get_group_info(group_id)
+                    if ginfo and ginfo.group_name and ginfo.group_name ~= "" then
+                        group_name = ginfo.group_name
+                    end
+                end
+                report.build_sections_async(
+                    stats, analysis_data, group_name, group_id, dur_sec, est_tokens,
+                    active_model_desc, all_messages, stream_messages, precollected,
+                    function(sections)
+                        local dest_id = send_target_id or group_id
+                        local resolved_private = is_private_target
+                        if resolved_private == nil then
+                            resolved_private = false
+                            if send_target_id and send_target_id ~= group_id then
+                                local in_group = false
+                                if jn.onebot11.get_group_list then
+                                    local groups = jn.onebot11.get_group_list()
+                                    if type(groups) == "table" then
+                                        for _, g in ipairs(groups) do
+                                            if tonumber(g.group_id or g.groupId or 0) == dest_id then
+                                                in_group = true
+                                                break
+                                            end
+                                        end
+                                    end
+                                end
+                                if not in_group and jn.onebot11.get_group_info then
+                                    local gi = jn.onebot11.get_group_info(dest_id)
+                                    if type(gi) == "table" and tonumber(gi.group_id or 0) == dest_id then
+                                        in_group = true
+                                    end
+                                end
+                                if not in_group then resolved_private = true end
+                            end
+                        end
+                        local target_type = resolved_private and "private" or "group"
+                        local sent, nodes = report.send_report(sections, target_type, dest_id)
+                        if not sent or sent == 0 then
+                            jn.log.error(string.format("[%s] 日报发送失败或内容为空 (target=%s:%d)", PLUGIN_NAME, target_type, dest_id))
+                            complete(false, "发送失败")
+                            return
+                        end
+
+                        -- 仅在发回本群的正式日报成功发送后才写入今日已完成（手动私聊/发往测试群不阻断当晚定时发报；失败更不写入）
+                        if (not force) or (dest_id == group_id and not resolved_private) then
+                            mark_group_done(group_id, cur_date)
+                        end
+                        local mode = common.da_string("report_mode", "forward")
+                        if mode == "" then mode = "forward" end
+                        jn.log.info(string.format("[%s] 群 %d 日报已发送到 %s:%d（模式=%s，板块 %d 个，发送 %d 次 / 节点 %d）",
+                            PLUGIN_NAME, group_id, target_type, dest_id, mode, #sections, sent, nodes))
+
+                        pcall(report.persist_report, group_id, dest_id, sections, mode, nodes)
+                        prune_expired_messages()
+                        complete(true, nil)
+                    end
+                )
+            end)
+        end
+
+        if #pending_wx > 0 and enrich.summarize_fetched_articles_async then
+            acquire_provider_slot(common.da_string("text_provider_id", ""))
+            enrich.summarize_fetched_articles_async(pending_wx, proceed_main_llm)
+        else
+            if #pending_wx > 0 then pcall(enrich.summarize_fetched_articles, pending_wx) end
+            proceed_main_llm()
+        end
+    end
+
+    if #pending_wx > 0 and jn.http and jn.http.get_async then
+        state.wx_seq = (state.wx_seq or 0) + 1
+        local job_id = string.format("%d_%d_%d", group_id, state.wx_seq, os.time())
+        local job = {
+            id = job_id,
+            group_id = group_id,
+            pending = pending_wx,
+            remaining = #pending_wx,
+            done = false,
+            run_finish = after_wx_fetched,
+        }
+        state.wx_jobs = state.wx_jobs or {}
+        state.wx_jobs[job_id] = job
+        jn.log.info(string.format("[%s] 群 %d 检测到 %d 篇待补全公众号文章，启动异步抓取...",
+            PLUGIN_NAME, group_id, #pending_wx))
+        for idx, item in ipairs(pending_wx) do
+            local ok_req = pcall(jn.http.get_async, item.url, {
+                action = "da_wx_fetch",
+                job_id = job_id,
+                idx = idx,
+            }, enrich.WX_HEADERS)
+            if not ok_req then
+                item.finished = true
+                item.status = 0
+                job.remaining = job.remaining - 1
+            end
+        end
+        if job.remaining <= 0 then
+            job.done = true
+            state.wx_jobs[job_id] = nil
+            after_wx_fetched()
+            return
+        end
+        if jn.timer and jn.timer.after then
+            jn.timer.after(35, { action = "da_wx_timeout", job_id = job_id })
+        end
+        return
+    end
+
+    after_wx_fetched()
+end
+
+pump_group_queue = function()
+    if state.active_group then
+        local timeout_sec = math.max(30, common.da_num("llm_timeout", 360))
+        if (os.time() - (state.active_started or 0)) > (timeout_sec + 240) then
+            force_release_active_group("超时看门狗解锁")
+        else
+            return
+        end
+    end
+    if not state.group_queue or #state.group_queue == 0 then return end
+    local spec = table.remove(state.group_queue, 1)
+    if spec and spec.group_id then
+        state.queued_gids[spec.group_id] = nil
+    end
+    local ok, perr = pcall(start_group_pipeline, spec, function()
+        if jn.timer and jn.timer.after then
+            jn.timer.after(0.1, { action = "da_group_pump" })
+        else
+            pump_group_queue()
+        end
+    end)
     if not ok then
-        jn.log.error(string.format("[%s] 群 %d 总结执行异常: %s", PLUGIN_NAME, group_id, tostring(res)))
-        return false, tostring(res)
+        jn.log.error(string.format("[%s] 群 %s 启动异步分析异常: %s",
+            PLUGIN_NAME, tostring(spec and spec.group_id), tostring(perr)))
+        force_release_active_group("启动异常清理")
+        pump_group_queue()
     end
-    return res, err_msg
+end
+
+local function query_group_counts_24h(gids)
+    local counts = {}
+    if #gids <= 1 or not (jn.database and jn.database.query) then return counts end
+    local placeholders, args = {}, {}
+    for _, gid in ipairs(gids) do
+        placeholders[#placeholders + 1] = "?"
+        args[#args + 1] = gid
+    end
+    local sql = string.format([[
+        SELECT group_id, COUNT(*) AS cnt FROM %s
+        WHERE group_id IN (%s) AND created_at >= NOW() - INTERVAL '24 hours'
+        GROUP BY group_id
+    ]], TABLE_MESSAGES, table.concat(placeholders, ","))
+    local rows, err = jn.database.query(sql, args)
+    if not err and type(rows) == "table" then
+        for _, r in ipairs(rows) do
+            local gid = tonumber(r.group_id)
+            if gid then counts[gid] = tonumber(r.cnt) or 0 end
+        end
+    end
+    return counts
+end
+
+local function enqueue_groups(specs)
+    if type(specs) ~= "table" or #specs == 0 then return end
+    state.group_queue = state.group_queue or {}
+    state.queued_gids = state.queued_gids or {}
+    state.is_analyzing = state.is_analyzing or {}
+
+    local gids, valid_specs = {}, {}
+    for _, sp in ipairs(specs) do
+        local gid = tonumber(sp.group_id)
+        if gid and not state.is_analyzing[gid] and not state.queued_gids[gid] then
+            sp.group_id = gid
+            gids[#gids + 1] = gid
+            valid_specs[#valid_specs + 1] = sp
+        elseif gid then
+            jn.log.warn(string.format("[%s] 群 %d 已在队列或执行中，跳过重复入队", PLUGIN_NAME, gid))
+        end
+    end
+    if #valid_specs == 0 then return end
+
+    -- 小群优先：消息少的群先分析先发，不被超活跃大群拖死
+    local counts = query_group_counts_24h(gids)
+    table.sort(valid_specs, function(a, b)
+        local ca = counts[a.group_id] or 0
+        local cb = counts[b.group_id] or 0
+        if ca ~= cb then return ca < cb end
+        return a.group_id < b.group_id
+    end)
+
+    for _, sp in ipairs(valid_specs) do
+        state.queued_gids[sp.group_id] = true
+        state.group_queue[#state.group_queue + 1] = sp
+    end
+    if #valid_specs > 1 then
+        local order = {}
+        for _, sp in ipairs(valid_specs) do
+            order[#order + 1] = string.format("%d(%d条)", sp.group_id, counts[sp.group_id] or 0)
+        end
+        jn.log.info(string.format("[%s] 多群任务已入队（小群优先）: %s", PLUGIN_NAME, table.concat(order, " → ")))
+    end
+    pump_group_queue()
 end
 
 -- ============================================================================
@@ -961,9 +1442,16 @@ function run_manual_trigger()
         end
     end
 
+    local specs = {}
     for _, gid in ipairs(target_groups) do
-        do_group_analysis(gid, send_target or gid, is_private, true)
+        specs[#specs + 1] = {
+            group_id = gid,
+            send_target_id = send_target or gid,
+            is_private_target = is_private,
+            force = true,
+        }
     end
+    enqueue_groups(specs)
 
     state.manual_running = false
 end
@@ -984,20 +1472,55 @@ function check_manual_trigger(delay_sec)
     end
 end
 
+function on_chat_response(req_id, content, err)
+    common.dispatch_chat_response(req_id, content, err)
+end
+
+local function schedule_daily_check(delay_sec)
+    if jn.timer and jn.timer.after then
+        pcall(function()
+            state.timer_id = jn.timer.after(delay_sec or 30, { action = "daily_check" })
+        end)
+    end
+end
+
+local function parse_hhmm_minutes(hhmm)
+    local h, m = tostring(hhmm or "23:00"):match("^(%d%d?):(%d%d)$")
+    h, m = tonumber(h), tonumber(m)
+    if not h or not m or h < 0 or h > 23 or m < 0 or m > 59 then return 23 * 60 end
+    return h * 60 + m
+end
+
+common.on_async_panic = function(perr)
+    force_release_active_group("异步回调异常恢复: " .. tostring(perr))
+    pcall(pump_group_queue)
+end
+
 function on_timer_response(req_id, ctx, result, err)
     if err then
         jn.log.warn("[" .. PLUGIN_NAME .. "] 定时器回调发生异常: " .. tostring(err))
+        -- 即使 daily_check 回调报异常，也必须立刻续期，防止心跳死链导致第二天不再触发
+        if type(ctx) == "table" and ctx.action == "daily_check" then
+            schedule_daily_check(30)
+        end
         return
     end
     if not ctx or type(ctx) ~= "table" then return end
+    if common.handle_llm_timer(ctx) then return end
 
     if ctx.action == "manual_trigger" then
         jn.log.info("[" .. PLUGIN_NAME .. "] 异步定时器触发手动总结任务执行...")
-        run_manual_trigger()
+        local ok, merr = pcall(run_manual_trigger)
+        if not ok then
+            jn.log.error("[" .. PLUGIN_NAME .. "] 手动总结任务异常: " .. tostring(merr))
+            state.manual_running = false
+        end
     elseif ctx.action == "daily_check" then
         check_daily_timer()
+    elseif ctx.action == "da_group_pump" then
+        pcall(pump_group_queue)
     elseif ctx.action == "report_send_pump" then
-        report.pump_send_queue()
+        pcall(report.pump_send_queue)
     elseif ctx.action == "da_wx_timeout" then
         local job = state.wx_jobs and state.wx_jobs[ctx.job_id]
         if job and not job.done then
@@ -1005,7 +1528,11 @@ function on_timer_response(req_id, ctx, result, err)
                 PLUGIN_NAME, job.group_id))
             job.done = true
             state.wx_jobs[job.id] = nil
-            job.run_finish()
+            local ok, ferr = pcall(job.run_finish)
+            if not ok then
+                force_release_active_group("公众号超时后续异常: " .. tostring(ferr))
+                pcall(pump_group_queue)
+            end
         end
     end
 end
@@ -1029,7 +1556,11 @@ function on_http_response(req_id, ctx, result, err)
     if job.remaining <= 0 then
         job.done = true
         state.wx_jobs[job.id] = nil
-        job.run_finish()
+        local ok, ferr = pcall(job.run_finish)
+        if not ok then
+            force_release_active_group("公众号回调后续异常: " .. tostring(ferr))
+            pcall(pump_group_queue)
+        end
     end
 end
 
@@ -1046,37 +1577,59 @@ function on_cronjob(event)
 
     if specific_group and specific_group > 0 then
         jn.log.info(string.format("[%s] CronJob 指定目标群 %d，执行总结...", PLUGIN_NAME, specific_group))
-        do_group_analysis(specific_group, specific_group, false)
+        enqueue_groups({ { group_id = specific_group, send_target_id = specific_group, is_private_target = false, force = false } })
         return
     end
 
+    local specs = {}
     for gid, _ in pairs(get_target_groups()) do
-        do_group_analysis(gid, gid, false)
+        specs[#specs + 1] = { group_id = gid, send_target_id = gid, is_private_target = false, force = false }
     end
+    enqueue_groups(specs)
 end
 
 function check_daily_timer()
-    local now_time = os.date("*t")
-    local cur_date = os.date("%Y-%m-%d")
-    local cur_hm = string.format("%02d:%02d", now_time.hour, now_time.min)
+    -- 第一步先续期下一次 30s 巡检，确保任何内部异常都不会让第二天定时心跳死链
+    schedule_daily_check(30)
 
-    local auto_time = common.da_string("auto_analysis_time", "23:00")
-    if auto_time == "" then auto_time = "23:00" end
-    if #auto_time == 4 then auto_time = "0" .. auto_time end
-
-    if cur_hm == auto_time and state.last_daily_date ~= cur_date then
-        state.last_daily_date = cur_date
-        jn.log.info(string.format("[%s] 内部定时器触发每日总结 (时间: %s)...", PLUGIN_NAME, cur_hm))
-        for gid, _ in pairs(get_target_groups()) do
-            do_group_analysis(gid, gid, false)
+    -- 看门狗巡检：防止个别群异步回调异常丢失后长期锁死队列
+    if state.active_group then
+        local timeout_sec = math.max(30, common.da_num("llm_timeout", 360))
+        if (os.time() - (state.active_started or 0)) > (timeout_sec + 240) then
+            force_release_active_group("巡检看门狗超时解锁")
+            pcall(pump_group_queue)
         end
     end
 
-    check_manual_trigger()
+    local now_time = os.date("*t")
+    local cur_date = os.date("%Y-%m-%d")
+    local now_min = (tonumber(now_time.hour) or 0) * 60 + (tonumber(now_time.min) or 0)
 
-    if jn.timer and jn.timer.after then
-        state.timer_id = jn.timer.after(30, { action = "daily_check" })
+    local auto_time = common.da_string("auto_analysis_time", "23:00")
+    if auto_time == "" then auto_time = "23:00" end
+    local target_min = parse_hhmm_minutes(auto_time)
+
+    -- 允许 15 分钟补发窗口（含跨零点差值），避免定时偏移几十秒跳过整天
+    local delta = now_min - target_min
+    if delta < 0 then delta = delta + 1440 end
+    local in_window = (delta >= 0 and delta <= 15)
+    local trigger_date = (now_min < target_min) and os.date("%Y-%m-%d", os.time() - 86400) or cur_date
+
+    if in_window and state.last_daily_date ~= trigger_date then
+        state.last_daily_date = trigger_date
+        jn.log.info(string.format("[%s] 内部定时器触发每日总结 (当前 %02d:%02d, 设定 %s)...",
+            PLUGIN_NAME, now_time.hour, now_time.min, auto_time))
+        local specs = {}
+        for gid, _ in pairs(get_target_groups()) do
+            specs[#specs + 1] = { group_id = gid, send_target_id = gid, is_private_target = false, force = false }
+        end
+        local ok, qerr = pcall(enqueue_groups, specs)
+        if not ok then
+            jn.log.error("[" .. PLUGIN_NAME .. "] 定时入队异常: " .. tostring(qerr))
+        end
     end
+
+    pcall(check_manual_trigger)
 end
 
 -- ============================================================================
@@ -1084,7 +1637,4 @@ end
 -- ============================================================================
 init_db()
 check_manual_trigger(5)
-
-if jn.timer and jn.timer.after then
-    state.timer_id = jn.timer.after(10, { action = "daily_check" })
-end
+schedule_daily_check(10)

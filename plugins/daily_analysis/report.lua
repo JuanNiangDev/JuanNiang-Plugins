@@ -62,20 +62,30 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         return out
     end
 
-    local function llm_json(system, user)
-        if not (jn.llm and jn.llm.chat) then return nil, "无 LLM" end
-        local timeout = math.max(30, common.da_num("llm_timeout", 300))
-        local resp, err = jn.llm.chat({
+    local function llm_json_async(system, user, on_done)
+        if not (jn.llm and (jn.llm.chat_async or jn.llm.chat)) then
+            on_done(nil, "无 LLM")
+            return
+        end
+        local timeout = math.max(30, common.da_num("llm_timeout", 360))
+        common.llm_chat_async({
             { role = "system", content = system },
             { role = "user", content = user },
-        }, { timeout = timeout })
-        if err or not resp or resp == "" then return nil, tostring(err or "空响应") end
-        local obj, perr = common.decode_llm_json(resp, "新闻合并")
-        if not obj then return nil, perr or "JSON 解析失败" end
-        return obj, nil
+        }, { timeout = timeout }, function(resp, err)
+            if err or not resp or resp == "" then
+                on_done(nil, tostring(err or "空响应"))
+                return
+            end
+            local obj, perr = common.decode_llm_json(resp, "新闻合并")
+            if not obj then
+                on_done(nil, perr or "JSON 解析失败")
+                return
+            end
+            on_done(obj, nil)
+        end)
     end
 
-    local function merge_news(articles, juya_items, max_items)
+    local function prepare_news_merge(articles, juya_items, max_items)
         local wechat, juya_list, dropped = {}, {}, 0
         for i, a in ipairs(articles) do
             if i > 40 then break end
@@ -102,7 +112,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
                 category = it.category, links = links,
             }
         end
-        if #wechat == 0 and #juya_list == 0 then return {} end
+        if #wechat == 0 and #juya_list == 0 then return nil, {}, {} end
 
         local function fallback_list()
             local out = {}
@@ -119,7 +129,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         end
 
         if not common.da_bool("news_event_merge", true) then
-            return fallback_list()
+            return nil, fallback_list(), fallback_list
         end
 
         local payload = jn.json.encode({ wechat = wechat, juya = juya_list })
@@ -136,7 +146,10 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
 2. 无法判断为同一事件的，各自独立成条；
 3. 最多 %d 条，按重要性排序；
 4. 标题不得与摘要重复套话，不要输出除 JSON 以外的任何内容。]], max_items)
-        local obj, err = llm_json(system, payload)
+        return { system = system, payload = payload }, nil, fallback_list
+    end
+
+    local function parse_merged_news_obj(obj, err, fallback_list)
         if not obj or type(obj.events) ~= "table" then
             jn.log.warn("[" .. common.PLUGIN_NAME .. "] 新闻合并失败，降级为顺序罗列: " .. tostring(err))
             return fallback_list()
@@ -155,6 +168,17 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
             end
         end
         return out
+    end
+
+    local function merge_news_async(articles, juya_items, max_items, on_done)
+        local req, immediate, fallback_list = prepare_news_merge(articles, juya_items, max_items)
+        if not req then
+            on_done(immediate or {})
+            return
+        end
+        llm_json_async(req.system, req.payload, function(obj, err)
+            on_done(parse_merged_news_obj(obj, err, fallback_list))
+        end)
     end
 
     local function fetch_juya_items()
@@ -192,24 +216,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         return {}
     end
 
-    function M.build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, precollected)
-        local projects, articles
-        if type(precollected) == "table" and precollected.projects and precollected.articles then
-            projects, articles = precollected.projects, precollected.articles
-        else
-            projects, articles = sources.collect_sources(messages or {})
-        end
-        if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects) end
-
-        local sec_configs = M.parse_sections_config()
-        local juya_items = {}
-        for _, s in ipairs(sec_configs) do
-            if s.key == "news" and s.cap ~= 0 then
-                juya_items = fetch_juya_items()
-                break
-            end
-        end
-
+    local function assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, news_items)
         local sections = {}
         local function emit(key, title, cap, items)
             if cap == 0 then return end
@@ -301,9 +308,8 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
                 end
                 if #items == 0 then items[1] = "今日没有检测到开源项目 / 模型仓库链接" end
             elseif s.key == "news" then
-                local lim = (s.cap > 0) and s.cap or ((s.cap == -1) and 200 or 70)
                 local n = 0
-                for _, e in ipairs(merge_news(articles, juya_items, lim)) do
+                for _, e in ipairs(news_items or {}) do
                     n = n + 1
                     local parts = { num_cn(n) .. "、" .. e.title }
                     if e.summary and e.summary ~= "" then parts[#parts + 1] = e.summary end
@@ -317,6 +323,82 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
             emit(s.key, s.title, s.cap, items)
         end
         return sections
+    end
+
+    function M.build_sections_async(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, precollected, on_done)
+        on_done = on_done or function() end
+        local projects, articles
+        if type(precollected) == "table" and precollected.projects and precollected.articles then
+            projects, articles = precollected.projects, precollected.articles
+        else
+            projects, articles = sources.collect_sources(messages or {})
+        end
+
+        local function after_repos()
+            local sec_configs = M.parse_sections_config()
+            local need_news, news_lim = false, 70
+            for _, s in ipairs(sec_configs) do
+                if s.key == "news" and s.cap ~= 0 then
+                    need_news = true
+                    news_lim = (s.cap > 0) and s.cap or ((s.cap == -1) and 200 or 70)
+                    break
+                end
+            end
+            if not need_news then
+                on_done(assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, {}))
+                return
+            end
+            local juya_items = fetch_juya_items()
+            merge_news_async(articles, juya_items, news_lim, function(news_items)
+                on_done(assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, news_items))
+            end)
+        end
+
+        if common.da_bool("enable_projects", true) and enrich.enrich_repos_async then
+            enrich.enrich_repos_async(projects, after_repos)
+        else
+            if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects) end
+            after_repos()
+        end
+    end
+
+    function M.build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, precollected)
+        local projects, articles
+        if type(precollected) == "table" and precollected.projects and precollected.articles then
+            projects, articles = precollected.projects, precollected.articles
+        else
+            projects, articles = sources.collect_sources(messages or {})
+        end
+        if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects) end
+
+        local sec_configs = M.parse_sections_config()
+        local juya_items, news_items, news_lim = {}, {}, 70
+        local need_news = false
+        for _, s in ipairs(sec_configs) do
+            if s.key == "news" and s.cap ~= 0 then
+                need_news = true
+                news_lim = (s.cap > 0) and s.cap or ((s.cap == -1) and 200 or 70)
+                juya_items = fetch_juya_items()
+                break
+            end
+        end
+        if need_news then
+            local req, immediate, fallback_list = prepare_news_merge(articles, juya_items, news_lim)
+            if not req then
+                news_items = immediate or {}
+            elseif jn.llm and jn.llm.chat then
+                local timeout = math.max(30, common.da_num("llm_timeout", 360))
+                local resp, err = jn.llm.chat({
+                    { role = "system", content = req.system },
+                    { role = "user", content = req.payload },
+                }, { timeout = timeout })
+                local obj = (not err and resp and resp ~= "") and common.decode_llm_json(resp, "新闻合并") or nil
+                news_items = parse_merged_news_obj(obj, err, fallback_list)
+            else
+                news_items = fallback_list()
+            end
+        end
+        return assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, news_items)
     end
 
     local function item_text(item)
