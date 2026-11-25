@@ -103,6 +103,7 @@ return function(jn, common)
             "3. 只能依据给定原文与回源时间线客观翻译与总结，禁止编造具体倍数、时间点、套餐范围或故障原因。",
             "4. 若当前已识别来源为 grok，但原文明确提到 'Grok Bot' 或发自 @bot，请将 product 设为 grok_bot。",
             "5. is_major 仅在「全员或全付费用户直接重置 (direct_reset)」「发放重置卡 (banked_reset)」或「影响核心对话/API 的重大宕机 (Major Outage)」时为 true；预告、规则变动、轻度局部异常、已恢复设为 false。",
+            "6. 【强制使用 UTC+8 北京时间】原文若包含 UTC / GMT / PST / EST 等非东八区时刻，在 title、objective_summary、persona_comment 中提及具体时间点时必须换算为北京时间（UTC+8，如 01:10 UTC → 09:10），严禁直接照抄未换算的 UTC 原文时间；请优先采用下方已换算为 UTC+8 的时间线。",
             len_rule,
         }
 
@@ -127,7 +128,7 @@ return function(jn, common)
             "链接: " .. tostring(cand.source_url or ""),
         }
         if cand.timeline_text and cand.timeline_text ~= "" then
-            parts[#parts + 1] = "详情页回源状态时间线（按时间正序）:\n" .. common.clip(common.strip_wm(cand.timeline_text), 2400)
+            parts[#parts + 1] = "详情页回源状态时间线（已换算为 UTC+8 北京时间，按时间正序）:\n" .. common.clip(common.strip_wm(cand.timeline_text), 2400)
         end
         if cand.lookback_context and cand.lookback_context ~= "" then
             parts[#parts + 1] = string.format("最近 %d 分钟同产品已有记录:\n%s", lookback_min, common.clip(common.strip_wm(cand.lookback_context), 1200))
