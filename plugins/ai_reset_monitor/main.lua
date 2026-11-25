@@ -230,8 +230,8 @@ local function dispatch_event_to_groups(batch, ev)
 
     local default_style = common.norm_style(common.cfg_string("summary_style", "both"), "both")
 
-    -- 手动回放测试：仅发送给 test_group（支持 group / private:<qq>）
-    if batch.is_manual and batch.replay_hours > 0 then
+    -- 手动测试 / 回放：仅发送给 test_group（支持 group / private:<qq>）
+    if batch.is_manual then
         local gid = batch.manual_target_gid
         if gid and gid > 0 then
             local style = default_style
@@ -284,10 +284,118 @@ local function dispatch_event_to_groups(batch, ev)
 end
 
 local start_poll
+local submit_candidate_to_llm
+
+local function attach_lookback_context(cand, lookback_sec, now_ts)
+    if not cand.product or cand.product == "" then return end
+    local recent = store.recent_for_product(cand.product, lookback_sec, now_ts)
+    if not recent or #recent == 0 then return end
+    local lines = {}
+    for _, r in ipairs(recent) do
+        if r.event_key ~= cand.event_key then
+            local extra = ""
+            if type(r.payload_json) == "string" and r.payload_json ~= "" then
+                local ok_p, pj = pcall(jn.json.decode, r.payload_json)
+                if ok_p and type(pj) == "table" and pj.objective_summary and pj.objective_summary ~= "" then
+                    extra = " | " .. common.clip(pj.objective_summary, 120)
+                end
+            end
+            lines[#lines + 1] = string.format("[%s] (%s) %s%s",
+                common.format_cst(tonumber(r.announced_ts) or 0),
+                tostring(r.event_kind or ""),
+                common.clip(tostring(r.title or ""), 60),
+                extra)
+        end
+    end
+    if #lines > 0 then
+        cand.lookback_context = table.concat(lines, "\n")
+    end
+end
+
+local function enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
+    attach_lookback_context(cand, lookback_sec, now_ts)
+    local f_proxy = common.cfg_string("foreign_proxy", "")
+    if cand.needs_x_lookup and cand.x_status_id then
+        batch.pending_http = batch.pending_http + 1
+        local api_u = "https://api.fxtwitter.com/status/" .. tostring(cand.x_status_id)
+        jn.http.get_async(api_u, {
+            proxy = f_proxy,
+            headers = { ["User-Agent"] = common.UA },
+            ctx = { batch_id = batch.id, stage = "verify_x", cand = cand },
+        })
+    elseif cand.needs_status_lookup and cand.status_detail_url then
+        batch.pending_http = batch.pending_http + 1
+        jn.http.get_async(cand.status_detail_url, {
+            proxy = cand.status_proxy or "",
+            headers = {
+                ["User-Agent"] = common.UA,
+                ["Accept"] = "application/json, text/html, */*;q=0.8",
+            },
+            ctx = { batch_id = batch.id, stage = "verify_status", cand = cand, lookback_sec = lookback_sec },
+        })
+    else
+        submit_candidate_to_llm(batch, cand)
+    end
+end
+
+local function pick_manual_sample_candidates(batch, limit)
+    local kinds_ok = enabled_event_kinds()
+    local pool = {}
+    for _, c in pairs(batch.latest_by_prod or {}) do
+        if c and not c.skip_unless_state_changed then
+            pool[#pool + 1] = c
+        end
+    end
+    table.sort(pool, function(a, b)
+        local oka = kinds_ok[a.event_kind] and 1 or 0
+        local okb = kinds_ok[b.event_kind] and 1 or 0
+        if oka ~= okb then return oka > okb end
+        return (a.announced_ts or 0) > (b.announced_ts or 0)
+    end)
+
+    local picked, used = {}, {}
+    local picked_status, picked_other = false, false
+    for idx, c in ipairs(pool) do
+        if #picked >= limit then break end
+        local is_st = (c.event_kind == "status_incident" or c.event_kind == "status_resolved")
+        if (is_st and not picked_status) or ((not is_st) and not picked_other) then
+            picked[#picked + 1] = c
+            used[idx] = true
+            if is_st then picked_status = true else picked_other = true end
+        end
+    end
+    for idx, c in ipairs(pool) do
+        if #picked >= limit then break end
+        if not used[idx] then
+            picked[#picked + 1] = c
+        end
+    end
+    return picked
+end
 
 local function finish_batch_if_ready(batch)
     if not batch or batch.finished then return end
     if batch.pending_http > 0 or batch.pending_llm > 0 then return end
+
+    if batch.is_manual and (batch.replay_hours or 0) <= 0 and not batch.manual_sample_dispatched then
+        batch.manual_sample_dispatched = true
+        local gid = batch.manual_target_gid
+        if gid and gid > 0 then
+            local samples = pick_manual_sample_candidates(batch, 2)
+            if #samples > 0 then
+                local lookback_sec = math.max(5, common.cfg_num("lookback_minutes", 60)) * 60
+                local now_ts = os.time()
+                for _, cand in ipairs(samples) do
+                    enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
+                end
+                if batch.pending_http > 0 or batch.pending_llm > 0 then
+                    return
+                end
+            else
+                enqueue_send(gid, "🩺 暂未抓到可总结的动态样本" .. common.WATERMARK, batch.manual_is_private)
+            end
+        end
+    end
 
     batch.finished = true
     state.batches[batch.id] = nil
@@ -305,9 +413,8 @@ local function finish_batch_if_ready(batch)
                 jn.log.info(string.format("[%s] 手动回放测试完成 target=%s:%d replayed=%d",
                     common.PLUGIN_NAME, batch.manual_is_private and "private" or "group", gid, batch.replayed_count or 0))
             else
-                enqueue_send(gid, build_diagnostic_summary(batch), batch.manual_is_private)
-                jn.log.info(string.format("[%s] 手动诊断报告已加入发送队列 target=%s:%d",
-                    common.PLUGIN_NAME, batch.manual_is_private and "private" or "group", gid))
+                jn.log.info(string.format("[%s] 手动抽样总结已加入发送队列 target=%s:%d sent=%d",
+                    common.PLUGIN_NAME, batch.manual_is_private and "private" or "group", gid, batch.replayed_count or 0))
             end
         else
             jn.log.warn("[" .. common.PLUGIN_NAME .. "] manual_trigger 完成，但未配置 test_group 或 group_subscriptions")
@@ -459,9 +566,7 @@ local function pump_llm_queue(waited)
     state.llm_pending[req_id] = task
 end
 
-local function submit_candidate_to_llm(batch, cand)
-    if batch.is_manual and (batch.replay_hours or 0) <= 0 then return end
-
+submit_candidate_to_llm = function(batch, cand)
     if cand.skip_unless_state_changed then
         if batch.is_manual then return end
         -- Entireweb 状态（normal / outage）：仅在状态发生真实切换时通报，正常时写基线不推送
@@ -538,58 +643,6 @@ local function process_source_candidates(batch, src, body)
     local lookback_sec = math.max(5, common.cfg_num("lookback_minutes", 60)) * 60
     local now_ts = os.time()
 
-    local function attach_lookback_context(cand)
-        if not cand.product or cand.product == "" then return end
-        local recent = store.recent_for_product(cand.product, lookback_sec, now_ts)
-        if not recent or #recent == 0 then return end
-        local lines = {}
-        for _, r in ipairs(recent) do
-            if r.event_key ~= cand.event_key then
-                local extra = ""
-                if type(r.payload_json) == "string" and r.payload_json ~= "" then
-                    local ok_p, pj = pcall(jn.json.decode, r.payload_json)
-                    if ok_p and type(pj) == "table" and pj.objective_summary and pj.objective_summary ~= "" then
-                        extra = " | " .. common.clip(pj.objective_summary, 120)
-                    end
-                end
-                lines[#lines + 1] = string.format("[%s] (%s) %s%s",
-                    common.format_cst(tonumber(r.announced_ts) or 0),
-                    tostring(r.event_kind or ""),
-                    common.clip(tostring(r.title or ""), 60),
-                    extra)
-            end
-        end
-        if #lines > 0 then
-            cand.lookback_context = table.concat(lines, "\n")
-        end
-    end
-
-    local function enqueue_or_verify_candidate(cand)
-        attach_lookback_context(cand)
-        local f_proxy = common.cfg_string("foreign_proxy", "")
-        if cand.needs_x_lookup and cand.x_status_id then
-            batch.pending_http = batch.pending_http + 1
-            local api_u = "https://api.fxtwitter.com/status/" .. tostring(cand.x_status_id)
-            jn.http.get_async(api_u, {
-                proxy = f_proxy,
-                headers = { ["User-Agent"] = common.UA },
-                ctx = { batch_id = batch.id, stage = "verify_x", cand = cand },
-            })
-        elseif cand.needs_status_lookup and cand.status_detail_url then
-            batch.pending_http = batch.pending_http + 1
-            jn.http.get_async(cand.status_detail_url, {
-                proxy = cand.status_proxy or "",
-                headers = {
-                    ["User-Agent"] = common.UA,
-                    ["Accept"] = "application/json, text/html, */*;q=0.8",
-                },
-                ctx = { batch_id = batch.id, stage = "verify_status", cand = cand, lookback_sec = lookback_sec },
-            })
-        else
-            submit_candidate_to_llm(batch, cand)
-        end
-    end
-
     for _, cand in ipairs(candidates) do
         local slot_key = nil
         -- 分钟级产品+时间戳签名，用于跨源去重（fxtwitter vs agyresets vs whenaireset）
@@ -607,7 +660,7 @@ local function process_source_candidates(batch, src, body)
 
             if replay_mode then
                 if (cand.announced_ts or 0) >= replay_cutoff then
-                    enqueue_or_verify_candidate(cand)
+                    enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
                 end
             elseif skip_cold then
                 -- 冷启动首轮：写入基线标记，防止旧帖子全部在群里刷屏
@@ -617,7 +670,7 @@ local function process_source_candidates(batch, src, body)
                 if (cand.announced_ts or 0) > 0 and (now_ts - cand.announced_ts > lookback_sec) then
                     batch.baseline_marks[#batch.baseline_marks + 1] = cand
                 else
-                    enqueue_or_verify_candidate(cand)
+                    enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
                 end
             end
         end

@@ -21,7 +21,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         if type(list) ~= "table" or #list == 0 then
             list = {
                 "overview||1", "top||1", "topics||-1", "quotes||-1", "titles||6",
-                "critique||4", "projects||20", "ai_monitor||1", "news||70", "stats||1",
+                "critique||4", "projects||20", "ai_monitor||20", "news||70", "stats||1",
             }
         end
         local out = {}
@@ -335,7 +335,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
             return { "过去 24 小时各监测平台暂无额度重置或官方服务故障记录" }
         end
 
-        local lines = {}
+        local items = {}
         for _, r in ipairs(rows) do
             local plabel = AI_PRODUCT_LABELS[r.product] or tostring(r.product or "AI服务")
             local klabel = AI_KIND_LABELS[r.event_kind] or tostring(r.event_kind or "动态")
@@ -349,17 +349,17 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
                 end
             end
             local ttl = common.strip_wm(tostring(r.title or ""))
-            local block = { string.format("• [%s] %s · %s", tstr, plabel, klabel) }
-            if ttl ~= "" then block[#block + 1] = "  " .. common.clip(ttl, 80) end
+            local block = { string.format("[%s] %s · %s", tstr, plabel, klabel) }
+            if ttl ~= "" then block[#block + 1] = common.clip(ttl, 80) end
             if obj_sum ~= "" and obj_sum ~= ttl then
-                block[#block + 1] = "  " .. common.clip(obj_sum, 160)
+                block[#block + 1] = common.clip(obj_sum, 160)
             end
             if r.source_url and r.source_url ~= "" then
-                block[#block + 1] = "  " .. tostring(r.source_url)
+                block[#block + 1] = tostring(r.source_url)
             end
-            lines[#lines + 1] = table.concat(block, "\n")
+            items[#items + 1] = table.concat(block, "\n")
         end
-        return { table.concat(lines, "\n\n") }
+        return items
     end
 
     local function assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, news_items)
@@ -396,9 +396,12 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
                 items[1] = string.format("🤖 总结模型: %s\n⏱️ 分析耗时: %.1f 秒\n📝 输入字符: ~%d 字\n⚡ 消耗 Token: ~%d tokens",
                     model_name, dur_sec, stats.total_chars or 0, est_tokens)
             elseif s.key == "topics" and type(analysis_data.topics) == "table" then
+                local function strip_media_tags(str)
+                    return (tostring(str or ""):gsub("%[图#%d+%]", "该图片"):gsub("%[转发#%d+%]", "该聊天记录"))
+                end
                 for idx, t in ipairs(analysis_data.topics) do
                     local part = (t.participants and t.participants ~= "") and ("参与者: " .. t.participants .. "\n") or ""
-                    items[#items + 1] = string.format("【%d】%s\n%s%s", idx, t.title or "核心话题", part, t.summary or "")
+                    items[#items + 1] = string.format("【%d】%s\n%s%s", idx, strip_media_tags(t.title or "核心话题"), part, strip_media_tags(t.summary or ""))
                 end
             elseif s.key == "quotes" and type(analysis_data.golden_quotes) == "table" then
                 local seen, n = {}, 0
@@ -410,7 +413,8 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
                     if #content >= 4 and not seen[dedup] then
                         seen[dedup] = true
                         n = n + 1
-                        local reason = (q.reason and q.reason ~= "") and ("\n💡 甄选理由: " .. q.reason) or ""
+                        local rtxt = tostring(q.reason or ""):gsub("%[图#%d+%]", "该图片"):gsub("%[转发#%d+%]", "该聊天记录")
+                        local reason = (rtxt ~= "") and ("\n💡 甄选理由: " .. rtxt) or ""
                         items[#items + 1] = string.format("📜 金句 #%d · %s:\n「\n%s\n」%s", n, q.sender or "群友", content, reason)
                     end
                 end

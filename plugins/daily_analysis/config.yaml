@@ -157,7 +157,7 @@ configs:
       - "titles|👑 群友特色头衔 / 画像|6"
       - "critique|🎭 聊天质量分析与人设点评|4"
       - "projects|🧪 开源项目列表|20"
-      - "ai_monitor|🤖 今日 AI 重置与官方状态监控|1"
+      - "ai_monitor|🤖 今日 AI 重置与官方状态监控|20"
       - "news|📰 今日新闻|70"
       - "stats|📈 本次分析统计|1"
 

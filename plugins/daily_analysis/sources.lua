@@ -512,11 +512,7 @@ return function(jn, common)
             local clean_line = strip_wm(line):gsub("%[CQ:[^%]]*%]", ""):gsub("\r", "")
             local trimmed = clean_line:gsub("^%s+", ""):gsub("%s+$", "")
 
-            if trimmed == "" then
-                if cur_has_url then
-                    push_chunk()
-                end
-            else
+            if trimmed ~= "" then
                 if line_wm and cur_has_url then
                     push_chunk()
                 end
