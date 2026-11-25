@@ -827,7 +827,56 @@ local function slice_messages(msgs, s_idx, e_idx)
     return out
 end
 
-local function run_map_slice_bisect(group_id, msgs, start_idx, label, total_parts, persona_prompt, llm_timeout, depth, budget, on_slice_done)
+local function split_messages_evenly(msgs, start_idx, parts_count)
+    local n = #msgs
+    local max_slices = math.max(1, math.floor(n / 2))
+    local actual_parts = math.max(1, math.min(parts_count, max_slices))
+    local sub_slices = {}
+    local base_len = math.floor(n / actual_parts)
+    local rem = n % actual_parts
+    local offset = 1
+    for p = 1, actual_parts do
+        local len = base_len + (p <= rem and 1 or 0)
+        if len > 0 then
+            sub_slices[#sub_slices + 1] = {
+                start_idx = start_idx + offset - 1,
+                msgs = slice_messages(msgs, offset, offset + len - 1),
+            }
+            offset = offset + len
+        end
+    end
+    return sub_slices
+end
+
+local function run_with_concurrency(items, concurrency, worker_fn, on_all_done)
+    local n = #items
+    if n == 0 then
+        on_all_done({})
+        return
+    end
+    local results, next_i, in_flight, finished, done_called = {}, 1, 0, 0, false
+    local function dispatch_next()
+        while in_flight < concurrency and next_i <= n and not done_called do
+            local idx = next_i
+            next_i = next_i + 1
+            in_flight = in_flight + 1
+            worker_fn(idx, items[idx], function(res)
+                in_flight = in_flight - 1
+                finished = finished + 1
+                results[idx] = res
+                if finished >= n and not done_called then
+                    done_called = true
+                    on_all_done(results)
+                else
+                    dispatch_next()
+                end
+            end)
+        end
+    end
+    dispatch_next()
+end
+
+local function run_map_slice_resplit(group_id, msgs, start_idx, label, total_parts, persona_prompt, llm_timeout, depth, budget, resplit_parts, on_slice_done)
     local c_stream = format_chat_stream(msgs, start_idx)
     local mprompt = build_map_prompt(c_stream, label, total_parts, persona_prompt)
     local io_chars = #mprompt
@@ -846,19 +895,29 @@ local function run_map_slice_bisect(group_id, msgs, start_idx, label, total_part
             err = perr or "JSON 解析失败"
         end
 
-        if is_moderation_rejection(resp, err) and depth < 3 and #msgs >= 20 and budget.remaining > 0 then
+        local split_n = math.min(32, math.floor(resplit_parts or 8))
+        if is_moderation_rejection(resp, err) and depth < 1 and split_n >= 2 and #msgs >= 8 and budget.remaining > 0 then
             budget.remaining = budget.remaining - 1
-            local mid = math.floor(#msgs / 2)
-            local left_msgs = slice_messages(msgs, 1, mid)
-            local right_msgs = slice_messages(msgs, mid + 1, #msgs)
-            jn.log.warn(string.format("[%s] 群 %d Map-%s 命中敏感审查 (%d 条, depth=%d)，自动二分拆片挽救...",
-                PLUGIN_NAME, group_id, tostring(label), #msgs, depth))
-            run_map_slice_bisect(group_id, left_msgs, start_idx, tostring(label) .. "L", total_parts, persona_prompt, llm_timeout, depth + 1, budget, function(l_obj, l_err, l_chars)
-                run_map_slice_bisect(group_id, right_msgs, start_idx + mid, tostring(label) .. "R", total_parts, persona_prompt, llm_timeout, depth + 1, budget, function(r_obj, r_err, r_chars)
-                    local merged = merge_map_subresults(l_obj, r_obj)
-                    local final_err = merged and nil or tostring(r_err or l_err or "二分拆片均未成功")
-                    on_slice_done(merged, final_err, io_chars + (l_chars or 0) + (r_chars or 0))
+            local sub_slices = split_messages_evenly(msgs, start_idx, split_n)
+            jn.log.warn(string.format("[%s] 群 %d Map-%s 命中敏感审查 (%d 条)，二次拆分为 %d 片挽救...",
+                PLUGIN_NAME, group_id, tostring(label), #msgs, #sub_slices))
+            run_with_concurrency(sub_slices, 2, function(k, sub, cb)
+                local sub_label = string.format("%s.%d", tostring(label), k)
+                run_map_slice_resplit(group_id, sub.msgs, sub.start_idx, sub_label, total_parts, persona_prompt, llm_timeout, depth + 1, budget, resplit_parts, function(s_obj, s_err, s_chars)
+                    cb({ data = s_obj, err = s_err, chars = s_chars or 0 })
                 end)
+            end, function(sub_results)
+                local merged, last_err, sub_chars = nil, nil, io_chars
+                for _, sr in ipairs(sub_results) do
+                    sub_chars = sub_chars + (sr.chars or 0)
+                    if sr.data then
+                        merged = merge_map_subresults(merged, sr.data)
+                    elseif sr.err then
+                        last_err = sr.err
+                    end
+                end
+                local final_err = merged and nil or tostring(last_err or "二次拆片均未成功")
+                on_slice_done(merged, final_err, sub_chars)
             end)
             return
         end
@@ -869,8 +928,8 @@ local function run_map_slice_bisect(group_id, msgs, start_idx, label, total_part
     end)
 end
 
-local function run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, llm_timeout, chunk_chars, model_desc, on_done)
-    local chunks = partition_stream_chunks(stream_messages, chunk_chars, 8)
+local function run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, llm_timeout, chunk_chars, model_desc, on_done, forced_chunks, initial_depth)
+    local chunks = forced_chunks or partition_stream_chunks(stream_messages, chunk_chars, 8)
     if #chunks <= 1 then
         local stream_txt = format_chat_stream(stream_messages)
         local prompt = build_analysis_prompt(stream_txt, stats, persona_prompt)
@@ -895,21 +954,23 @@ local function run_map_reduce_async(group_id, stream_messages, stats, persona_pr
         return
     end
 
-    jn.log.info(string.format("[%s] 群 %d 语料超阈值，启动 Map-Reduce 分段分析（%d 段，并发 2，模型: %s）...",
-        PLUGIN_NAME, group_id, #chunks, model_desc))
-    local results, next_i, in_flight, finished = {}, 1, 0, 0
-    local total_io_chars = 0
-    local aborted = false
-    local bisect_budget = { remaining = 6 }
+    local resplit_parts = math.min(32, math.floor(common.da_num("map_resplit_count", 8)))
+    jn.log.info(string.format("[%s] 群 %d %s，启动 Map-Reduce 分段分析（%d 段，并发 2，模型: %s）...",
+        PLUGIN_NAME, group_id, forced_chunks and "二次拆片挽救" or "语料超阈值", #chunks, model_desc))
+    local resplit_budget = { remaining = math.max(2, #chunks) }
+    local start_depth = initial_depth or 0
 
-    local function maybe_reduce()
-        if finished < #chunks or aborted then return end
-        local ok_count = 0
+    run_with_concurrency(chunks, 2, function(idx, c, cb)
+        run_map_slice_resplit(group_id, c.msgs, c.start_idx, idx, #chunks, persona_prompt, llm_timeout, start_depth, resplit_budget, resplit_parts, function(obj, err, io_c)
+            cb({ data = obj, err = err, io_chars = io_c or 0 })
+        end)
+    end, function(results)
+        local ok_count, total_io_chars = 0, 0
         for _, r in ipairs(results) do
+            total_io_chars = total_io_chars + (r.io_chars or 0)
             if r.data then ok_count = ok_count + 1 end
         end
         if ok_count == 0 then
-            aborted = true
             on_done(nil, results[1] and results[1].err or "全部分片分析失败", total_io_chars)
             return
         end
@@ -935,28 +996,7 @@ local function run_map_reduce_async(group_id, stream_messages, stats, persona_pr
             end
             on_done(obj, nil, math.floor(total_io_chars / 2))
         end)
-    end
-
-    local function dispatch_next()
-        while in_flight < 2 and next_i <= #chunks do
-            local idx = next_i
-            next_i = next_i + 1
-            in_flight = in_flight + 1
-            local c = chunks[idx]
-            run_map_slice_bisect(group_id, c.msgs, c.start_idx, idx, #chunks, persona_prompt, llm_timeout, 0, bisect_budget, function(obj, err, io_c)
-                in_flight = in_flight - 1
-                finished = finished + 1
-                total_io_chars = total_io_chars + (io_c or 0)
-                results[idx] = { data = obj, err = err }
-                if finished >= #chunks then
-                    maybe_reduce()
-                else
-                    dispatch_next()
-                end
-            end)
-        end
-    end
-    dispatch_next()
+    end)
 end
 
 local function run_main_llm_with_fallback(group_id, stream_messages, stats, persona_prompt, on_done)
@@ -1008,16 +1048,18 @@ local function run_main_llm_with_fallback(group_id, stream_messages, stats, pers
             on_done(data, nil, est_tokens, model_desc)
             return
         end
-        if is_moderation_rejection(nil, err) and #stream_messages >= 20 then
-            local forced_chunk = math.max(1200, math.floor(#format_chat_stream(stream_messages) / 4))
-            jn.log.warn(string.format("[%s] 群 %d 单次请求命中敏感审查，自动切分为 Map-Reduce 二分挽救模式...", PLUGIN_NAME, group_id))
-            run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, llm_timeout, forced_chunk, model_desc, function(mdata, merr, mtokens)
+        local split_n = math.min(32, math.floor(common.da_num("map_resplit_count", 8)))
+        if is_moderation_rejection(nil, err) and split_n >= 2 and #stream_messages >= 8 then
+            local forced_chunks = split_messages_evenly(stream_messages, 1, split_n)
+            jn.log.warn(string.format("[%s] 群 %d 单次请求命中敏感审查 (%d 条)，二次拆分为 %d 片挽救...",
+                PLUGIN_NAME, group_id, #stream_messages, #forced_chunks))
+            run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, llm_timeout, chunk_chars, model_desc, function(mdata, merr, mtokens)
                 if mdata then
                     on_done(mdata, nil, mtokens, model_desc)
                 else
                     on_done(nil, tostring(merr or err), mtokens, model_desc)
                 end
-            end)
+            end, forced_chunks, 1)
             return
         end
         jn.log.warn(string.format("[%s] 群 %d 主分析失败 (%s)，启动自动降级重试...",

@@ -58,6 +58,12 @@ configs:
     description: "开启 Map-Reduce 时每段切片的目标字符长度（默认 35000），最多切 8 段"
     default: "35000"
 
+  - key: map_resplit_count
+    type: string
+    label: "敏感审查二次拆片数"
+    description: "单个切片或整段请求命中上游敏感内容审查时，二次拆分为几片重跑以隔离敏感句（默认 8，设 0 或 1 关闭二次拆片，上限 32）"
+    default: "8"
+
   - key: auto_analysis_time
     type: string
     label: "每日总结时间"
