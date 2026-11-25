@@ -262,6 +262,6 @@ configs:
   - key: backfill_max_pages
     type: string
     label: 补库最多翻页次数
-    description: 补库时单群最多向前翻页次数（每页 50 条），默认 10
-    default: "10"
+    description: 补库时单群最多向前翻页次数（每页 30 条），默认 3（上限 10）
+    default: "3"
 

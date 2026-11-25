@@ -158,7 +158,7 @@ end
 -- 3. 消息采集 (on_message) 与断线补库 (backfill)
 -- ============================================================================
 -- 统一提取并过滤单条消息，供实时 on_message 与历史补库共用
-local function prepare_message_record(event)
+local function prepare_message_record(event, skip_forward_expand)
     if not event or event.message_type ~= "group" then
         return nil
     end
@@ -179,7 +179,7 @@ local function prepare_message_record(event)
         local bot_uin = get_bot_uin()
         if bot_uin > 0 and sender_id == bot_uin then
             local kept = common.is_bot_output(raw_msg)
-            if not kept then
+            if not kept and not skip_forward_expand then
                 local fid = raw_msg:match("%[CQ:forward,id=([^,%]]+)%]")
                 if fid then
                     bot_forward_text = sources.da_forward_text(fid, true, 0, false)
@@ -254,7 +254,8 @@ local function backfill_group_history(group_id)
     if not jn.onebot11 or not jn.onebot11.get_group_msg_history then return true end
 
     local hours = math.max(1, common.da_num("backfill_hours", 24))
-    local max_pages = math.max(1, math.min(30, common.da_num("backfill_max_pages", 10)))
+    local max_pages = math.max(1, math.min(10, common.da_num("backfill_max_pages", 3)))
+    local page_size = 30
     local cutoff_ts = os.time() - hours * 3600
 
     local latest_msg_id = 0
@@ -267,10 +268,12 @@ local function backfill_group_history(group_id)
         latest_msg_id = tonumber(rows[1].message_id) or 0
     end
 
+    jn.log.info(string.format("[%s] 开始检查群 %d 历史消息补库 (max_pages=%d, watermark=%d)...",
+        PLUGIN_NAME, group_id, max_pages, latest_msg_id))
     local cursor_seq = nil
     local inserted = 0
     for _ = 1, max_pages do
-        local msgs, err = jn.onebot11.get_group_msg_history(group_id, cursor_seq, 50)
+        local msgs, err = jn.onebot11.get_group_msg_history(group_id, cursor_seq, page_size)
         if err then
             if tostring(err):find("no active connection", 1, true) then
                 return false
@@ -296,7 +299,7 @@ local function backfill_group_history(group_id)
                 if (mts > 0 and mts < cutoff_ts) or (latest_msg_id > 0 and mid > 0 and mid <= latest_msg_id) then
                     hit_watermark = true
                 else
-                    local rec = prepare_message_record(m)
+                    local rec = prepare_message_record(m, true)
                     if rec and insert_message_record(rec, true) then
                         inserted = inserted + 1
                     end
@@ -304,24 +307,30 @@ local function backfill_group_history(group_id)
             end
         end
 
-        if hit_watermark or #msgs < 50 or not oldest_seq_str or (cursor_seq and tonumber(oldest_seq_str) >= tonumber(cursor_seq)) then
+        if hit_watermark or #msgs < page_size or not oldest_seq_str or (cursor_seq and tonumber(oldest_seq_str) >= tonumber(cursor_seq)) then
             break
         end
         cursor_seq = oldest_seq_str
     end
 
-    if inserted > 0 then
-        jn.log.info(string.format("[%s] 群 %d 历史消息补库完成，新增 %d 条（随后将在报告触发时统一分片）",
-            PLUGIN_NAME, group_id, inserted))
-    end
+    jn.log.info(string.format("[%s] 群 %d 历史消息补库结束，新增 %d 条", PLUGIN_NAME, group_id, inserted))
     return true
 end
 
-local function backfill_target_groups(force_all)
+local function backfill_target_groups(force_all, specs)
     if not common.da_bool("backfill_on_startup", true) then return end
     if not jn.onebot11 or not jn.onebot11.get_group_msg_history then return end
     state.backfill_done = state.backfill_done or {}
-    for gid, _ in pairs(get_target_groups()) do
+    local gids = {}
+    if type(specs) == "table" and #specs > 0 then
+        for _, sp in ipairs(specs) do
+            local gid = tonumber(sp.group_id)
+            if gid and gid > 0 then gids[gid] = true end
+        end
+    else
+        gids = get_target_groups()
+    end
+    for gid, _ in pairs(gids) do
         if force_all or not state.backfill_done[gid] then
             if backfill_group_history(gid) then
                 state.backfill_done[gid] = true
@@ -993,7 +1002,7 @@ end
 local function enqueue_groups(specs)
     if type(specs) ~= "table" or #specs == 0 then return end
     -- 报告生成前兜底补全一次断线漏收消息，保证随后分片语料完整
-    pcall(backfill_target_groups, true)
+    pcall(backfill_target_groups, true, specs)
     state.group_queue = state.group_queue or {}
     state.queued_gids = state.queued_gids or {}
     state.is_analyzing = state.is_analyzing or {}
