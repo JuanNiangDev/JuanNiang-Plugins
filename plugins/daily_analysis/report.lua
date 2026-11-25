@@ -349,6 +349,38 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
                 end
             end
             local ttl = common.strip_wm(tostring(r.title or ""))
+            -- 兜底将旧缓存里残余的显式 UTC/GMT 时间写法统一转为 UTC+8
+            local function fix_utc_str(txt)
+                txt = tostring(txt or "")
+                local function shift(hh, mm)
+                    return string.format("%02d:%02d", ((tonumber(hh) or 0) + 8) % 24, tonumber(mm) or 0)
+                end
+                for _, sp in ipairs({
+                    { p = "至", s = "至" }, { p = "到", s = "到" },
+                    { p = "–", s = "-" }, { p = "—", s = "-" },
+                    { p = "~", s = "~" }, { p = "%-", s = "-" },
+                }) do
+                    txt = txt:gsub("([Uu][Tt][Cc])%s*(%d%d?):(%d%d)%s*" .. sp.p .. "%s*(%d%d?):(%d%d)",
+                        function(_, h1, m1, h2, m2)
+                            return string.format("%s %s %s (UTC+8)", shift(h1, m1), sp.s, shift(h2, m2))
+                        end)
+                    txt = txt:gsub("(%d%d?):(%d%d)%s*" .. sp.p .. "%s*(%d%d?):(%d%d)%s*([Uu][Tt][Cc])([^%+%-]?)",
+                        function(h1, m1, h2, m2, _, tail)
+                            if tail == "+" or tail == "-" then return nil end
+                            return string.format("%s %s %s (UTC+8)%s", shift(h1, m1), sp.s, shift(h2, m2), tail)
+                        end)
+                end
+                txt = txt:gsub("([Uu][Tt][Cc])%s*(%d%d?):(%d%d)",
+                    function(_, hh, mm) return shift(hh, mm) .. " (UTC+8)" end)
+                txt = txt:gsub("(%d%d?):(%d%d)%s*([Uu][Tt][Cc])([^%+%-]?)",
+                    function(hh, mm, _, tail)
+                        if tail == "+" or tail == "-" then return nil end
+                        return shift(hh, mm) .. " (UTC+8)" .. tail
+                    end)
+                return txt
+            end
+            ttl = fix_utc_str(ttl)
+            obj_sum = fix_utc_str(obj_sum)
             local block = { string.format("[%s] %s · %s", tstr, plabel, klabel) }
             if ttl ~= "" then block[#block + 1] = common.clip(ttl, 80) end
             if obj_sum ~= "" and obj_sum ~= ttl then

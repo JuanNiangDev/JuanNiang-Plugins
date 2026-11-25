@@ -118,7 +118,7 @@ return function(jn, common)
         sys_parts[#sys_parts + 1] = ""
         sys_parts[#sys_parts + 1] = [[输出 JSON 格式：{"is_relevant":true,"confidence":0.95,"product":"","event_kind":"","is_major":true,"title":"","scope":"","objective_summary":"","persona_comment":""}]]
 
-        local raw_clean = common.strip_wm(cand.raw_text or cand.title or "")
+        local raw_clean = common.convert_utc_text_to_cst(common.strip_wm(cand.raw_text or cand.title or ""))
         local parts = {
             "来源: " .. tostring(cand.source_name or ""),
             "预设产品键提示: " .. prod_hint,
@@ -128,12 +128,12 @@ return function(jn, common)
             "链接: " .. tostring(cand.source_url or ""),
         }
         if cand.timeline_text and cand.timeline_text ~= "" then
-            parts[#parts + 1] = "详情页回源状态时间线（已换算为 UTC+8 北京时间，按时间正序）:\n" .. common.clip(common.strip_wm(cand.timeline_text), 2400)
+            parts[#parts + 1] = "详情页回源状态时间线（已换算为 UTC+8 北京时间，按时间正序）:\n" .. common.clip(common.convert_utc_text_to_cst(common.strip_wm(cand.timeline_text)), 2400)
         end
         if cand.lookback_context and cand.lookback_context ~= "" then
-            parts[#parts + 1] = string.format("最近 %d 分钟同产品已有记录:\n%s", lookback_min, common.clip(common.strip_wm(cand.lookback_context), 1200))
+            parts[#parts + 1] = string.format("最近 %d 分钟同产品已有记录:\n%s", lookback_min, common.clip(common.convert_utc_text_to_cst(common.strip_wm(cand.lookback_context)), 1200))
         end
-        parts[#parts + 1] = "原文:\n" .. common.clip(raw_clean, 2800)
+        parts[#parts + 1] = "原文（其中的 UTC/GMT 时间已预换算为 UTC+8 北京时间）:\n" .. common.clip(raw_clean, 2800)
 
         return {
             { role = "system", content = table.concat(sys_parts, "\n") },
@@ -182,10 +182,10 @@ return function(jn, common)
             product = prod,
             event_kind = kind,
             is_major = is_major,
-            title = common.clip(common.trim(d.title or cand.title or ""), 60),
-            scope = common.clip(common.trim(d.scope or ""), 50),
-            objective_summary = common.clip(common.trim(d.objective_summary or ""), summary_cap),
-            persona_comment = common.clip(common.trim(d.persona_comment or ""), 120),
+            title = common.clip(common.convert_utc_text_to_cst(common.trim(d.title or cand.title or "")), 60),
+            scope = common.clip(common.convert_utc_text_to_cst(common.trim(d.scope or "")), 50),
+            objective_summary = common.clip(common.convert_utc_text_to_cst(common.trim(d.objective_summary or "")), summary_cap),
+            persona_comment = common.clip(common.convert_utc_text_to_cst(common.trim(d.persona_comment or "")), 120),
         }
     end
 
@@ -242,9 +242,9 @@ return function(jn, common)
             product = prod,
             event_kind = kind,
             is_major = is_major,
-            title = common.clip(title, 60),
+            title = common.clip(common.convert_utc_text_to_cst(title), 60),
             scope = scope,
-            objective_summary = common.clip(summary, 200),
+            objective_summary = common.clip(common.convert_utc_text_to_cst(summary), 200),
             persona_comment = is_major and "额度/状态有重要更新，快点开看看是不是回满血啦~" or "",
         }
     end

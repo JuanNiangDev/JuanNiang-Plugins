@@ -158,13 +158,13 @@ end
 -- 3. 消息采集 (on_message) 与断线补库 (backfill)
 -- ============================================================================
 -- 统一提取并过滤单条消息，供实时 on_message 与历史补库共用
-local function prepare_message_record(event, skip_forward_expand)
+local function prepare_message_record(event, skip_forward_expand, force_allow)
     if not event or event.message_type ~= "group" then
         return nil
     end
 
     local group_id = tonumber(event.group_id)
-    if not group_id or not is_target_group(group_id) then
+    if not group_id or (not force_allow and not is_target_group(group_id)) then
         return nil
     end
 
@@ -221,32 +221,51 @@ local function prepare_message_record(event, skip_forward_expand)
 end
 
 local function insert_message_record(rec, dedup)
-    if not rec then return false end
+    if not rec then return false, false, nil end
     if dedup and rec.message_id ~= 0 then
-        local sql = [[
-            INSERT INTO ]] .. TABLE_MESSAGES .. [[
-            (group_id, user_id, nickname, content, raw_message, message_id, created_at)
-            SELECT ?, ?, ?, ?, ?, ?, CASE WHEN ? > 0 THEN TO_TIMESTAMP(?) ELSE NOW() END
-            WHERE NOT EXISTS (
-                SELECT 1 FROM ]] .. TABLE_MESSAGES .. [[
-                WHERE group_id = ? AND message_id = ?
-            )
-        ]]
-        local _, err = jn.database.exec(sql, {
-            rec.group_id, rec.user_id, rec.nickname, rec.content, rec.raw_message, rec.message_id,
-            rec.created_ts, rec.created_ts, rec.group_id, rec.message_id,
-        })
-        return err == nil
+        local created_ts = tonumber(rec.created_ts) or 0
+        local affected, err
+        if created_ts > 0 then
+            local created_iso = os.date("!%Y-%m-%dT%H:%M:%SZ", created_ts)
+            local sql = [[
+                INSERT INTO ]] .. TABLE_MESSAGES .. [[
+                (group_id, user_id, nickname, content, raw_message, message_id, created_at)
+                SELECT ?, ?, ?, ?, ?, ?, CAST(? AS TIMESTAMPTZ)
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM ]] .. TABLE_MESSAGES .. [[
+                    WHERE group_id = ? AND message_id = ?
+                )
+            ]]
+            affected, err = jn.database.exec(sql, {
+                rec.group_id, rec.user_id, rec.nickname, rec.content, rec.raw_message, rec.message_id,
+                created_iso, rec.group_id, rec.message_id,
+            })
+        else
+            local sql = [[
+                INSERT INTO ]] .. TABLE_MESSAGES .. [[
+                (group_id, user_id, nickname, content, raw_message, message_id, created_at)
+                SELECT ?, ?, ?, ?, ?, ?, NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM ]] .. TABLE_MESSAGES .. [[
+                    WHERE group_id = ? AND message_id = ?
+                )
+            ]]
+            affected, err = jn.database.exec(sql, {
+                rec.group_id, rec.user_id, rec.nickname, rec.content, rec.raw_message, rec.message_id,
+                rec.group_id, rec.message_id,
+            })
+        end
+        return err == nil, (err == nil and (tonumber(affected) or 0) > 0), err
     end
     local sql = [[
         INSERT INTO ]] .. TABLE_MESSAGES .. [[
         (group_id, user_id, nickname, content, raw_message, message_id)
         VALUES (?, ?, ?, ?, ?, ?)
     ]]
-    local _, err = jn.database.exec(sql, {
+    local affected, err = jn.database.exec(sql, {
         rec.group_id, rec.user_id, rec.nickname, rec.content, rec.raw_message, rec.message_id,
     })
-    return err == nil
+    return err == nil, (err == nil and (tonumber(affected) or 0) > 0), err
 end
 
 local function backfill_group_history(group_id)
@@ -254,25 +273,17 @@ local function backfill_group_history(group_id)
     if not jn.onebot11 or not jn.onebot11.get_group_msg_history then return true end
 
     local hours = math.max(1, common.da_num("backfill_hours", 24))
-    local max_pages = math.max(1, math.min(10, common.da_num("backfill_max_pages", 3)))
+    local max_pages = math.max(1, math.min(50, common.da_num("backfill_max_pages", 3)))
     local page_size = 30
     local cutoff_ts = os.time() - hours * 3600
 
-    local latest_msg_id = 0
-    local rows = jn.database.query([[
-        SELECT message_id FROM ]] .. TABLE_MESSAGES .. [[
-        WHERE group_id = ? AND message_id <> 0
-        ORDER BY created_at DESC, id DESC LIMIT 1
-    ]], { group_id })
-    if type(rows) == "table" and rows[1] then
-        latest_msg_id = tonumber(rows[1].message_id) or 0
-    end
-
-    jn.log.info(string.format("[%s] 开始检查群 %d 历史消息补库 (max_pages=%d, watermark=%d)...",
-        PLUGIN_NAME, group_id, max_pages, latest_msg_id))
+    jn.log.info(string.format("[%s] 开始检查群 %d 历史消息补库 (hours=%d, max_pages=%d)...",
+        PLUGIN_NAME, group_id, hours, max_pages))
     local cursor_seq = nil
+    local prev_page_sig = nil
     local inserted = 0
-    for _ = 1, max_pages do
+    local logged_sql_err = false
+    for page_idx = 1, max_pages do
         local msgs, err = jn.onebot11.get_group_msg_history(group_id, cursor_seq, page_size)
         if err then
             if tostring(err):find("no active connection", 1, true) then
@@ -283,34 +294,68 @@ local function backfill_group_history(group_id)
         end
         if type(msgs) ~= "table" or #msgs == 0 then break end
 
-        local oldest_seq, oldest_seq_str, hit_watermark = nil, nil, false
+        local page_sig = string.format("%d:%s:%s", #msgs,
+            tostring(msgs[1] and (msgs[1].message_seq or msgs[1].message_id) or ""),
+            tostring(msgs[#msgs] and (msgs[#msgs].message_seq or msgs[#msgs].message_id) or ""))
+        if prev_page_sig and page_sig == prev_page_sig then
+            break
+        end
+        prev_page_sig = page_sig
+
+        local min_msg_seq, min_msg_seq_str, hit_cutoff = nil, nil, false
         for _, m in ipairs(msgs) do
             if type(m) == "table" then
                 if not m.group_id or tonumber(m.group_id) == 0 then m.group_id = group_id end
                 if not m.message_type or m.message_type == "" then m.message_type = "group" end
-                local raw_seq = m.message_seq or m.message_id
-                local seq_num = tonumber(raw_seq)
-                if seq_num and (not oldest_seq or seq_num < oldest_seq) then
-                    oldest_seq = seq_num
-                    oldest_seq_str = tostring(raw_seq)
+                -- 仅将真正单调递增的 message_seq 参与最小值比较，绝不混入无序/负数的 message_id
+                local s_num = tonumber(m.message_seq)
+                if s_num and s_num > 0 and (not min_msg_seq or s_num < min_msg_seq) then
+                    min_msg_seq = s_num
+                    min_msg_seq_str = tostring(m.message_seq)
                 end
                 local mts = tonumber(m.time) or 0
-                local mid = tonumber(m.message_id) or 0
-                if (mts > 0 and mts < cutoff_ts) or (latest_msg_id > 0 and mid > 0 and mid <= latest_msg_id) then
-                    hit_watermark = true
+                if mts > 0 and mts < cutoff_ts then
+                    hit_cutoff = true
                 else
-                    local rec = prepare_message_record(m, true)
-                    if rec and insert_message_record(rec, true) then
-                        inserted = inserted + 1
+                    local rec = prepare_message_record(m, true, true)
+                    if rec then
+                        local ok_ins, is_new, ins_err = insert_message_record(rec, true)
+                        if not ok_ins then
+                            if not logged_sql_err then
+                                logged_sql_err = true
+                                jn.log.warn(string.format("[%s] 群 %d 历史消息补库写库失败: %s",
+                                    PLUGIN_NAME, group_id, tostring(ins_err)))
+                            end
+                        elseif is_new then
+                            inserted = inserted + 1
+                        end
                     end
                 end
             end
         end
 
-        if hit_watermark or #msgs < page_size or not oldest_seq_str or (cursor_seq and tonumber(oldest_seq_str) >= tonumber(cursor_seq)) then
+        local next_cursor = min_msg_seq_str
+        if not next_cursor then
+            local t_first = tonumber(msgs[1] and msgs[1].time) or 0
+            local t_last = tonumber(msgs[#msgs] and msgs[#msgs].time) or 0
+            local oldest_m = (t_first > 0 and t_last > 0 and t_first > t_last) and msgs[#msgs] or msgs[1]
+            if oldest_m and oldest_m.message_id ~= nil then
+                next_cursor = tostring(oldest_m.message_id)
+            end
+        end
+        if page_idx == 1 then
+            jn.log.info(string.format("[%s] 群 %d 补库首页统计: count=%d first_seq=%s first_id=%s next_cursor=%s",
+                PLUGIN_NAME, group_id, #msgs,
+                tostring(msgs[1] and msgs[1].message_seq),
+                tostring(msgs[1] and msgs[1].message_id),
+                tostring(next_cursor)))
+        end
+
+        -- 不依赖 message_id 大小比较或单页全已存在提前终止，确保服务中断造成的中段空洞也能完整回补
+        if hit_cutoff or #msgs < page_size or not next_cursor or (cursor_seq and next_cursor == cursor_seq) then
             break
         end
-        cursor_seq = oldest_seq_str
+        cursor_seq = next_cursor
     end
 
     jn.log.info(string.format("[%s] 群 %d 历史消息补库结束，新增 %d 条", PLUGIN_NAME, group_id, inserted))

@@ -441,6 +441,114 @@ return function(jn)
         return os.date("!%Y-%m-%d %H:%M", ep + 8 * 3600) .. " (UTC+8)"
     end
 
+    local function is_utc_tag(tag)
+        local u = tostring(tag or ""):upper()
+        return u == "UTC" or u == "GMT"
+    end
+
+    local function tz_is_zero_offset(tz)
+        tz = M.trim(tz)
+        if tz == "" then return true end
+        local s, d = tz:match("^([%+%-])(%d+)$")
+        if s then return tonumber(d) == 0 end
+        local _, h, m = tz:match("^([%+%-])(%d%d?):?(%d%d)$")
+        if h then return tonumber(h) == 0 and tonumber(m) == 0 end
+        return false
+    end
+
+    local function shift_hm_cst(hh, mm)
+        local h = tonumber(hh) or 0
+        local m = tonumber(mm) or 0
+        local total = h * 60 + m + 8 * 60
+        local rem = total % 1440
+        return string.format("%02d:%02d", math.floor(rem / 60), rem % 60)
+    end
+
+    -- 将文本中显式标注为 UTC / GMT 的时间统一换算为 UTC+8（保留已是 UTC+8 / 非零偏移的时间不变）
+    function M.convert_utc_text_to_cst(text)
+        local s = tostring(text or "")
+        if s == "" then return "" end
+
+        local now_utc = os.date("!*t", os.time())
+        local cur_year = now_utc and now_utc.year or 2026
+
+        -- 1. ISO 8601 UTC: 2026-11-25T01:10:00Z / 2026-11-25 01:10 UTC
+        s = s:gsub("(%d%d%d%d)%-(%d%d)%-(%d%d)[T ](%d%d):(%d%d):?(%d?%d?)%.?%d*%s*[Zz]()",
+            function(y, mo, d, hh, mm, ss, pos)
+                local nxt = s:sub(pos, pos)
+                if nxt ~= "" and nxt:match("[%w]") then return nil end
+                local ep = utc_table_to_epoch(tonumber(y), tonumber(mo), tonumber(d), tonumber(hh), tonumber(mm), tonumber(ss) or 0)
+                return os.date("!%Y-%m-%d %H:%M", ep + 8 * 3600) .. " (UTC+8)"
+            end)
+        s = s:gsub("(%d%d%d%d)%-(%d%d)%-(%d%d)[T ](%d%d):(%d%d):?(%d?%d?)%s*%(?([UuGg][TtMm][CcTt])([%+%-]?%d*)%)?",
+            function(y, mo, d, hh, mm, ss, tag, tz)
+                if not is_utc_tag(tag) or not tz_is_zero_offset(tz) then return nil end
+                local ep = utc_table_to_epoch(tonumber(y), tonumber(mo), tonumber(d), tonumber(hh), tonumber(mm), tonumber(ss) or 0)
+                return os.date("!%Y-%m-%d %H:%M", ep + 8 * 3600) .. " (UTC+8)"
+            end)
+
+        -- 2. 英文月日时间段: Nov 25[, 2026], 17:09 - 17:27 UTC / between 17:09 and 17:27 UTC
+        local function conv_mon_range(mon, d, yr, h1, m1, h2, m2, tag, tz)
+            local mno = MONTHS[mon:lower()]
+            if not mno or not is_utc_tag(tag) or not tz_is_zero_offset(tz) then return nil end
+            local y = tonumber(yr) or cur_year
+            local ep1 = utc_table_to_epoch(y, mno, tonumber(d), tonumber(h1), tonumber(m1), 0)
+            local ep2 = utc_table_to_epoch(y, mno, tonumber(d), tonumber(h2), tonumber(m2), 0)
+            if ep2 < ep1 then ep2 = ep2 + 86400 end
+            local d1 = os.date("!%m-%d %H:%M", ep1 + 8 * 3600)
+            local d2 = os.date("!%H:%M", ep2 + 8 * 3600)
+            return string.format("%s 至 %s (UTC+8)", d1, d2)
+        end
+        local range_seps = { "至", "到", "–", "—", "~", "%-", "and" }
+        for _, sep in ipairs(range_seps) do
+            s = s:gsub("(%a%a%a)%.?%s+(%d%d?),%s*(%d%d%d%d)%s*,?%s*(%d%d?):(%d%d)%s*" .. sep .. "%s*(%d%d?):(%d%d)%s*%(?([UuGg][TtMm][CcTt])([%+%-]?%d*)%)?",
+                function(mon, d, yr, h1, m1, h2, m2, tag, tz) return conv_mon_range(mon, d, yr, h1, m1, h2, m2, tag, tz) end)
+            s = s:gsub("(%a%a%a)%.?%s+(%d%d?)%s*,%s*(%d%d?):(%d%d)%s*" .. sep .. "%s*(%d%d?):(%d%d)%s*%(?([UuGg][TtMm][CcTt])([%+%-]?%d*)%)?",
+                function(mon, d, h1, m1, h2, m2, tag, tz) return conv_mon_range(mon, d, nil, h1, m1, h2, m2, tag, tz) end)
+        end
+
+        -- 3. 英文月日单点: Nov 25, 2026 01:10 UTC / Nov 25, 01:10 UTC
+        local function conv_mon_single(mon, d, yr, hh, mm, tag, tz)
+            local mno = MONTHS[mon:lower()]
+            if not mno or not is_utc_tag(tag) or not tz_is_zero_offset(tz) then return nil end
+            local y = tonumber(yr) or cur_year
+            local ep = utc_table_to_epoch(y, mno, tonumber(d), tonumber(hh), tonumber(mm), 0)
+            return os.date("!%m-%d %H:%M", ep + 8 * 3600) .. " (UTC+8)"
+        end
+        s = s:gsub("(%a%a%a)%.?%s+(%d%d?),%s*(%d%d%d%d)%s*,?%s*(%d%d?):(%d%d)%s*%(?([UuGg][TtMm][CcTt])([%+%-]?%d*)%)?",
+            function(mon, d, yr, hh, mm, tag, tz) return conv_mon_single(mon, d, yr, hh, mm, tag, tz) end)
+        s = s:gsub("(%a%a%a)%.?%s+(%d%d?)%s*,%s*(%d%d?):(%d%d)%s*%(?([UuGg][TtMm][CcTt])([%+%-]?%d*)%)?",
+            function(mon, d, hh, mm, tag, tz) return conv_mon_single(mon, d, nil, hh, mm, tag, tz) end)
+
+        -- 4. 无日期前缀的时间段: 17:09 - 17:27 UTC / 17:09 and 17:27 UTC / UTC 17:09 至 17:27
+        for _, sep in ipairs(range_seps) do
+            s = s:gsub("(%d%d?):(%d%d)%s*" .. sep .. "%s*(%d%d?):(%d%d)%s*%(?([UuGg][TtMm][CcTt])([%+%-]?%d*)%)?",
+                function(h1, m1, h2, m2, tag, tz)
+                    if not is_utc_tag(tag) or not tz_is_zero_offset(tz) then return nil end
+                    return string.format("%s 至 %s (UTC+8)", shift_hm_cst(h1, m1), shift_hm_cst(h2, m2))
+                end)
+            s = s:gsub("([UuGg][TtMm][CcTt])([%+%-]?%d*)%s*(%d%d?):(%d%d)%s*" .. sep .. "%s*(%d%d?):(%d%d)",
+                function(tag, tz, h1, m1, h2, m2)
+                    if not is_utc_tag(tag) or not tz_is_zero_offset(tz) then return nil end
+                    return string.format("%s 至 %s (UTC+8)", shift_hm_cst(h1, m1), shift_hm_cst(h2, m2))
+                end)
+        end
+
+        -- 5. 无日期前缀的单点时间: 01:10 UTC / 01:10 (UTC) / UTC 17:09
+        s = s:gsub("(%d%d?):(%d%d)%s*%(?([UuGg][TtMm][CcTt])([%+%-]?%d*)%)?",
+            function(hh, mm, tag, tz)
+                if not is_utc_tag(tag) or not tz_is_zero_offset(tz) then return nil end
+                return shift_hm_cst(hh, mm) .. " (UTC+8)"
+            end)
+        s = s:gsub("([UuGg][TtMm][CcTt])([%+%-]?%d*)%s*(%d%d?):(%d%d)",
+            function(tag, tz, hh, mm)
+                if not is_utc_tag(tag) or not tz_is_zero_offset(tz) then return nil end
+                return shift_hm_cst(hh, mm) .. " (UTC+8)"
+            end)
+
+        return s
+    end
+
     function M.now_cst_hm()
         local ep = os.time() + 8 * 3600
         local t = os.date("!*t", ep)

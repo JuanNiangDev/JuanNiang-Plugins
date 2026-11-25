@@ -10,13 +10,6 @@ return function(jn, common, sources)
         return (s:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " "))
     end
 
-    local function fmt_k(n)
-        n = tonumber(n) or 0
-        if n >= 1000000 then return string.format("%.1fM", n / 1000000) end
-        if n >= 1000 then return string.format("%.1fk", n / 1000) end
-        return tostring(n)
-    end
-
     local function fetch_github(r)
         local res, herr = jn.http.get("https://api.github.com/repos/" .. r.name, "")
         if res and res.status == 404 then
@@ -29,24 +22,13 @@ return function(jn, common, sources)
                 common.PLUGIN_NAME, r.name, tostring(res and res.status), tostring(herr)))
             return "", ""
         end
-        local raw_desc, summary = "", ""
+        local raw_desc = ""
         local d = jn.json.decode(res.body)
         if type(d) == "table" then
+            -- 无历史完整介绍时最多仅返回项目描述，不附加语言或星标等简略指标
             raw_desc = trim(d.description)
-            local meta = {}
-            if trim(d.language) ~= "" then meta[#meta + 1] = d.language end
-            if tonumber(d.stargazers_count) then meta[#meta + 1] = "⭐ " .. fmt_k(d.stargazers_count) end
-            summary = raw_desc
-            if #meta > 0 then
-                summary = (summary ~= "" and (summary .. " ") or "") .. "（" .. table.concat(meta, " · ") .. "）"
-            end
-            if summary == "" and type(d.topics) == "table" then
-                local tags = {}
-                for i = 1, math.min(4, #d.topics) do tags[#tags + 1] = tostring(d.topics[i]) end
-                if #tags > 0 then summary = "标签：" .. table.concat(tags, ", ") end
-            end
         end
-        return raw_desc, summary
+        return raw_desc, raw_desc
     end
 
     local function fetch_hf(r, proxy)
@@ -64,25 +46,12 @@ return function(jn, common, sources)
                 common.PLUGIN_NAME, r.name, tostring(res and res.status), tostring(herr)))
             return "", ""
         end
-        local raw_desc, summary = "", ""
+        local raw_desc = ""
         local d = jn.json.decode(res.body)
         if type(d) == "table" then
-            local head = trim(d.pipeline_tag)
-            if head == "" and type(d.tags) == "table" then
-                local tags = {}
-                for i = 1, math.min(3, #d.tags) do tags[#tags + 1] = tostring(d.tags[i]) end
-                head = table.concat(tags, ", ")
-            end
-            raw_desc = head
-            local meta = {}
-            if tonumber(d.downloads) then meta[#meta + 1] = "⬇ " .. fmt_k(d.downloads) end
-            if tonumber(d.likes) then meta[#meta + 1] = "♥ " .. fmt_k(d.likes) end
-            summary = head
-            if #meta > 0 then
-                summary = (summary ~= "" and (summary .. " · ") or "") .. table.concat(meta, " · ")
-            end
+            raw_desc = trim(d.pipeline_tag)
         end
-        return raw_desc, summary
+        return raw_desc, raw_desc
     end
 
     local function fetch_ms(r)
@@ -103,9 +72,46 @@ return function(jn, common, sources)
         return "", ""
     end
 
-    -- 对群内无水印的开源项目裸链：仅拉取平台官方 API 基础元数据，不再触发二次 LLM 总结
+    -- 优先从数据库历史带水印的 repo-intro 卡片中恢复完整介绍，避免跨日或缓存缺失后降级
+    local function find_db_bot_repo(r)
+        if not (jn.database and jn.database.query and sources and sources.parse_bot_blocks) then
+            return nil
+        end
+        local ok, rows = pcall(jn.database.query, [[
+            SELECT raw_message FROM ]] .. common.TABLE_MESSAGES .. [[
+            WHERE LOWER(raw_message) LIKE ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 12
+        ]], { "%" .. tostring(r.key or ""):lower() .. "%" })
+        if not ok or type(rows) ~= "table" then return nil end
+        local best = nil
+        for _, row in ipairs(rows) do
+            if type(row) == "table" and type(row.raw_message) == "string" then
+                for _, b in ipairs(sources.parse_bot_blocks(row.raw_message)) do
+                    if b.kind == "repo" and b.text and b.text ~= ""
+                        and tostring(b.name or ""):lower() == tostring(r.key or ""):lower() then
+                        if not best or #b.text > #best.text then
+                            best = b
+                        end
+                    end
+                end
+            end
+        end
+        return best
+    end
+
+    -- 对群内无水印的开源项目裸链：优先复用历史 repo-intro 完整卡片，否则仅拉取平台官方 API 介绍
     local function enrich_one(r)
-        local cache_key = "repoinfo:meta:v5:" .. r.key
+        local db_block = find_db_bot_repo(r)
+        if db_block then
+            r.text = db_block.text
+            r.images = db_block.images or {}
+            r.summary = db_block.summary or ""
+            r.title = db_block.title or ""
+            return
+        end
+
+        local cache_key = "repoinfo:meta:v6:" .. r.key
         local cached = jn.cache.get(cache_key)
         if type(cached) == "table" then
             if cached.invalid then
