@@ -280,6 +280,8 @@ local function backfill_group_history(group_id)
     jn.log.info(string.format("[%s] 开始检查群 %d 历史消息补库 (hours=%d, max_pages=%d)...",
         PLUGIN_NAME, group_id, hours, max_pages))
     local cursor_seq = nil
+    local fallback_id_cursor = nil
+    local cursor_mode = "seq" -- "seq" -> "id" -> "seq_step"
     local prev_page_sig = nil
     local inserted = 0
     local logged_sql_err = false
@@ -292,11 +294,54 @@ local function backfill_group_history(group_id)
             jn.log.warn(string.format("[%s] 群 %d 历史消息补库失败: %s", PLUGIN_NAME, group_id, tostring(err)))
             return false
         end
-        if type(msgs) ~= "table" or #msgs == 0 then break end
 
-        local page_sig = string.format("%d:%s:%s", #msgs,
-            tostring(msgs[1] and (msgs[1].message_seq or msgs[1].message_id) or ""),
-            tostring(msgs[#msgs] and (msgs[#msgs].message_seq or msgs[#msgs].message_id) or ""))
+        local function build_sig(list)
+            if type(list) ~= "table" or #list == 0 then return nil end
+            return string.format("%d:%s:%s", #list,
+                tostring(list[1] and (list[1].message_seq or list[1].message_id) or ""),
+                tostring(list[#list] and (list[#list].message_seq or list[#list].message_id) or ""))
+        end
+
+        local page_sig = build_sig(msgs)
+        if cursor_mode == "seq" and page_idx == 2 and (not page_sig or (prev_page_sig and page_sig == prev_page_sig)) then
+            -- 部分 OneBot11 实现（如 NapCat）在未传 reverseOrder 时将 message_seq 当作起始游标或仅认正数 message_id；
+            -- 若页 2 返回空或与首页完全重复，依次探测正数 message_id 游标与 seq-page_size 步进游标。
+            local id_num = tonumber(fallback_id_cursor)
+            if id_num and id_num > 0 and fallback_id_cursor ~= cursor_seq then
+                cursor_mode = "id"
+                cursor_seq = fallback_id_cursor
+                msgs, err = jn.onebot11.get_group_msg_history(group_id, cursor_seq, page_size)
+                page_sig = (not err) and build_sig(msgs) or nil
+                jn.log.info(string.format("[%s] 群 %d 探测 message_id 游标(%s): count=%d first_seq=%s",
+                    PLUGIN_NAME, group_id, tostring(cursor_seq), type(msgs) == "table" and #msgs or 0,
+                    tostring(type(msgs) == "table" and msgs[1] and msgs[1].message_seq)))
+            end
+            if (not page_sig or (prev_page_sig and page_sig == prev_page_sig)) and cursor_seq then
+                local base_seq = tonumber(prev_page_sig and prev_page_sig:match("^%d+:([^:]+):"))
+                if base_seq and base_seq > page_size then
+                    cursor_mode = "seq_step"
+                    cursor_seq = tostring(base_seq - page_size)
+                    msgs, err = jn.onebot11.get_group_msg_history(group_id, cursor_seq, page_size)
+                    page_sig = (not err) and build_sig(msgs) or nil
+                    jn.log.info(string.format("[%s] 群 %d 探测 seq-step 游标(%s): count=%d first_seq=%s last_seq=%s",
+                        PLUGIN_NAME, group_id, tostring(cursor_seq), type(msgs) == "table" and #msgs or 0,
+                        tostring(type(msgs) == "table" and msgs[1] and msgs[1].message_seq),
+                        tostring(type(msgs) == "table" and msgs[#msgs] and msgs[#msgs].message_seq)))
+                end
+            end
+            if not page_sig or (prev_page_sig and page_sig == prev_page_sig) then
+                -- 部分协议端会忽略 message_seq 游标始终返回最新 count 条；此时改为单次大窗口拉取（上限 400 条，防 NTQQ IPC 超时）
+                local bulk_count = math.min(400, math.max(page_size * 2, max_pages * page_size))
+                cursor_mode = "bulk"
+                cursor_seq = nil
+                msgs, err = jn.onebot11.get_group_msg_history(group_id, nil, bulk_count)
+                page_sig = (not err) and build_sig(msgs) or nil
+                jn.log.info(string.format("[%s] 群 %d 探测单次批量拉取(count=%d): actual=%d err=%s",
+                    PLUGIN_NAME, group_id, bulk_count, type(msgs) == "table" and #msgs or 0, tostring(err)))
+            end
+        end
+
+        if type(msgs) ~= "table" or #msgs == 0 then break end
         if prev_page_sig and page_sig == prev_page_sig then
             break
         end
@@ -334,20 +379,29 @@ local function backfill_group_history(group_id)
             end
         end
 
-        local next_cursor = min_msg_seq_str
-        if not next_cursor then
-            local t_first = tonumber(msgs[1] and msgs[1].time) or 0
-            local t_last = tonumber(msgs[#msgs] and msgs[#msgs].time) or 0
-            local oldest_m = (t_first > 0 and t_last > 0 and t_first > t_last) and msgs[#msgs] or msgs[1]
-            if oldest_m and oldest_m.message_id ~= nil then
-                next_cursor = tostring(oldest_m.message_id)
-            end
+        if cursor_mode == "bulk" then
+            break
         end
-        if page_idx == 1 then
-            jn.log.info(string.format("[%s] 群 %d 补库首页统计: count=%d first_seq=%s first_id=%s next_cursor=%s",
-                PLUGIN_NAME, group_id, #msgs,
+
+        local t_first = tonumber(msgs[1] and msgs[1].time) or 0
+        local t_last = tonumber(msgs[#msgs] and msgs[#msgs].time) or 0
+        local oldest_m = (t_first > 0 and t_last > 0 and t_first > t_last) and msgs[#msgs] or msgs[1]
+        local oldest_id_str = (oldest_m and oldest_m.message_id ~= nil) and tostring(oldest_m.message_id) or nil
+        fallback_id_cursor = oldest_id_str
+        local next_cursor = nil
+        if cursor_mode == "id" then
+            next_cursor = oldest_id_str
+        elseif cursor_mode == "seq_step" and min_msg_seq then
+            next_cursor = (min_msg_seq > page_size) and tostring(min_msg_seq - page_size) or "1"
+        else
+            next_cursor = min_msg_seq_str or oldest_id_str
+        end
+        if page_idx <= 3 then
+            jn.log.info(string.format("[%s] 群 %d 补库页 %d(%s): count=%d cursor=%s first_seq=%s first_id=%s last_seq=%s next=%s",
+                PLUGIN_NAME, group_id, page_idx, cursor_mode, #msgs, tostring(cursor_seq),
                 tostring(msgs[1] and msgs[1].message_seq),
                 tostring(msgs[1] and msgs[1].message_id),
+                tostring(msgs[#msgs] and msgs[#msgs].message_seq),
                 tostring(next_cursor)))
         end
 
