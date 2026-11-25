@@ -13,7 +13,7 @@ https://daily.juya.uk/issues/{date}/       # 当期正文（{date} 自动替换�
 ```
 
 - 当期页面抓取失败 / 尚未出刊 → 回退 RSS 最新一期；若那一期的日期不是今天，则**跳过不补发**（按需求约定）。
-- 同一期只发一次（`jn.cache` 记录 issue 日期，7 天过期）。
+- **防重复防漏发**：`jn.cache` 以 `{ ts = os.time() }` 对象形式记录当期已发状态（7 天过期，兼容 `cache.exists` 校验防止重启误补发）；合并转发遇请求超时时视为协议端已接收投递，不再二次降级文本重试刷屏；支持在 `catchup_hours` 补发窗口内自动补发当日未出刊时段漏推。
 
 ## 消息结构
 
@@ -43,8 +43,10 @@ https://mp.weixin.qq.com/s/xxxx           ← 同一事件的多家来源都会�
 | 配置项 | 说明 |
 |---|---|
 | `enabled` | 总开关 |
-| `target_groups` | 推送目标群号列表（可多个，逐群发送；private 取第一项） |
+| `target_type` | 推送目标类型（`group` 群聊 / `private` 个人 QQ 测试） |
+| `target_groups` | 推送目标群号列表（可多个，逐群发送；`private` 取第一项） |
 | `send_time` | 每日发送时间，默认 `11:30` |
+| `catchup_hours` | 错过发送时间后的当日补发窗口小时数，默认 `3`（`0` 不补发） |
 | `feeds` | 数据源列表（RSS + 期号模板） |
 | `max_items` | 单期最多推送条数，默认 70 |
 | `links_max` | 每条新闻最多列几个来源链接，默认 6 |
