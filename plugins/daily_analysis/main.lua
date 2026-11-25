@@ -791,8 +791,8 @@ local function start_group_pipeline(spec, on_pipeline_done)
         local before = m.content or ""
         m.content = sources.expand_cq_content(m.raw_message, before, expanded_by_msg_id)
         local mid = tonumber(m.message_id)
-        if mid and mid > 0 then
-            expanded_by_msg_id[mid] = m
+        if mid and mid ~= 0 then
+            expanded_by_msg_id[tostring(mid)] = m
         end
         if m.content ~= before then expanded = expanded + 1 end
     end

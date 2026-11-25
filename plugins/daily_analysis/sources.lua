@@ -367,8 +367,8 @@ return function(jn, common)
 
     local function da_reply_text(id, expanded_by_msg_id)
         local num_id = tonumber(id)
-        if num_id and type(expanded_by_msg_id) == "table" and expanded_by_msg_id[num_id] then
-            local row = expanded_by_msg_id[num_id]
+        if num_id and type(expanded_by_msg_id) == "table" and expanded_by_msg_id[tostring(num_id)] then
+            local row = expanded_by_msg_id[tostring(num_id)]
             local src = strip_wm(tostring(row.content or ""))
             if src ~= "" then
                 return "【回复 " .. tostring(row.nickname or "群友") .. "：「" .. da_clip(src, 140) .. "」】"
