@@ -60,9 +60,27 @@ configs:
 
   - key: map_resplit_count
     type: string
-    label: "敏感审查二次拆片数"
-    description: "单个切片或整段请求命中上游敏感内容审查时，二次拆分为几片重跑以隔离敏感句（默认 8，设 0 或 1 关闭二次拆片，上限 32）"
+    label: "二级拆片数（第1次隔离）"
+    description: "单个切片或整段请求命中上游敏感内容审查时，第一级拆分为几片重跑（默认 8，设 0 或 1 关闭，上限 32）"
     default: "8"
+
+  - key: map_resplit_l2_count
+    type: string
+    label: "三级拆片数（第2次隔离）"
+    description: "二级拆片中仍有子片命中敏感审查时，继续细分为几片重跑（默认 4，上限 16）"
+    default: "4"
+
+  - key: map_resplit_l3_count
+    type: string
+    label: "四级拆片数（第3次隔离）"
+    description: "三级拆片仍命中敏感审查时，继续细分为几片直到精准丢弃单条/极少量敏感消息（默认 2，上限 8）"
+    default: "2"
+
+  - key: map_resplit_max_depth
+    type: string
+    label: "敏感审查最大二次拆片级数"
+    description: "最多允许递归拆片级数（默认 3 即最多三级二次拆片、共 4 次尝试机会；范围 0~3）"
+    default: "3"
 
   - key: auto_analysis_time
     type: string
@@ -121,10 +139,16 @@ configs:
     description: "forward=整份做成一条合并转发（默认）；per_section=每个板块合成一条；per_item=每条目一条消息（会刷屏）"
     default: "forward"
 
+  - key: top_users_count
+    type: string
+    label: "发言主力军展示人数"
+    description: "发言主力军板块默认展示的活跃群友人数，默认 5"
+    default: "5"
+
   - key: sections
     type: list
     label: "板块：顺序 | 标题 | 条数上限"
-    description: "每行 key|标题|上限。key 可取 overview/topics/quotes/titles/critique/projects/news/stats；上限 0 关闭该板块，-1 不限；行的先后即发送顺序"
+    description: "每行 key|标题|上限。key 可取 overview/top/topics/quotes/titles/critique/projects/ai_monitor/news/stats；上限 0 关闭该板块，-1 不限；行的先后即发送顺序"
     default:
       - "overview|📊 群聊概况|1"
       - "top|🔥 发言主力军|1"
@@ -133,6 +157,7 @@ configs:
       - "titles|👑 群友特色头衔 / 画像|6"
       - "critique|🎭 聊天质量分析与人设点评|4"
       - "projects|🧪 开源项目列表|20"
+      - "ai_monitor|🤖 今日 AI 重置与官方状态监控|1"
       - "news|📰 今日新闻|70"
       - "stats|📈 本次分析统计|1"
 
@@ -207,13 +232,13 @@ configs:
   - key: vision_image_limit
     type: string
     label: 每份报告图片描述上限
-    description: 超过上限的图片只记「[图片]」，默认 10，防止总结耗时过长
-    default: "10"
+    description: 超过上限的图片只记「[图片]」，默认 30（含合并转发内层图片）
+    default: "30"
 
   - key: expand_reply
     type: bool
     label: 展开回复引用
-    description: 把被回复消息的前 80 字作为上下文并入语料
+    description: 把被回复消息的前 140 字（含 [图#]/[转发#] 标签）作为上下文并入语料
     default: true
 
   - key: send_interval

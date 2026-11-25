@@ -42,6 +42,8 @@ end
 local common = load_module("common")
 local sources = load_module("sources", common)
 local enrich = load_module("enrich", common, sources)
+local prompts = load_module("prompts", common)
+local mapreduce = load_module("mapreduce", common, prompts)
 
 local PLUGIN_NAME = common.PLUGIN_NAME
 local TABLE_MESSAGES = common.TABLE_MESSAGES
@@ -177,15 +179,11 @@ function on_message(event)
             if not kept then
                 local fid = raw_msg:match("%[CQ:forward,id=([^,%]]+)%]")
                 if fid then
-                    bot_forward_text = sources.da_forward_text(fid, true)
+                    bot_forward_text = sources.da_forward_text(fid, true, 0, false)
                     kept = common.is_bot_output(bot_forward_text)
                 end
             end
             if not kept then
-                if raw_msg:find("📦", 1, true) or raw_msg:find("📰", 1, true) then
-                    jn.log.warn(string.format("[%s] 疑似本机卡片输出但水印校验失败，未入库: %s",
-                        PLUGIN_NAME, raw_msg:sub(1, 80)))
-                end
                 return false, nil
             end
         end
@@ -228,8 +226,8 @@ local function fetch_group_messages(group_id, hours)
     local limit = common.da_num("fetch_limit", 1500)
     if limit < 100 then limit = 100 end
     local sql = [[
-        SELECT id, user_id, nickname, content, raw_message, created_at FROM (
-            SELECT id, user_id, nickname, content, raw_message, created_at
+        SELECT id, user_id, nickname, content, raw_message, message_id, created_at FROM (
+            SELECT id, user_id, nickname, content, raw_message, message_id, created_at
             FROM ]] .. TABLE_MESSAGES .. [[
             WHERE group_id = ?
               AND created_at >= NOW() - (INTERVAL '1 hour' * ?)
@@ -315,8 +313,9 @@ local function is_low_signal_content(content)
     -- 含链接、合并转发、分享卡片、图像识别描述一律保留
     if s:find("https?://") or s:find("github%.com", 1, true)
         or s:find("huggingface%.co", 1, true) or s:find("modelscope%.", 1, true)
-        or s:find("【合并转发", 1, true) or s:find("【分享卡片", 1, true)
-        or s:find("【图片：", 1, true) then
+        or s:find("【合并转发", 1, true) or s:find("[转发#", 1, true)
+        or s:find("【分享卡片", 1, true)
+        or s:find("【图片：", 1, true) or s:find("[图#", 1, true) then
         return false
     end
     local core = s:gsub("【回复.-」】", "")
@@ -373,9 +372,9 @@ local function build_stream_messages(messages)
         local m = r.first
         local msg_limit = max_chars
         if tostring(m.raw_message or ""):find("[CQ:forward,", 1, true) then
-            msg_limit = math.max(max_chars, 2000)
+            msg_limit = math.max(max_chars, 3000)
         end
-        local content = common.clip_head_tail(m.content or "", msg_limit)
+        local content = common.clip_head_tail(common.strip_wm(m.content or ""), msg_limit)
         if r.count > 1 then
             if #r.user_names <= 1 then
                 content = content .. string.format("（连发 %d 次）", r.count)
@@ -410,164 +409,17 @@ local function build_stream_messages(messages)
     return kept, #runs, (#all_items - #kept)
 end
 
-local function format_chat_stream(messages, start_idx)
-    start_idx = start_idx or 1
-    local formatted = {}
-    for idx, msg in ipairs(messages) do
-        local created = tostring(msg.created_at or "")
-        local time_str = created:match("(%d%d:%d%d)") or "未知时间"
-        -- 只给昵称、绝不给 QQ 号：避免模型在话题与金句中泄露号码
-        local name = tostring(msg.nickname or ("群友" .. tostring(msg.user_id)))
-        name = name:gsub('[<>\r\n"]', " ")
-        local body = tostring(msg.content or ""):gsub("\r", ""):gsub("%s*\n+%s*", " / ")
-
-        formatted[#formatted + 1] = string.format(
-            '[#%d %s] %s: %s',
-            start_idx + idx - 1, time_str, name, body
-        )
-    end
-    return common.safe_concat(formatted, "\n")
-end
+local format_chat_stream = common.format_chat_stream
 
 -- ============================================================================
--- 6. LLM 人设与分析提示词
+-- 6. LLM 提示词封装（由 prompts.lua 实现）
 -- ============================================================================
-local function get_bot_persona_prompt()
-    local persona_style = jn.config.get("use_bot_persona") or "deep"
-    if persona_style == "none" or persona_style == false or persona_style == "false" then
-        return "你是一个客观、严谨、幽默的群聊内容分析专家。"
-    end
-
-    local persona_text = ""
-    if jn.agent and jn.agent.get_persona then
-        local p = jn.agent.get_persona()
-        if type(p) == "table" and p.content and p.content ~= "" then
-            persona_text = p.content
-        elseif type(p) == "string" and p ~= "" then
-            persona_text = p
-        end
-    end
-
-    if persona_text ~= "" then
-        if persona_style == "deep" then
-            return "【你的人格设定（最高优先级，在话题分析、点评和全群总结时，深度还原此人设口吻、口癖与性格特质）】：\n" .. persona_text
-        else
-            return "【你的人格参考（保持适度幽默风趣，口吻贴合此人设）】：\n" .. persona_text
-        end
-    end
-
-    return "你是一个风趣幽默、擅长观察但又不失温情的群聊观察员。"
-end
-
-local function build_analysis_prompt(chat_stream, stats, persona_prompt)
+local function build_section_caps()
     local caps = {}
-    for _, sec in ipairs(report.parse_sections_config()) do caps[sec.key] = sec.cap end
-    local max_topics = caps.topics or 0
-    local max_quotes = caps.quotes or 0
-    local max_titles = caps.titles or 0
-    local max_critiques = caps.critique or 0
-    local use_persona = jn.config.get("use_bot_persona") or "deep"
-
-    local topics_rule
-    if max_topics > 0 then
-        topics_rule = string.format("提取不多于 %d 个今日核心热门话题", max_topics)
-    elseif max_topics == -1 then
-        topics_rule = "提取今日出现的所有核心热门话题，不限数量上限"
-    else
-        topics_rule = "无需提取话题（本项已关闭）"
+    for _, sec in ipairs(report.parse_sections_config()) do
+        caps[sec.key] = sec.cap
     end
-
-    local quotes_rule
-    if max_quotes > 0 then
-        quotes_rule = string.format("甄选不多于 %d 句最具冲击力、反差感、神反转的「群圣经/高光金句」；引用必须逐字完整，禁止省略或概括", max_quotes)
-    elseif max_quotes == -1 then
-        quotes_rule = "甄选今日所有的逆天、反差、高光「群圣经/金句」，不限数量上限；引用必须逐字完整，禁止省略或概括"
-    else
-        quotes_rule = "无需提取金句（本项已关闭）"
-    end
-
-    local titles_rule
-    if max_titles > 0 then
-        titles_rule = string.format("为不多于 %d 位发言活跃群友评选极具特色的荣誉头衔与行为特征画像", max_titles)
-    elseif max_titles == -1 then
-        titles_rule = "为今日所有活跃群友评选极具特色的头衔与行为特征画像，不限数量上限"
-    else
-        titles_rule = "无需评选头衔（本项已关闭）"
-    end
-
-    local critique_rule
-    if max_critiques ~= 0 then
-        local count_text = (max_critiques > 0) and string.format("不多于 %d 个", max_critiques) or "不限数量"
-        if use_persona == "none" then
-            critique_rule = string.format("将今日聊天划分为 %s 抽象维度（如技术研讨、职业焦虑、日常摸鱼），为每个维度计算大致占比百分比，并给出客观严谨的分析点评与全天综合表现总结！", count_text)
-        else
-            critique_rule = string.format("将今日聊天划分为 %s 抽象维度（如技术研讨、职业焦虑、日常摸鱼），为每个维度计算大致占比百分比，并【结合你的人格设定】给出贴合你性格与口吻的精彩、幽默或生动点评，最后附一句全天综合表现总结！", count_text)
-        end
-    else
-        critique_rule = "无需进行聊天质量点评（本项已关闭）"
-    end
-
-    return string.format([[
-%s
-
-你现在正在为群聊生成一份智能的「今日群聊日常分析报告」。
-请根据下方给出的【群聊记录数据流】，按规则完成分析，并以严格的纯 JSON 格式返回。
-
-## 核心任务要求：
-1. 话题分析：%s。
-   - summary 必须写成 150-300 字的叙事段落：交代起因、谁抛出了什么、群里怎么交锋、最后的结论或笑点；点名具体发言人（真实昵称），可以引用短句。
-   - 禁止把「某人分享了一个链接/单篇短评/一个仓库」单独列为话题——除非群里围绕它展开了讨论。零散分享并入最相关的话题；若群里有成批合并转发的多篇公众号/资讯合集且未展开讨论，可合并成一条「资讯搬运」概述。
-   - 提及发言人必须使用真实【QQ昵称】（nickname 属性），严禁只写参与者编号或纯 QQ 号。
-   - 标题不超过 20 字，禁止「讨论 XX」「关于 XX」这种空壳标题。
-2. 群圣经甄选：%s。
-   ⚠️【入选门槛】只收让人拍案叫绝的内容：逆天逻辑、神反转、离谱反差、精准吐槽、或者真的牛逼。纯报错、纯复读、无信息短句一律不收，宁缺毋滥。
-   ⚠️【只取本人正文】只收发言人自己打出的字。严禁把「【回复 某人：「…」】」这类被引用的原文写进 content；清掉 [CQ:...] 与 [图片] 等占位符。
-   ⚠️【合并同人连发】同一个人连续 2-3 条消息如果合起来才成立（铺垫 + 抖包袱），合并成一条，content 用 \n 保留原貌。
-   ⚠️【防拆分】每行 `[#编号 HH:MM]` 是一条完整发言，不得按空行拆成多条；msg_id 填对应的数字编号，sender 必须是真实昵称。
-3. 群友头衔：%s。user 必须填群友真实昵称。
-4. 质量锐评与人设点评：%s。
-
-## 返回 JSON 数据结构规范（严禁包含 markdown 代码块包裹之外的杂质，必须是合法 JSON）：
-```json
-{
-  "topics": [
-    {
-      "title": "话题标题（不超过 20 字）",
-      "summary": "150-300 字叙事：起因、谁怎么说、交锋焦点、结论或笑点，点名发言人昵称",
-      "participants": "主要讨论者（使用真实昵称，逗号分隔）"
-    }
-  ],
-  "golden_quotes": [
-    {
-      "msg_id": 1,
-      "sender": "发言人真实昵称",
-      "content": "金句原文：逐字完整引用本人正文，保留原有换行；严禁省略、缩写、只留开头结尾或用省略号代替中间内容。不含被引用内容与 CQ 码；同人连发用换行串联",
-      "reason": "入选理由（具体说明其逆天逻辑/神人反差/笑点）"
-    }
-  ],
-  "user_titles": [
-    {
-      "user": "群友真实昵称",
-      "title": "幽默专属头衔",
-      "description": "获此头衔的行为特征点评"
-    }
-  ],
-  "critique": {
-    "dimensions": [
-      {
-        "name": "抽象维度名称（如职业焦虑/技术交锋/深夜水群）",
-        "percentage": 30,
-        "comment": "深度还原你人设口吻的犀利点评"
-      }
-    ],
-    "overall_summary": "以你的人设口吻给出的全天群聊综合表现霸气金句总结"
-  }
-}
-```
-
-## 群聊记录数据流（共 %d 条）：
-%s
-]], persona_prompt, topics_rule, quotes_rule, titles_rule, critique_rule, stats.total_count, chat_stream)
+    return caps
 end
 
 -- ============================================================================
@@ -724,378 +576,6 @@ local function release_provider_slot()
     end
 end
 
-local function partition_stream_chunks(stream_messages, chunk_chars, max_chunks)
-    max_chunks = max_chunks or 8
-    local total = 0
-    for idx, msg in ipairs(stream_messages) do
-        local line = format_chat_stream({ msg }, idx)
-        total = total + #line + 1
-    end
-    local budget = math.max(8000, chunk_chars)
-    if total > budget * max_chunks then
-        budget = math.ceil(total / max_chunks)
-    end
-    local chunks, cur_msgs, cur_start, cur_size = {}, {}, 1, 0
-    for idx, msg in ipairs(stream_messages) do
-        local line_len = #format_chat_stream({ msg }, idx) + 1
-        if cur_size + line_len > budget and #cur_msgs > 0 then
-            chunks[#chunks + 1] = { start_idx = cur_start, msgs = cur_msgs }
-            cur_msgs, cur_start, cur_size = {}, idx, 0
-        end
-        cur_msgs[#cur_msgs + 1] = msg
-        cur_size = cur_size + line_len
-    end
-    if #cur_msgs > 0 then
-        chunks[#chunks + 1] = { start_idx = cur_start, msgs = cur_msgs }
-    end
-    return chunks
-end
-
-local function build_map_prompt(chunk_stream, part_idx, total_parts, persona_prompt)
-    return string.format([[%s
-
-你正在执行大群日报的【第 %d/%d 时段切片提炼】任务。请从以下聊天片段中提取关键话题、高光金句和该时段人物/氛围亮点，严格返回纯 JSON：
-```json
-{
-  "topics": [
-    { "title": "话题标题(≤20字)", "summary": "80-160字分段叙事（点名真实昵称、交代起因结论）", "participants": "主要讨论者昵称，逗号分隔" }
-  ],
-  "golden_quotes": [
-    { "msg_id": 1, "sender": "真实昵称", "content": "逐字原话(不含回复引用和CQ码)", "reason": "简短入选理由" }
-  ],
-  "highlights": ["1-2条时段氛围或活跃人物特点简述"]
-}
-```
-注意：每行 `[#编号 HH:MM] 昵称: 内容` 中的编号即 `msg_id`；零散分享可忽略或合并，不要输出多余说明。
-
-## 群聊切片记录：
-%s]], persona_prompt, part_idx, total_parts, chunk_stream)
-end
-
-local function build_reduce_prompt(map_items, stats, persona_prompt, full_prompt_header_fn)
-    local parts = {}
-    local idx_ok = 0
-    for k, m in ipairs(map_items) do
-        if m.data then
-            idx_ok = idx_ok + 1
-            parts[#parts + 1] = string.format("【切片 %d 结果】\n%s", k, jn.json.encode(m.data))
-        end
-    end
-    local top_lines = {}
-    for i = 1, math.min(10, #(stats.top_users or {})) do
-        local u = stats.top_users[i]
-        top_lines[#top_lines + 1] = string.format("- %s: %d 条发言", u.name, u.count)
-    end
-    local digest_stream = string.format(
-        "以下为全天 %d 个时段切片的结构化提炼结果（共原始发言 %d 条，请去重合并跨切片同话题、精炼为最终完整 JSON 报告）：\n\n### 活跃发言榜 Top10：\n%s\n\n### 分段提炼汇总：\n%s",
-        idx_ok, stats.total_count,
-        #top_lines > 0 and table.concat(top_lines, "\n") or "无",
-        table.concat(parts, "\n\n")
-    )
-    return full_prompt_header_fn(digest_stream)
-end
-
-local MODERATION_HINTS = {
-    "敏感内容", "敏感信息", "敏感词", "安全审核", "内容安全", "违规内容",
-    "无法响应您的请求", "content_filter", "data_inspection_failed", "sensitive",
-    "inappropriate", "high_risk", "safety policy",
-}
-
-local function is_moderation_rejection(resp, err)
-    local combined = (tostring(resp or "") .. " " .. tostring(err or "")):lower()
-    for _, pat in ipairs(MODERATION_HINTS) do
-        if combined:find(pat, 1, true) then return true end
-    end
-    return false
-end
-
-local function merge_map_subresults(a, b)
-    if not a then return b end
-    if not b then return a end
-    local out = { topics = {}, golden_quotes = {}, highlights = {} }
-    for _, src in ipairs({ a, b }) do
-        for _, t in ipairs(src.topics or {}) do out.topics[#out.topics + 1] = t end
-        for _, q in ipairs(src.golden_quotes or {}) do out.golden_quotes[#out.golden_quotes + 1] = q end
-        for _, h in ipairs(src.highlights or {}) do out.highlights[#out.highlights + 1] = h end
-    end
-    return out
-end
-
-local function slice_messages(msgs, s_idx, e_idx)
-    local out = {}
-    for i = s_idx, math.min(e_idx, #msgs) do out[#out + 1] = msgs[i] end
-    return out
-end
-
-local function split_messages_evenly(msgs, start_idx, parts_count)
-    local n = #msgs
-    local max_slices = math.max(1, math.floor(n / 2))
-    local actual_parts = math.max(1, math.min(parts_count, max_slices))
-    local sub_slices = {}
-    local base_len = math.floor(n / actual_parts)
-    local rem = n % actual_parts
-    local offset = 1
-    for p = 1, actual_parts do
-        local len = base_len + (p <= rem and 1 or 0)
-        if len > 0 then
-            sub_slices[#sub_slices + 1] = {
-                start_idx = start_idx + offset - 1,
-                msgs = slice_messages(msgs, offset, offset + len - 1),
-            }
-            offset = offset + len
-        end
-    end
-    return sub_slices
-end
-
-local function run_with_concurrency(items, concurrency, worker_fn, on_all_done)
-    local n = #items
-    if n == 0 then
-        on_all_done({})
-        return
-    end
-    local results, next_i, in_flight, finished, done_called = {}, 1, 0, 0, false
-    local function dispatch_next()
-        while in_flight < concurrency and next_i <= n and not done_called do
-            local idx = next_i
-            next_i = next_i + 1
-            in_flight = in_flight + 1
-            worker_fn(idx, items[idx], function(res)
-                in_flight = in_flight - 1
-                finished = finished + 1
-                results[idx] = res
-                if finished >= n and not done_called then
-                    done_called = true
-                    on_all_done(results)
-                else
-                    dispatch_next()
-                end
-            end)
-        end
-    end
-    dispatch_next()
-end
-
-local function run_map_slice_resplit(group_id, msgs, start_idx, label, total_parts, persona_prompt, llm_timeout, depth, budget, resplit_parts, on_slice_done)
-    local c_stream = format_chat_stream(msgs, start_idx)
-    local mprompt = build_map_prompt(c_stream, label, total_parts, persona_prompt)
-    local io_chars = #mprompt
-
-    common.llm_chat_async({
-        { role = "system", content = persona_prompt },
-        { role = "user", content = mprompt },
-    }, { timeout = llm_timeout }, function(resp, err)
-        if not err and resp and resp ~= "" then
-            io_chars = io_chars + #resp
-            local obj, perr = common.decode_llm_json(resp, tostring(label))
-            if obj then
-                on_slice_done(obj, nil, io_chars)
-                return
-            end
-            err = perr or "JSON 解析失败"
-        end
-
-        local split_n = math.min(32, math.floor(resplit_parts or 8))
-        if is_moderation_rejection(resp, err) and depth < 1 and split_n >= 2 and #msgs >= 8 and budget.remaining > 0 then
-            budget.remaining = budget.remaining - 1
-            local sub_slices = split_messages_evenly(msgs, start_idx, split_n)
-            jn.log.warn(string.format("[%s] 群 %d Map-%s 命中敏感审查 (%d 条)，二次拆分为 %d 片挽救...",
-                PLUGIN_NAME, group_id, tostring(label), #msgs, #sub_slices))
-            run_with_concurrency(sub_slices, 2, function(k, sub, cb)
-                local sub_label = string.format("%s.%d", tostring(label), k)
-                run_map_slice_resplit(group_id, sub.msgs, sub.start_idx, sub_label, total_parts, persona_prompt, llm_timeout, depth + 1, budget, resplit_parts, function(s_obj, s_err, s_chars)
-                    cb({ data = s_obj, err = s_err, chars = s_chars or 0 })
-                end)
-            end, function(sub_results)
-                local merged, last_err, sub_chars = nil, nil, io_chars
-                for _, sr in ipairs(sub_results) do
-                    sub_chars = sub_chars + (sr.chars or 0)
-                    if sr.data then
-                        merged = merge_map_subresults(merged, sr.data)
-                    elseif sr.err then
-                        last_err = sr.err
-                    end
-                end
-                local final_err = merged and nil or tostring(last_err or "二次拆片均未成功")
-                on_slice_done(merged, final_err, sub_chars)
-            end)
-            return
-        end
-
-        jn.log.warn(string.format("[%s] 群 %d Map-%s 失败: %s",
-            PLUGIN_NAME, group_id, tostring(label), tostring(err or "空响应")))
-        on_slice_done(nil, tostring(err or "空响应"), io_chars)
-    end)
-end
-
-local function run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, llm_timeout, chunk_chars, model_desc, on_done, forced_chunks, initial_depth)
-    local chunks = forced_chunks or partition_stream_chunks(stream_messages, chunk_chars, 8)
-    if #chunks <= 1 then
-        local stream_txt = format_chat_stream(stream_messages)
-        local prompt = build_analysis_prompt(stream_txt, stats, persona_prompt)
-        jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 超时: %ds, 模型: %s)...",
-            PLUGIN_NAME, group_id, #prompt, llm_timeout, model_desc))
-        common.llm_chat_async({
-            { role = "system", content = persona_prompt },
-            { role = "user", content = prompt },
-        }, { timeout = llm_timeout }, function(resp, err)
-            if err or not resp or resp == "" then
-                on_done(nil, tostring(err or "空响应"), #prompt)
-                return
-            end
-            local obj, perr = common.decode_llm_json(resp, "LLM")
-            if not obj then
-                local tag_err = is_moderation_rejection(resp, nil) and ("moderation_rejected: " .. common.clip(resp, 80)) or (perr or "JSON 解析失败")
-                on_done(nil, tag_err, #prompt + #resp)
-                return
-            end
-            on_done(obj, nil, math.floor((#prompt + #resp) / 2))
-        end)
-        return
-    end
-
-    local resplit_parts = math.min(32, math.floor(common.da_num("map_resplit_count", 8)))
-    jn.log.info(string.format("[%s] 群 %d %s，启动 Map-Reduce 分段分析（%d 段，并发 2，模型: %s）...",
-        PLUGIN_NAME, group_id, forced_chunks and "二次拆片挽救" or "语料超阈值", #chunks, model_desc))
-    local resplit_budget = { remaining = math.max(2, #chunks) }
-    local start_depth = initial_depth or 0
-
-    run_with_concurrency(chunks, 2, function(idx, c, cb)
-        run_map_slice_resplit(group_id, c.msgs, c.start_idx, idx, #chunks, persona_prompt, llm_timeout, start_depth, resplit_budget, resplit_parts, function(obj, err, io_c)
-            cb({ data = obj, err = err, io_chars = io_c or 0 })
-        end)
-    end, function(results)
-        local ok_count, total_io_chars = 0, 0
-        for _, r in ipairs(results) do
-            total_io_chars = total_io_chars + (r.io_chars or 0)
-            if r.data then ok_count = ok_count + 1 end
-        end
-        if ok_count == 0 then
-            on_done(nil, results[1] and results[1].err or "全部分片分析失败", total_io_chars)
-            return
-        end
-        local reduce_prompt = build_reduce_prompt(results, stats, persona_prompt, function(digest)
-            return build_analysis_prompt(digest, stats, persona_prompt)
-        end)
-        total_io_chars = total_io_chars + #reduce_prompt
-        jn.log.info(string.format("[%s] 群 %d Map 完成 (%d/%d 成功)，执行 Reduce 终稿汇总 (字符数: %d)...",
-            PLUGIN_NAME, group_id, ok_count, #chunks, #reduce_prompt))
-        common.llm_chat_async({
-            { role = "system", content = persona_prompt },
-            { role = "user", content = reduce_prompt },
-        }, { timeout = llm_timeout }, function(resp, err)
-            if err or not resp or resp == "" then
-                on_done(nil, tostring(err or "Reduce 空响应"), math.floor(total_io_chars / 2))
-                return
-            end
-            total_io_chars = total_io_chars + #resp
-            local obj, perr = common.decode_llm_json(resp, "Reduce")
-            if not obj then
-                on_done(nil, perr or "Reduce JSON 解析失败", math.floor(total_io_chars / 2))
-                return
-            end
-            on_done(obj, nil, math.floor(total_io_chars / 2))
-        end)
-    end)
-end
-
-local function run_main_llm_with_fallback(group_id, stream_messages, stats, persona_prompt, on_done)
-    local llm_timeout = math.max(30, common.da_num("llm_timeout", 360))
-    local map_thresh = math.max(10000, common.da_num("map_reduce_threshold", 50000))
-    local chunk_chars = math.max(8000, common.da_num("map_chunk_chars", 35000))
-    local target_str = common.da_string("text_provider_id", "")
-    local fallback_str = common.da_string("fallback_text_provider", "")
-
-    local model_desc, primary_id = acquire_provider_slot(target_str)
-
-    local function run_with_msgs(msgs, cur_desc, allow_map, cb)
-        local txt = format_chat_stream(msgs)
-        if allow_map and #txt > map_thresh then
-            run_map_reduce_async(group_id, msgs, stats, persona_prompt, llm_timeout, chunk_chars, cur_desc, cb)
-            return
-        end
-        local prompt = build_analysis_prompt(txt, stats, persona_prompt)
-        jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 超时: %ds, 模型: %s)...",
-            PLUGIN_NAME, group_id, #prompt, llm_timeout, cur_desc))
-        common.llm_chat_async({
-            { role = "system", content = persona_prompt },
-            { role = "user", content = prompt },
-        }, { timeout = llm_timeout }, function(resp, err)
-            if err or not resp or resp == "" then
-                cb(nil, tostring(err or "空响应"), math.floor(#prompt / 2))
-                return
-            end
-            local obj, perr = common.decode_llm_json(resp, "LLM")
-            if not obj then
-                local tag_err = is_moderation_rejection(resp, nil) and ("moderation_rejected: " .. common.clip(resp, 80)) or (perr or "JSON 解析失败")
-                cb(nil, tag_err, math.floor((#prompt + #resp) / 2))
-                return
-            end
-            cb(obj, nil, math.floor((#prompt + #resp) / 2))
-        end)
-    end
-
-    local function shrink_recent_half(msgs)
-        if #msgs <= 20 then return msgs end
-        local start_i = math.max(1, math.floor(#msgs / 2) + 1)
-        local out = {}
-        for i = start_i, #msgs do out[#out + 1] = msgs[i] end
-        return out
-    end
-
-    run_with_msgs(stream_messages, model_desc, true, function(data, err, est_tokens)
-        if data then
-            on_done(data, nil, est_tokens, model_desc)
-            return
-        end
-        local split_n = math.min(32, math.floor(common.da_num("map_resplit_count", 8)))
-        if is_moderation_rejection(nil, err) and split_n >= 2 and #stream_messages >= 8 then
-            local forced_chunks = split_messages_evenly(stream_messages, 1, split_n)
-            jn.log.warn(string.format("[%s] 群 %d 单次请求命中敏感审查 (%d 条)，二次拆分为 %d 片挽救...",
-                PLUGIN_NAME, group_id, #stream_messages, #forced_chunks))
-            run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, llm_timeout, chunk_chars, model_desc, function(mdata, merr, mtokens)
-                if mdata then
-                    on_done(mdata, nil, mtokens, model_desc)
-                else
-                    on_done(nil, tostring(merr or err), mtokens, model_desc)
-                end
-            end, forced_chunks, 1)
-            return
-        end
-        jn.log.warn(string.format("[%s] 群 %d 主分析失败 (%s)，启动自动降级重试...",
-            PLUGIN_NAME, group_id, tostring(err)))
-
-        -- 降级 1：若配置了备用模型且不同于主模型，切换备用模型重跑（缩半窗口加速兜底）
-        if fallback_str ~= "" then
-            local fb_desc, fb_id = acquire_provider_slot(fallback_str)
-            if fb_id ~= "" and fb_id ~= primary_id then
-                local half_msgs = shrink_recent_half(stream_messages)
-                run_with_msgs(half_msgs, fb_desc, true, function(fb_data, fb_err, fb_tokens)
-                    if fb_data then
-                        on_done(fb_data, nil, fb_tokens, fb_desc)
-                    else
-                        on_done(nil, "主与备用模型均失败: " .. tostring(fb_err), fb_tokens, fb_desc)
-                    end
-                end)
-                return
-            end
-        end
-
-        -- 降级 2：无可用备用模型时，收缩至最近 50% 语料（单次轻量）兜底重试
-        local half_msgs = shrink_recent_half(stream_messages)
-        if #half_msgs < #stream_messages then
-            run_with_msgs(half_msgs, model_desc, false, function(d2, e2, t2)
-                if d2 then
-                    on_done(d2, nil, t2, model_desc)
-                else
-                    on_done(nil, "降级重试失败: " .. tostring(e2), t2, model_desc)
-                end
-            end)
-        else
-            on_done(nil, tostring(err), est_tokens, model_desc)
-        end
-    end)
-end
 
 local pump_group_queue
 
@@ -1170,13 +650,18 @@ local function start_group_pipeline(spec, on_pipeline_done)
         return
     end
 
-    -- 2. 全量统计概况（不受低质过滤影响）+ CQ 展开 + 归并过滤 + 紧凑流
+    -- 2. 全量统计概况（不受低质过滤影响）+ CQ 展开（含转发图片与编号索引）+ 归并过滤 + 紧凑流
     local stats = analyze_statistics(messages)
     sources.reset_vision_counter()
     local expanded = 0
+    local expanded_by_msg_id = {}
     for _, m in ipairs(messages) do
         local before = m.content or ""
-        m.content = sources.expand_cq_content(m.raw_message, before)
+        m.content = sources.expand_cq_content(m.raw_message, before, expanded_by_msg_id)
+        local mid = tonumber(m.message_id)
+        if mid and mid > 0 then
+            expanded_by_msg_id[mid] = m
+        end
         if m.content ~= before then expanded = expanded + 1 end
     end
     local stream_messages, merged_count, filtered_count = build_stream_messages(messages)
@@ -1184,7 +669,8 @@ local function start_group_pipeline(spec, on_pipeline_done)
         PLUGIN_NAME, expanded, #messages, sources.vision_used(), #messages, merged_count, filtered_count))
     local chat_stream = format_chat_stream(stream_messages)
     for line in chat_stream:gmatch("[^\n]+") do
-        if line:find("【合并转发", 1, true) or line:find("【图片：", 1, true) then
+        if line:find("[转发#", 1, true) or line:find("[图#", 1, true)
+            or line:find("【合并转发", 1, true) or line:find("【图片：", 1, true) then
             jn.log.info("[" .. PLUGIN_NAME .. "] 展开样例: " .. common.clip(line, 400))
         end
     end
@@ -1199,14 +685,17 @@ local function start_group_pipeline(spec, on_pipeline_done)
         local projs, arts = sources.collect_sources(all_messages)
         precollected = { projects = projs, articles = arts }
         if common.da_bool("enable_news", true) then
-            pending_wx = enrich.prepare_article_fetch(arts, 12)
+            pending_wx = enrich.prepare_article_fetch(arts, 20)
         end
     end
 
     local function after_wx_fetched()
-        local persona_prompt = get_bot_persona_prompt()
+        local persona_prompt = prompts.get_bot_persona_prompt()
+        local section_caps = build_section_caps()
         local function proceed_main_llm()
-            run_main_llm_with_fallback(group_id, stream_messages, stats, persona_prompt, function(analysis_data, err, est_tokens, active_model_desc)
+            mapreduce.run_main_llm_with_fallback(group_id, stream_messages, stats, persona_prompt, section_caps, {
+                acquire_provider_slot = acquire_provider_slot,
+            }, function(analysis_data, err, est_tokens, active_model_desc)
                 if err or not analysis_data then
                     jn.log.error("[" .. PLUGIN_NAME .. "] LLM 分析失败: " .. tostring(err))
                     complete(false, "LLM 调用失败: " .. tostring(err))
