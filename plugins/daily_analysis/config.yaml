@@ -247,3 +247,21 @@ configs:
     description: 拆条/降级/补图等多条连续发送之间的最小等待秒数，默认 15；0 表示不等待
     default: "15"
 
+  - key: backfill_on_startup
+    type: bool
+    label: 断线重连后自动补全群消息
+    description: 开启后，插件启动连接就绪及每日报告前自动调用 get_group_msg_history 拉取离线期间漏收消息入库（按 message_id 去重并还原原始时间）
+    default: true
+
+  - key: backfill_hours
+    type: string
+    label: 补库回溯小时数
+    description: 自动补库最多回溯多少小时内的群消息，默认 24
+    default: "24"
+
+  - key: backfill_max_pages
+    type: string
+    label: 补库最多翻页次数
+    description: 补库时单群最多向前翻页次数（每页 50 条），默认 10
+    default: "10"
+

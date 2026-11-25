@@ -87,20 +87,14 @@ configs:
   - key: batch_window
     type: string
     label: 攒批窗口（秒）
-    description: 同一人首条公众号链接起算的等待秒数，窗口内收到的新链接继续并入同一批；0 = 不攒批立即发送
+    description: 收到最后一条公众号链接起算的等待秒数（防抖窗口），期间再发链接会重置倒计时并并入同一批；0 = 不攒批立即发送
     default: "60"
 
   - key: batch_threshold
     type: string
     label: 攒批阈值（条）
-    description: 窗口内攒满这么多条链接立即发送；同时是「合并转发」的门槛，条数 ≥ 该值才合并转发，否则每篇一条普通消息
+    description: 窗口内攒满这么多条链接立即发送；同时是「合并转发」的门槛，条数 ≥ 该值才合并转发（设为 1 即每条都走合并转发），否则每篇一条普通消息
     default: "3"
-
-  - key: single_window
-    type: string
-    label: 单篇等待（秒）
-    description: 只有 1 篇链接时的等待秒数，期间来第 2 篇会自动延长到攒批窗口；默认 10
-    default: "10"
 
   - key: merge_forward
     type: bool

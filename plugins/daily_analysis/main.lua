@@ -97,6 +97,8 @@ local function init_db()
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_pdam_group_created ON ]] .. TABLE_MESSAGES .. [[ (group_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_pdam_message_id ON ]] .. TABLE_MESSAGES .. [[ (message_id);
+        CREATE INDEX IF NOT EXISTS idx_pdam_group_msgid ON ]] .. TABLE_MESSAGES .. [[ (group_id, message_id);
         CREATE TABLE IF NOT EXISTS ]] .. TABLE_REPORTS .. [[ (
             id BIGSERIAL PRIMARY KEY,
             group_id BIGINT NOT NULL,
@@ -153,16 +155,17 @@ local function clean_message_text(raw)
 end
 
 -- ============================================================================
--- 3. 消息采集 (on_message)
+-- 3. 消息采集 (on_message) 与断线补库 (backfill)
 -- ============================================================================
-function on_message(event)
+-- 统一提取并过滤单条消息，供实时 on_message 与历史补库共用
+local function prepare_message_record(event)
     if not event or event.message_type ~= "group" then
-        return false, nil
+        return nil
     end
 
     local group_id = tonumber(event.group_id)
     if not group_id or not is_target_group(group_id) then
-        return false, nil
+        return nil
     end
 
     local sender_id = tonumber(event.user_id) or 0
@@ -184,7 +187,7 @@ function on_message(event)
                 end
             end
             if not kept then
-                return false, nil
+                return nil
             end
         end
     end
@@ -200,20 +203,140 @@ function on_message(event)
 
     local clean_text = clean_message_text(raw_msg)
     if clean_text == "" then
-        return false, nil
+        return nil
     end
     if bot_forward_text and bot_forward_text ~= "" then
         clean_text = bot_forward_text
     end
 
-    local msg_id = tonumber(event.message_id) or 0
+    return {
+        group_id = group_id,
+        user_id = sender_id,
+        nickname = nickname,
+        content = clean_text,
+        raw_message = raw_msg,
+        message_id = tonumber(event.message_id) or 0,
+        created_ts = tonumber(event.time) or 0,
+    }
+end
+
+local function insert_message_record(rec, dedup)
+    if not rec then return false end
+    if dedup and rec.message_id ~= 0 then
+        local sql = [[
+            INSERT INTO ]] .. TABLE_MESSAGES .. [[
+            (group_id, user_id, nickname, content, raw_message, message_id, created_at)
+            SELECT ?, ?, ?, ?, ?, ?, CASE WHEN ? > 0 THEN TO_TIMESTAMP(?) ELSE NOW() END
+            WHERE NOT EXISTS (
+                SELECT 1 FROM ]] .. TABLE_MESSAGES .. [[
+                WHERE group_id = ? AND message_id = ?
+            )
+        ]]
+        local _, err = jn.database.exec(sql, {
+            rec.group_id, rec.user_id, rec.nickname, rec.content, rec.raw_message, rec.message_id,
+            rec.created_ts, rec.created_ts, rec.group_id, rec.message_id,
+        })
+        return err == nil
+    end
     local sql = [[
         INSERT INTO ]] .. TABLE_MESSAGES .. [[
         (group_id, user_id, nickname, content, raw_message, message_id)
         VALUES (?, ?, ?, ?, ?, ?)
     ]]
-    jn.database.exec(sql, { group_id, sender_id, nickname, clean_text, raw_msg, msg_id })
+    local _, err = jn.database.exec(sql, {
+        rec.group_id, rec.user_id, rec.nickname, rec.content, rec.raw_message, rec.message_id,
+    })
+    return err == nil
+end
 
+local function backfill_group_history(group_id)
+    if not common.da_bool("backfill_on_startup", true) then return true end
+    if not jn.onebot11 or not jn.onebot11.get_group_msg_history then return true end
+
+    local hours = math.max(1, common.da_num("backfill_hours", 24))
+    local max_pages = math.max(1, math.min(30, common.da_num("backfill_max_pages", 10)))
+    local cutoff_ts = os.time() - hours * 3600
+
+    local latest_msg_id = 0
+    local rows = jn.database.query([[
+        SELECT message_id FROM ]] .. TABLE_MESSAGES .. [[
+        WHERE group_id = ? AND message_id <> 0
+        ORDER BY created_at DESC, id DESC LIMIT 1
+    ]], { group_id })
+    if type(rows) == "table" and rows[1] then
+        latest_msg_id = tonumber(rows[1].message_id) or 0
+    end
+
+    local cursor_seq = nil
+    local inserted = 0
+    for _ = 1, max_pages do
+        local msgs, err = jn.onebot11.get_group_msg_history(group_id, cursor_seq, 50)
+        if err then
+            if tostring(err):find("no active connection", 1, true) then
+                return false
+            end
+            jn.log.warn(string.format("[%s] 群 %d 历史消息补库失败: %s", PLUGIN_NAME, group_id, tostring(err)))
+            return false
+        end
+        if type(msgs) ~= "table" or #msgs == 0 then break end
+
+        local oldest_seq, oldest_seq_str, hit_watermark = nil, nil, false
+        for _, m in ipairs(msgs) do
+            if type(m) == "table" then
+                if not m.group_id or tonumber(m.group_id) == 0 then m.group_id = group_id end
+                if not m.message_type or m.message_type == "" then m.message_type = "group" end
+                local raw_seq = m.message_seq or m.message_id
+                local seq_num = tonumber(raw_seq)
+                if seq_num and (not oldest_seq or seq_num < oldest_seq) then
+                    oldest_seq = seq_num
+                    oldest_seq_str = tostring(raw_seq)
+                end
+                local mts = tonumber(m.time) or 0
+                local mid = tonumber(m.message_id) or 0
+                if (mts > 0 and mts < cutoff_ts) or (latest_msg_id > 0 and mid > 0 and mid <= latest_msg_id) then
+                    hit_watermark = true
+                else
+                    local rec = prepare_message_record(m)
+                    if rec and insert_message_record(rec, true) then
+                        inserted = inserted + 1
+                    end
+                end
+            end
+        end
+
+        if hit_watermark or #msgs < 50 or not oldest_seq_str or (cursor_seq and tonumber(oldest_seq_str) >= tonumber(cursor_seq)) then
+            break
+        end
+        cursor_seq = oldest_seq_str
+    end
+
+    if inserted > 0 then
+        jn.log.info(string.format("[%s] 群 %d 历史消息补库完成，新增 %d 条（随后将在报告触发时统一分片）",
+            PLUGIN_NAME, group_id, inserted))
+    end
+    return true
+end
+
+local function backfill_target_groups(force_all)
+    if not common.da_bool("backfill_on_startup", true) then return end
+    if not jn.onebot11 or not jn.onebot11.get_group_msg_history then return end
+    state.backfill_done = state.backfill_done or {}
+    for gid, _ in pairs(get_target_groups()) do
+        if force_all or not state.backfill_done[gid] then
+            if backfill_group_history(gid) then
+                state.backfill_done[gid] = true
+            end
+        end
+    end
+end
+
+function on_message(event)
+    local rec = prepare_message_record(event)
+    if not rec then
+        return false, nil
+    end
+
+    insert_message_record(rec, false)
     check_manual_trigger()
     return false, nil
 end
@@ -869,6 +992,8 @@ end
 
 local function enqueue_groups(specs)
     if type(specs) ~= "table" or #specs == 0 then return end
+    -- 报告生成前兜底补全一次断线漏收消息，保证随后分片语料完整
+    pcall(backfill_target_groups, true)
     state.group_queue = state.group_queue or {}
     state.queued_gids = state.queued_gids or {}
     state.is_analyzing = state.is_analyzing or {}
@@ -1122,6 +1247,9 @@ end
 function check_daily_timer()
     -- 第一步先续期下一次 30s 巡检，确保任何内部异常都不会让第二天定时心跳死链
     schedule_daily_check(30)
+
+    -- 首次连接就绪后自动补全离线期间的群历史消息（未连上时保持未完成状态，下次巡检重试）
+    pcall(backfill_target_groups, false)
 
     -- 看门狗巡检：防止个别群异步回调异常丢失后长期锁死队列
     if state.active_group then

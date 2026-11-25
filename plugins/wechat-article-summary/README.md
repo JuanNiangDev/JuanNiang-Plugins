@@ -74,9 +74,8 @@ https://mp.weixin.qq.com/s/-oL9KwQaOKgFPADxaPgFTQ
 | max_articles | 单条消息最多处理链接数 | 5 |
 | summary_min_chars | LLM 总结的最少字数 | 50 |
 | summary_max_chars | LLM 总结的最多字数 | 200 |
-| batch_window | 攒批等待窗口（秒），首条链接起算，0 不攒批 | 60 |
-| batch_threshold | 攒批触发与合并转发门槛（条） | 3 |
-| single_window | 仅 1 篇链接时的短等待窗口（秒） | 10 |
+| batch_window | 收到最后一条链接起算的防抖等待窗口（秒），0 不攒批 | 60 |
+| batch_threshold | 攒批触发与合并转发门槛（条，设为 1 即每条均合并转发） | 3 |
 | merge_forward | 达门槛时是否合成一条合并转发投递 | true |
 | forward_sender_name | 合并转发节点昵称（留空用机器人昵称） | 空 |
 | ua | 抓取 User-Agent（勿改回非浏览器 UA） | Chrome 126 UA |

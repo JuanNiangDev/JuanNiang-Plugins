@@ -362,31 +362,42 @@ return function(jn, common)
             end
 
             -- 2. 从 HTML / RSS description 提取嵌套的 JSON 对象片段（如 Instatus __NEXT_DATA__）
-            for status_v, msg_v, dt_v in blob:gmatch('"status"%s*:%s*"([^"]+)"[^}]*"message"%s*:%s*"([^"]-)"[^}]*"createdAt"%s*:%s*"([^"]+)"') do
-                local unesc = msg_v:gsub("\\n", "\n"):gsub('\\"', '"')
-                push_entry(common.parse_timestamp(dt_v) or 0, dt_v, status_v, unesc)
-            end
-            for status_v, body_v, dt_v in blob:gmatch('"status"%s*:%s*"([^"]+)"[^}]*"body"%s*:%s*"([^"]-)"[^}]*"created_at"%s*:%s*"([^"]+)"') do
-                local unesc = body_v:gsub("\\n", "\n"):gsub('\\"', '"')
-                push_entry(common.parse_timestamp(dt_v) or 0, dt_v, status_v, unesc)
+            -- 先按单层 {...} 分块再字段匹配，避免 [^}]* 在大 HTML 上产生 O(N^2) 回溯
+            for obj_str in blob:gmatch("{[^%{%}]+}") do
+                if #obj_str <= 4000 and obj_str:find('"status"', 1, true) then
+                    local status_v = obj_str:match('"status"%s*:%s*"([^"]+)"')
+                    local msg_v = obj_str:match('"message"%s*:%s*"([^"]-)"') or obj_str:match('"body"%s*:%s*"([^"]-)"')
+                    local dt_v = obj_str:match('"createdAt"%s*:%s*"([^"]+)"') or obj_str:match('"created_at"%s*:%s*"([^"]+)"')
+                    if status_v and msg_v and dt_v then
+                        local unesc = msg_v:gsub("\\n", "\n"):gsub('\\"', '"')
+                        push_entry(common.parse_timestamp(dt_v) or 0, dt_v, status_v, unesc)
+                    end
+                end
             end
 
             -- 3. Atlassian Statuspage RSS <p><small>Nov 25, 01:10 UTC</small><br><strong>Identified</strong> - ...</p>
-            for t_part, st_part, body_part in blob:gmatch("<[pP][^>]*>%s*<[sS][mM][aA][lL][lL][^>]*>(.-)</[sS][mM][aA][lL][lL]>.-<[sS][tT][rR][oO][nN][gG][^>]*>(.-)</[sS][tT][rR][oO][nN][gG]>%s*%-?(.-)</[pP]>") do
-                local clean_t = common.clean_html(t_part)
-                local ep = common.parse_timestamp(clean_t) or 0
-                if ep == 0 then
-                    -- 解析 "Nov 25, 01:10 UTC"（无年份，按当前年 UTC 解析）
-                    local mon_s, day_s, hh_s, mm_s = clean_t:match("(%a%a%a)%s+(%d%d?),%s*(%d%d):(%d%d)%s*UTC")
-                    local MONTHS_MAP = { jan=1, feb=2, mar=3, apr=4, may=5, jun=6, jul=7, aug=8, sep=9, oct=10, nov=11, dec=12 }
-                    local mo = mon_s and MONTHS_MAP[mon_s:lower()]
-                    if mo then
-                        local now_utc = os.date("!*t", ref_ts)
-                        local iso = string.format("%04d-%02d-%02dT%02d:%02d:00Z", now_utc.year, mo, tonumber(day_s), tonumber(hh_s), tonumber(mm_s))
-                        ep = common.parse_timestamp(iso) or 0
+            -- 先按 <p>...</p> 分块再局部提取，防止多段 (.-) 跨标签回溯
+            for p_inner in blob:gmatch("<[pP][^>]*>(.-)</[pP]>") do
+                if #p_inner <= 2000 then
+                    local t_part = p_inner:match("<[sS][mM][aA][lL][lL][^>]*>(.-)</[sS][mM][aA][lL][lL]>")
+                    local st_part, body_part = p_inner:match("<[sS][tT][rR][oO][nN][gG][^>]*>(.-)</[sS][tT][rR][oO][nN][gG]>%s*%-?(.*)")
+                    if t_part and st_part then
+                        local clean_t = common.clean_html(t_part)
+                        local ep = common.parse_timestamp(clean_t) or 0
+                        if ep == 0 then
+                            -- 解析 "Nov 25, 01:10 UTC"（无年份，按当前年 UTC 解析）
+                            local mon_s, day_s, hh_s, mm_s = clean_t:match("(%a%a%a)%s+(%d%d?),%s*(%d%d):(%d%d)%s*UTC")
+                            local MONTHS_MAP = { jan=1, feb=2, mar=3, apr=4, may=5, jun=6, jul=7, aug=8, sep=9, oct=10, nov=11, dec=12 }
+                            local mo = mon_s and MONTHS_MAP[mon_s:lower()]
+                            if mo then
+                                local now_utc = os.date("!*t", ref_ts)
+                                local iso = string.format("%04d-%02d-%02dT%02d:%02d:00Z", now_utc.year, mo, tonumber(day_s), tonumber(hh_s), tonumber(mm_s))
+                                ep = common.parse_timestamp(iso) or 0
+                            end
+                        end
+                        push_entry(ep, clean_t, common.clean_html(st_part), body_part or "")
                     end
                 end
-                push_entry(ep, clean_t, common.clean_html(st_part), body_part)
             end
 
             -- 4. 通用 HTML 时间节点行（兼容 Instatus / 中文时间如 "09:10 AM" / "2026-11-25 09:10"）
