@@ -194,5 +194,42 @@ return function(jn, common)
         return rows
     end
 
+    function M.recent_for_product(product, lookback_sec, now_ts)
+        if not product or product == "" or not (jn.database and jn.database.query) then return {} end
+        M.init()
+        local cutoff = (now_ts or os.time()) - math.max(60, tonumber(lookback_sec) or 3600)
+        local sql = [[
+            SELECT event_key, product, event_kind, title, source_url, announced_ts, payload_json
+            FROM ]] .. TABLE_SEEN .. [[
+            WHERE product = ?
+              AND announced_ts >= ?
+              AND event_kind NOT IN ('unrelated', 'seed', 'active', 'cleared')
+            ORDER BY announced_ts ASC, created_at ASC
+        ]]
+        local rows, err = jn.database.query(sql, { product, cutoff })
+        if err or type(rows) ~= "table" then return {} end
+        return rows
+    end
+
+    function M.has_open_status_incident(now_ts)
+        if not (jn.database and jn.database.query) then return false end
+        M.init()
+        local cutoff = (now_ts or os.time()) - 6 * 3600
+        local sql = [[
+            SELECT DISTINCT ON (product) product, event_kind, announced_ts
+            FROM ]] .. TABLE_SEEN .. [[
+            WHERE product IN ('openai_status', 'claude_status', 'deepseek_status')
+              AND announced_ts >= ?
+              AND event_kind IN ('status_incident', 'status_resolved')
+            ORDER BY product, announced_ts DESC, created_at DESC
+        ]]
+        local rows, err = jn.database.query(sql, { cutoff })
+        if err or type(rows) ~= "table" then return false end
+        for _, r in ipairs(rows) do
+            if r.event_kind == "status_incident" then return true end
+        end
+        return false
+    end
+
     return M
 end

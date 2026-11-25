@@ -31,9 +31,33 @@ configs:
 
   - key: poll_interval_minutes
     type: string
-    label: 轮询间隔（分钟）
-    description: 后台定时查询全部启用信源的间隔分钟数，默认 60（即每小时 1 次；最小 1 分钟；填 0 可关闭自动轮询仅靠 CronJob/手动触发）
+    label: X 与聚合源轮询间隔（分钟）
+    description: 后台定时查询 X 官方时间线与重置聚合源的间隔分钟数，默认 60（最小 1 分钟；填 0 可关闭自动轮询仅靠 CronJob/手动触发）
     default: "60"
+
+  - key: status_poll_interval_minutes
+    type: string
+    label: 官方状态页轮询间隔（分钟）
+    description: 监控 OpenAI / Claude / DeepSeek 官方状态页的独立轮询间隔，默认 20 分钟（最小 1 分钟；填 0 跟随主轮询）
+    default: "20"
+
+  - key: status_incident_poll_minutes
+    type: string
+    label: 故障进行中加速轮询（分钟）
+    description: 检测到官方服务处于未恢复故障（Investigating/Identified/Monitoring）时，状态页自动切换为此间隔高频跟踪直到恢复，默认 3 分钟；填 0 不加速
+    default: "3"
+
+  - key: lookback_minutes
+    type: string
+    label: 统一事件溯源时间窗（分钟）
+    description: 同时作用于状态页与 X/聚合源：状态页回源汇总过去 N 分钟内的全部阶段变化过程，X/聚合源过滤并关联过去 N 分钟内的动态，默认 60（即 1 小时）
+    default: "60"
+
+  - key: status_trigger_x
+    type: bool
+    label: 状态页异常时联动抓 X 源
+    description: 官方状态页检出新故障或恢复变更时，立即顺带抓取一次 X 与聚合源核对官方账号同步说明
+    default: true
 
   - key: quiet_hours
     type: string
@@ -131,9 +155,21 @@ configs:
 
   - key: max_msg_chars
     type: string
-    label: 单条提醒最大字数
-    description: 单条推送消息的总字数上限（默认 450 字），优先保留标题、时间与原帖链接
+    label: 常规重置提醒最大字数
+    description: 额度重置类单条推送消息的可见字数上限（默认 450 字），优先保留标题、时间与原帖链接
     default: "450"
+
+  - key: status_max_msg_chars
+    type: string
+    label: 状态故障时间线最大字数
+    description: "官方状态故障/恢复通知的可见字数上限：填 0（默认）表示放宽限制，由 LLM 按事件阶段过程完整度自行控制字数；填正数如 900 则按上限裁剪"
+    default: "0"
+
+  - key: allow_llm_auto_summary_len
+    type: bool
+    label: 允许 LLM 自主控制状态摘要长度
+    description: 开启后针对多阶段故障过程不强行限定 60~180 字，让模型自行判断合适长度以完整汇报时间线变化
+    default: true
 
   - key: llm_min_interval
     type: string
@@ -167,6 +203,6 @@ configs:
 
   - key: test_group
     type: string
-    label: 手动测试目标群号
-    description: 打开 manual_trigger 后接收测试诊断/回放消息的 QQ 群号；留空则发往 group_subscriptions 中的第一个群
+    label: 手动测试目标群号/私聊
+    description: "打开 manual_trigger 后接收测试诊断/回放消息的目标：填群号（如 1007385018）或 private:QQ号（如 private:2741226099）；留空则发往 group_subscriptions 中的第一个群"
     default: ""

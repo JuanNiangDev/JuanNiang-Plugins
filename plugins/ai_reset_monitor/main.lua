@@ -46,6 +46,10 @@ local state = {
     running = false,
     started_at = 0,
     last_poll_ts = 0,
+    last_status_poll_ts = 0,
+    last_x_poll_ts = 0,
+    active_status_incident = false,
+    pending_x_trigger = false,
     manual_done = false,
     was_quiet = false,
     batches = {},
@@ -61,17 +65,19 @@ local state = {
 }
 
 -- --------------------------------------------------------------------
--- 串行节流发送队列（间隔 1.5s，避免并发突发触发协议端风控）
+-- 串行节流发送队列（间隔 1.5s，避免并发突发触发协议端风控；支持群聊与 private:<qq> 测试）
 -- --------------------------------------------------------------------
-local function enqueue_send(group_id, text)
-    if not group_id or group_id <= 0 or not text or text == "" then return end
-    state.send_queue[#state.send_queue + 1] = { group_id = group_id, text = text }
+local function enqueue_send(target_id, text, is_private)
+    if not target_id or target_id <= 0 or not text or text == "" then return end
+    state.send_queue[#state.send_queue + 1] = { target_id = target_id, is_private = (is_private == true), text = text }
     if not state.send_timer_active and jn.timer and jn.timer.after then
         state.send_timer_active = true
         jn.timer.after(0.2, { action = "send_pump" })
     elseif not (jn.timer and jn.timer.after) then
-        if jn.onebot11 and jn.onebot11.send_group_msg then
-            jn.onebot11.send_group_msg(group_id, text)
+        if is_private and jn.onebot11 and jn.onebot11.send_private_msg then
+            jn.onebot11.send_private_msg(target_id, text)
+        elseif not is_private and jn.onebot11 and jn.onebot11.send_group_msg then
+            jn.onebot11.send_group_msg(target_id, text)
         end
     end
 end
@@ -82,11 +88,16 @@ local function pump_send_queue()
         return
     end
     local item = table.remove(state.send_queue, 1)
-    if item and jn.onebot11 and jn.onebot11.send_group_msg then
-        local ok, err = jn.onebot11.send_group_msg(item.group_id, item.text)
+    if item and jn.onebot11 then
+        local ok, err
+        if item.is_private and jn.onebot11.send_private_msg then
+            ok, err = jn.onebot11.send_private_msg(item.target_id, item.text)
+        elseif not item.is_private and jn.onebot11.send_group_msg then
+            ok, err = jn.onebot11.send_group_msg(item.target_id, item.text)
+        end
         if not ok then
-            jn.log.warn(string.format("[%s] 群 %s 发送失败: %s",
-                common.PLUGIN_NAME, tostring(item.group_id), tostring(err)))
+            jn.log.warn(string.format("[%s] 目标 %s:%s 发送失败: %s",
+                common.PLUGIN_NAME, item.is_private and "private" or "group", tostring(item.target_id), tostring(err)))
         end
     end
     if #state.send_queue > 0 and jn.timer and jn.timer.after then
@@ -121,11 +132,11 @@ local function flush_pending_queues()
     for _, gid in ipairs(gids) do
         local rows = store.take_pending_for_group(gid)
         if #rows > 0 then
-            local blocks = { "☀️ 夜间静默期间收到的 AI 重置/状态提醒汇总：" }
+            local blocks = { "☀️ 夜间静默期间收到的 AI 重置/状态提醒汇总：" .. common.WATERMARK }
             local ids = {}
             for _, r in ipairs(rows) do
                 ids[#ids + 1] = r.id
-                blocks[#blocks + 1] = "────────\n" .. tostring(r.message_text or "")
+                blocks[#blocks + 1] = "────────\n" .. common.strip_wm(tostring(r.message_text or ""))
             end
             -- 单条过大时按每 3 条拆段
             local chunk_size = 3
@@ -153,7 +164,7 @@ end
 -- --------------------------------------------------------------------
 local function build_diagnostic_summary(batch)
     local lines = {
-        "🩺 AI 重置与服务状态监控 — 手动诊断汇总",
+        "🩺 AI 重置与服务状态监控 — 手动诊断汇总" .. common.WATERMARK,
         "🕒 检测时间：" .. common.format_cst(os.time()),
         string.format("📡 信源统计：总计 %d 个（成功 %d / 失败 %d）",
             batch.total_sources, batch.ok_sources, batch.fail_sources),
@@ -219,21 +230,23 @@ local function dispatch_event_to_groups(batch, ev)
 
     local default_style = common.norm_style(common.cfg_string("summary_style", "both"), "both")
 
-    -- 手动回放测试：仅发送给 test_group（按该群在 group_subscriptions 中的风格，否则跟随全局默认）
+    -- 手动回放测试：仅发送给 test_group（支持 group / private:<qq>）
     if batch.is_manual and batch.replay_hours > 0 then
         local gid = batch.manual_target_gid
         if gid and gid > 0 then
             local style = default_style
-            for _, sub in ipairs(batch.subs) do
-                if sub.group_id == gid then
-                    if not sub.products[ev.product] then
-                        return
+            if not batch.manual_is_private then
+                for _, sub in ipairs(batch.subs) do
+                    if sub.group_id == gid then
+                        if not sub.products[ev.product] then
+                            return
+                        end
+                        style = sub.style or default_style
+                        break
                     end
-                    style = sub.style or default_style
-                    break
                 end
             end
-            enqueue_send(gid, llm_mod.format_alert(ev, style))
+            enqueue_send(gid, llm_mod.format_alert(ev, style), batch.manual_is_private)
             batch.replayed_count = (batch.replayed_count or 0) + 1
         end
         return
@@ -264,8 +277,13 @@ local function dispatch_event_to_groups(batch, ev)
         end
     end
 
+    if not batch.is_manual and (ev.event_kind == "status_incident" or ev.event_kind == "status_resolved") then
+        batch.status_triggered_change = true
+    end
     store.mark_seen(ev, delivered_any)
 end
+
+local start_poll
 
 local function finish_batch_if_ready(batch)
     if not batch or batch.finished then return end
@@ -282,13 +300,14 @@ local function finish_batch_if_ready(batch)
                 local summary = string.format(
                     "🧪 手动回放测试完成（最近 %d 小时）：信源 %d/%d，共命中并推送 %d 条提醒。",
                     batch.replay_hours, batch.ok_sources, batch.total_sources, batch.replayed_count or 0
-                )
-                enqueue_send(gid, summary)
-                jn.log.info(string.format("[%s] 手动回放测试完成 target=%d replayed=%d",
-                    common.PLUGIN_NAME, gid, batch.replayed_count or 0))
+                ) .. common.WATERMARK
+                enqueue_send(gid, summary, batch.manual_is_private)
+                jn.log.info(string.format("[%s] 手动回放测试完成 target=%s:%d replayed=%d",
+                    common.PLUGIN_NAME, batch.manual_is_private and "private" or "group", gid, batch.replayed_count or 0))
             else
-                enqueue_send(gid, build_diagnostic_summary(batch))
-                jn.log.info(string.format("[%s] 手动诊断报告已加入发送队列 target=%d", common.PLUGIN_NAME, gid))
+                enqueue_send(gid, build_diagnostic_summary(batch), batch.manual_is_private)
+                jn.log.info(string.format("[%s] 手动诊断报告已加入发送队列 target=%s:%d",
+                    common.PLUGIN_NAME, batch.manual_is_private and "private" or "group", gid))
             end
         else
             jn.log.warn("[" .. common.PLUGIN_NAME .. "] manual_trigger 完成，但未配置 test_group 或 group_subscriptions")
@@ -303,11 +322,20 @@ local function finish_batch_if_ready(batch)
         if not common.is_in_quiet_hours() then
             flush_pending_queues()
         end
+        state.active_status_incident = store.has_open_status_incident(os.time())
+        if batch.scope == "status" and batch.status_triggered_change
+            and common.cfg_bool("status_trigger_x", true) then
+            jn.log.info("[" .. common.PLUGIN_NAME .. "] 状态页检出异常/恢复变化，联动触发抓一次 X 与聚合源...")
+            start_poll(false, "x", "status_trigger")
+        elseif state.pending_x_trigger then
+            state.pending_x_trigger = false
+            start_poll(false, "x", "pending_trigger")
+        end
     end
 
-    jn.log.info(string.format("[%s] 轮询完成 (manual=%s, 源=%d/%d, 候选=%d, LLM校验=%d)",
-        common.PLUGIN_NAME, tostring(batch.is_manual), batch.ok_sources, batch.total_sources,
-        batch.candidate_count, batch.llm_count))
+    jn.log.info(string.format("[%s] 轮询完成 (scope=%s, manual=%s, 源=%d/%d, 候选=%d, LLM校验=%d)",
+        common.PLUGIN_NAME, tostring(batch.scope or "all"), tostring(batch.is_manual),
+        batch.ok_sources, batch.total_sources, batch.candidate_count, batch.llm_count))
 end
 
 -- --------------------------------------------------------------------
@@ -507,6 +535,60 @@ local function process_source_candidates(batch, src, body)
     end
 
     local replay_cutoff = replay_mode and (os.time() - batch.replay_hours * 3600) or 0
+    local lookback_sec = math.max(5, common.cfg_num("lookback_minutes", 60)) * 60
+    local now_ts = os.time()
+
+    local function attach_lookback_context(cand)
+        if not cand.product or cand.product == "" then return end
+        local recent = store.recent_for_product(cand.product, lookback_sec, now_ts)
+        if not recent or #recent == 0 then return end
+        local lines = {}
+        for _, r in ipairs(recent) do
+            if r.event_key ~= cand.event_key then
+                local extra = ""
+                if type(r.payload_json) == "string" and r.payload_json ~= "" then
+                    local ok_p, pj = pcall(jn.json.decode, r.payload_json)
+                    if ok_p and type(pj) == "table" and pj.objective_summary and pj.objective_summary ~= "" then
+                        extra = " | " .. common.clip(pj.objective_summary, 120)
+                    end
+                end
+                lines[#lines + 1] = string.format("[%s] (%s) %s%s",
+                    common.format_cst(tonumber(r.announced_ts) or 0),
+                    tostring(r.event_kind or ""),
+                    common.clip(tostring(r.title or ""), 60),
+                    extra)
+            end
+        end
+        if #lines > 0 then
+            cand.lookback_context = table.concat(lines, "\n")
+        end
+    end
+
+    local function enqueue_or_verify_candidate(cand)
+        attach_lookback_context(cand)
+        local f_proxy = common.cfg_string("foreign_proxy", "")
+        if cand.needs_x_lookup and cand.x_status_id then
+            batch.pending_http = batch.pending_http + 1
+            local api_u = "https://api.fxtwitter.com/status/" .. tostring(cand.x_status_id)
+            jn.http.get_async(api_u, {
+                proxy = f_proxy,
+                headers = { ["User-Agent"] = common.UA },
+                ctx = { batch_id = batch.id, stage = "verify_x", cand = cand },
+            })
+        elseif cand.needs_status_lookup and cand.status_detail_url then
+            batch.pending_http = batch.pending_http + 1
+            jn.http.get_async(cand.status_detail_url, {
+                proxy = cand.status_proxy or "",
+                headers = {
+                    ["User-Agent"] = common.UA,
+                    ["Accept"] = "application/json, text/html, */*;q=0.8",
+                },
+                ctx = { batch_id = batch.id, stage = "verify_status", cand = cand, lookback_sec = lookback_sec },
+            })
+        else
+            submit_candidate_to_llm(batch, cand)
+        end
+    end
 
     for _, cand in ipairs(candidates) do
         local slot_key = nil
@@ -525,34 +607,17 @@ local function process_source_candidates(batch, src, body)
 
             if replay_mode then
                 if (cand.announced_ts or 0) >= replay_cutoff then
-                    local f_proxy = common.cfg_string("foreign_proxy", "")
-                    if cand.needs_x_lookup and cand.x_status_id then
-                        batch.pending_http = batch.pending_http + 1
-                        local api_u = "https://api.fxtwitter.com/status/" .. tostring(cand.x_status_id)
-                        jn.http.get_async(api_u, {
-                            proxy = f_proxy,
-                            headers = { ["User-Agent"] = common.UA },
-                            ctx = { batch_id = batch.id, stage = "verify_x", cand = cand },
-                        })
-                    else
-                        submit_candidate_to_llm(batch, cand)
-                    end
+                    enqueue_or_verify_candidate(cand)
                 end
             elseif skip_cold then
                 -- 冷启动首轮：写入基线标记，防止旧帖子全部在群里刷屏
                 batch.baseline_marks[#batch.baseline_marks + 1] = cand
             elseif not store.has_seen(cand.event_key) then
-                local f_proxy = common.cfg_string("foreign_proxy", "")
-                if cand.needs_x_lookup and cand.x_status_id then
-                    batch.pending_http = batch.pending_http + 1
-                    local api_u = "https://api.fxtwitter.com/status/" .. tostring(cand.x_status_id)
-                    jn.http.get_async(api_u, {
-                        proxy = f_proxy,
-                        headers = { ["User-Agent"] = common.UA },
-                        ctx = { batch_id = batch.id, stage = "verify_x", cand = cand },
-                    })
+                -- 统一溯源时间窗：超出 lookback_minutes 的旧条目仅写基线不补发，避免联动触发翻出历史旧帖
+                if (cand.announced_ts or 0) > 0 and (now_ts - cand.announced_ts > lookback_sec) then
+                    batch.baseline_marks[#batch.baseline_marks + 1] = cand
                 else
-                    submit_candidate_to_llm(batch, cand)
+                    enqueue_or_verify_candidate(cand)
                 end
             end
         end
@@ -616,15 +681,19 @@ local function mark_x_targets_failed(batch, reason)
 end
 
 -- --------------------------------------------------------------------
--- 发起一轮轮询
+-- 发起一轮轮询（scope: "all" | "status" | "x"）
 -- --------------------------------------------------------------------
-local function start_poll(is_manual)
+start_poll = function(is_manual, scope, trigger_reason)
     if not common.cfg_bool("enabled", true) then return end
+    scope = scope or "all"
     if state.running then
         if os.time() - state.started_at > 240 then
             jn.log.warn("[" .. common.PLUGIN_NAME .. "] 上一轮轮询超时，重置状态锁")
             state.running = false
         else
+            if scope == "x" and trigger_reason == "status_trigger" then
+                state.pending_x_trigger = true
+            end
             return
         end
     end
@@ -636,29 +705,41 @@ local function start_poll(is_manual)
     end
 
     local replay_hours = is_manual and math.max(0, common.cfg_num("manual_replay_hours", 0)) or 0
-    local manual_gid = tonumber(common.cfg_string("test_group", ""))
+    local test_target_raw = common.cfg_string("test_group", "")
+    local manual_gid, manual_is_private = nil, false
+    local ttype, tid = test_target_raw:match("^(%a+):(%d+)$")
+    if ttype and tid then
+        manual_gid = tonumber(tid)
+        manual_is_private = (ttype:lower() == "private" or ttype:lower() == "user")
+    else
+        manual_gid = tonumber(test_target_raw)
+    end
     if (not manual_gid or manual_gid <= 0) and #subs > 0 then
         manual_gid = subs[1].group_id
+        manual_is_private = false
     end
 
     local needed = common.subscribed_products_union(subs)
     local fetch_all = (is_manual and replay_hours == 0)
     if is_manual and replay_hours > 0 then
         local found_sub = false
-        for _, s in ipairs(subs) do
-            if s.group_id == manual_gid then
-                needed = s.products
-                found_sub = true
-                break
+        if not manual_is_private then
+            for _, s in ipairs(subs) do
+                if s.group_id == manual_gid then
+                    needed = s.products
+                    found_sub = true
+                    break
+                end
             end
         end
         if not found_sub then fetch_all = true end
     end
 
-    local src_list = sources.build_source_list(needed, fetch_all)
+    local src_list = sources.build_source_list(needed, fetch_all, scope)
+    local want_x = (scope == "all" or scope == "x")
     local raw_xcookie = common.cfg_string("x_cookies", "")
-    local x_auth = common.parse_x_cookies(raw_xcookie)
-    local x_targets = x_auth and sources.build_x_targets(needed, fetch_all) or {}
+    local x_auth = want_x and common.parse_x_cookies(raw_xcookie) or nil
+    local x_targets = (want_x and x_auth) and sources.build_x_targets(needed, fetch_all) or {}
 
     if #src_list == 0 and #x_targets == 0 then
         if is_manual then
@@ -679,7 +760,9 @@ local function start_poll(is_manual)
     end
 
     local x_cookie_status = "未配置（仅使用免登录公开源）"
-    if raw_xcookie ~= "" and not x_auth then
+    if not want_x then
+        x_cookie_status = "本轮仅轮询状态页"
+    elseif raw_xcookie ~= "" and not x_auth then
         x_cookie_status = "格式无效（缺少 auth_token 或 ct0）"
     elseif x_auth then
         x_cookie_status = (#x_targets > 0)
@@ -693,8 +776,12 @@ local function start_poll(is_manual)
     local batch = {
         id = bid,
         is_manual = is_manual == true,
+        scope = scope,
+        trigger_reason = trigger_reason or "",
+        status_triggered_change = false,
         replay_hours = replay_hours,
         manual_target_gid = manual_gid,
+        manual_is_private = manual_is_private,
         replayed_count = 0,
         subs = subs,
         needed_products = needed,
@@ -721,9 +808,16 @@ local function start_poll(is_manual)
     }
     state.batches[bid] = batch
     state.running = true
-    state.started_at = os.time()
+    local poll_now = os.time()
+    state.started_at = poll_now
     if not is_manual then
-        state.last_poll_ts = os.time()
+        state.last_poll_ts = poll_now
+        if scope == "all" or scope == "status" then
+            state.last_status_poll_ts = poll_now
+        end
+        if scope == "all" or scope == "x" then
+            state.last_x_poll_ts = poll_now
+        end
     end
 
     for _, src in ipairs(src_list) do
@@ -932,6 +1026,16 @@ function on_http_response(req_id, ctx, result, err)
             end
         end
         submit_candidate_to_llm(batch, cand)
+    elseif ctx.stage == "verify_status" then
+        local cand = ctx.cand
+        if ok_resp then
+            local ref_ts = (cand.announced_ts and cand.announced_ts > 0) and cand.announced_ts or os.time()
+            local timeline = sources.extract_status_timeline(body, cand.desc_raw, ref_ts, ctx.lookback_sec or 3600)
+            if timeline and timeline ~= "" then
+                cand.timeline_text = timeline
+            end
+        end
+        submit_candidate_to_llm(batch, cand)
     end
 
     finish_batch_if_ready(batch)
@@ -1012,7 +1116,13 @@ end
 -- 定时心跳（30s 检查一次 manual_trigger、静默结束补发、轮询间隔）
 -- --------------------------------------------------------------------
 local function tick()
-    local interval_min = common.cfg_num("poll_interval_minutes", 60)
+    local x_interval = common.cfg_num("poll_interval_minutes", 60)
+    local st_interval = common.cfg_num("status_poll_interval_minutes", 20)
+    if st_interval <= 0 then st_interval = x_interval end
+    local inc_interval = common.cfg_num("status_incident_poll_minutes", 3)
+    if state.active_status_incident and inc_interval > 0 and inc_interval < st_interval then
+        st_interval = inc_interval
+    end
     local now = os.time()
 
     -- 1. 手动触发测试开关
@@ -1021,7 +1131,7 @@ local function tick()
     elseif not state.manual_done and common.cfg_bool("enabled", true) then
         state.manual_done = true
         jn.log.info("[" .. common.PLUGIN_NAME .. "] 检测到 manual_trigger 开启，执行诊断抓取...")
-        start_poll(true)
+        start_poll(true, "all", "manual")
     end
 
     -- 2. 静默时段刚结束时自动冲刷队列
@@ -1031,10 +1141,16 @@ local function tick()
     end
     state.was_quiet = quiet_now
 
-    -- 3. 定时轮询（分钟间隔 >= 1 时生效；0 表示关闭自动轮询）
-    if common.cfg_bool("enabled", true) and interval_min >= 1 then
-        if state.last_poll_ts == 0 or (now - state.last_poll_ts >= interval_min * 60) then
-            start_poll(false)
+    -- 3. 分级定时轮询（状态页默认 20 分钟/故障中加速；X 与聚合源默认 60 分钟）
+    if common.cfg_bool("enabled", true) then
+        local st_due = (st_interval >= 1) and (state.last_status_poll_ts == 0 or (now - state.last_status_poll_ts >= st_interval * 60))
+        local x_due = (x_interval >= 1) and (state.last_x_poll_ts == 0 or (now - state.last_x_poll_ts >= x_interval * 60))
+        if st_due and x_due then
+            start_poll(false, "all", "schedule")
+        elseif st_due then
+            start_poll(false, "status", "schedule_status")
+        elseif x_due then
+            start_poll(false, "x", "schedule_x")
         end
     end
 
@@ -1046,6 +1162,9 @@ end
 function on_timer_response(req_id, ctx, result, err)
     if err then
         jn.log.warn("[" .. common.PLUGIN_NAME .. "] 定时器回调异常: " .. tostring(err))
+        if type(ctx) == "table" and ctx.action == "tick" and jn.timer and jn.timer.after then
+            jn.timer.after(30, { action = "tick" })
+        end
         return
     end
     if type(ctx) ~= "table" then return end

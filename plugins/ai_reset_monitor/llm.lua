@@ -66,6 +66,21 @@ return function(jn, common)
         local prod_hint = cand_prod ~= "" and cand_prod or "auto"
         local kind_hint = cand_kind ~= "" and cand_kind or "auto"
         local persona = need_persona_text and M.active_persona() or ""
+        local lookback_min = math.max(5, common.cfg_num("lookback_minutes", 60))
+        local is_status = (cand_kind == "status_incident" or cand_kind == "status_resolved")
+        local auto_len = common.cfg_bool("allow_llm_auto_summary_len", true)
+        local status_cap = common.cfg_num("status_max_msg_chars", 0)
+
+        local len_rule
+        if is_status and auto_len then
+            local cap_hint = status_cap > 0 and string.format("总推送控制在 %d 字以内", status_cap) or "总字数可按故障过程详略自行把握"
+            len_rule = string.format(
+                "6. 字数与过程完整度：title ≤ 28 字；scope ≤ 24 字；objective_summary 必须按时间顺序完整汇报过去 %d 分钟（及当前故障）内的全部状态变更时间线（例如 `09:10 已定位原因，正在实施修复 → 09:20 问题已解决，服务恢复`），严禁只写最后恢复结论而丢掉前面定位/排查过程；摘要字数由你自行判断（简单事件简短，多阶段故障可详细列出每个时间节点），%s；persona_comment ≤ 90 字。",
+                lookback_min, cap_hint
+            )
+        else
+            len_rule = "6. 字数精简：title ≤ 28 字；scope ≤ 24 字；objective_summary 控制在 60~180 字（清晰交代原因、受影响对象与最新阶段进展；若时间线/近期上下文含多个状态变化须完整列出）；persona_comment ≤ 90 字，确保整条最终消息不超过 450 字。"
+        end
 
         local sys_parts = {
             "你是 AI 额度重置与官方服务状态监控审核员。请对输入的官方帖子或状态更新做严格鉴真、全中文翻译与双风格摘要，只输出合法 JSON 对象，禁止 Markdown 代码块或任何多余文字。",
@@ -85,10 +100,10 @@ return function(jn, common)
             "【铁律（必须严格遵守）】",
             "1. 【全中文翻译】title、scope、objective_summary、persona_comment 必须全部使用流畅准确的简体中文！除必需专有名词（如 Codex、Claude、Antigravity、GPT-6、Gemini、Microsoft 365、Pro/Max/Ultra/Team、API）外，绝对禁止整句或整段照抄英文原文。",
             "2. 严格区分玩笑/反讽与真实生效动作；不确定或明显闲聊时设 is_relevant=false, event_kind='unrelated'。",
-            "3. 只能依据给定原文客观翻译与总结，禁止编造具体倍数、时间点、套餐范围或故障原因。",
+            "3. 只能依据给定原文与回源时间线客观翻译与总结，禁止编造具体倍数、时间点、套餐范围或故障原因。",
             "4. 若当前已识别来源为 grok，但原文明确提到 'Grok Bot' 或发自 @bot，请将 product 设为 grok_bot。",
             "5. is_major 仅在「全员或全付费用户直接重置 (direct_reset)」「发放重置卡 (banked_reset)」或「影响核心对话/API 的重大宕机 (Major Outage)」时为 true；预告、规则变动、轻度局部异常、已恢复设为 false。",
-            "6. 字数精简：title ≤ 28 字；scope ≤ 24 字；objective_summary 控制在 60~180 字（清晰交代原因、受影响对象与最新阶段进展）；persona_comment ≤ 90 字，确保整条最终消息不超过 450 字。",
+            len_rule,
         }
 
         if persona ~= "" then
@@ -102,18 +117,26 @@ return function(jn, common)
         sys_parts[#sys_parts + 1] = ""
         sys_parts[#sys_parts + 1] = [[输出 JSON 格式：{"is_relevant":true,"confidence":0.95,"product":"","event_kind":"","is_major":true,"title":"","scope":"","objective_summary":"","persona_comment":""}]]
 
-        local user_text = table.concat({
+        local raw_clean = common.strip_wm(cand.raw_text or cand.title or "")
+        local parts = {
             "来源: " .. tostring(cand.source_name or ""),
             "预设产品键提示: " .. prod_hint,
             "预设类型提示: " .. kind_hint,
+            "溯源时间窗: 最近 " .. tostring(lookback_min) .. " 分钟",
             "时间(北京时间): " .. common.format_cst(cand.announced_ts or 0),
             "链接: " .. tostring(cand.source_url or ""),
-            "原文:\n" .. common.clip(cand.raw_text or cand.title or "", 2800),
-        }, "\n")
+        }
+        if cand.timeline_text and cand.timeline_text ~= "" then
+            parts[#parts + 1] = "详情页回源状态时间线（按时间正序）:\n" .. common.clip(common.strip_wm(cand.timeline_text), 2400)
+        end
+        if cand.lookback_context and cand.lookback_context ~= "" then
+            parts[#parts + 1] = string.format("最近 %d 分钟同产品已有记录:\n%s", lookback_min, common.clip(common.strip_wm(cand.lookback_context), 1200))
+        end
+        parts[#parts + 1] = "原文:\n" .. common.clip(raw_clean, 2800)
 
         return {
             { role = "system", content = table.concat(sys_parts, "\n") },
-            { role = "user", content = user_text },
+            { role = "user", content = table.concat(parts, "\n") },
         }
     end
 
@@ -148,6 +171,10 @@ return function(jn, common)
             is_major = false
         end
 
+        local is_status = (kind == "status_incident" or kind == "status_resolved")
+        local auto_len = is_status and common.cfg_bool("allow_llm_auto_summary_len", true)
+        local summary_cap = auto_len and 1800 or 260
+
         return {
             is_relevant = is_rel,
             confidence = conf,
@@ -156,7 +183,7 @@ return function(jn, common)
             is_major = is_major,
             title = common.clip(common.trim(d.title or cand.title or ""), 60),
             scope = common.clip(common.trim(d.scope or ""), 50),
-            objective_summary = common.clip(common.trim(d.objective_summary or ""), 240),
+            objective_summary = common.clip(common.trim(d.objective_summary or ""), summary_cap),
             persona_comment = common.clip(common.trim(d.persona_comment or ""), 120),
         }
     end
@@ -221,7 +248,7 @@ return function(jn, common)
         }
     end
 
-    -- 按配置严格控制在 max_msg_chars（默认 450 字）内，优先保留头、时间、原链与人格提示
+    -- 按配置控制可见字数（状态过程默认放宽），最后再将零宽水印附加到首行末尾（不占可见字数预算）
     function M.format_alert(ev, style)
         style = common.norm_style(style, "both")
         local effective = style
@@ -229,7 +256,17 @@ return function(jn, common)
             effective = (ev.is_major == true) and "both" or "objective"
         end
 
+        local is_status = (ev.event_kind == "status_incident" or ev.event_kind == "status_resolved")
         local max_total = math.max(120, common.cfg_num("max_msg_chars", 450))
+        if is_status then
+            local status_cap = common.cfg_num("status_max_msg_chars", 0)
+            if status_cap > 0 then
+                max_total = math.max(200, status_cap)
+            else
+                max_total = 2400
+            end
+        end
+
         local prod_label = common.PRODUCT_LABELS[ev.product] or tostring(ev.product or "AI 服务")
         local kind_label = M.kind_label(ev.event_kind)
         local icon = "🔔"
@@ -259,13 +296,12 @@ return function(jn, common)
                 body = common.trim(ev.objective_summary or ev.title or "")
             end
             body = common.clip(body, body_budget)
-            return common.clip(header .. "\n" .. body .. "\n" .. tail_str, max_total)
+            return header .. common.WATERMARK .. "\n" .. body .. "\n" .. tail_str
         end
 
         -- objective 或 both
-        local head_lines = {
-            string.format("%s 【%s】%s", icon, prod_label, kind_label),
-        }
+        local first_line = string.format("%s 【%s】%s", icon, prod_label, kind_label)
+        local head_lines = { first_line }
         if ev.title and ev.title ~= "" then
             head_lines[#head_lines + 1] = "📌 摘要：" .. common.clip(ev.title, 60)
         end
@@ -295,15 +331,22 @@ return function(jn, common)
         local tail_str = table.concat(tail_lines, "\n")
         local detail_raw = common.trim(ev.objective_summary or "")
 
+        local rendered
         if detail_raw ~= "" then
             local fixed_len = common.utf8_len(head_str) + common.utf8_len(tail_str) + common.utf8_len(persona_block) + 7
             local detail_budget = math.max(30, max_total - fixed_len)
             local detail_line = "📝 详情：" .. common.clip(detail_raw, detail_budget)
-            local full = head_str .. "\n" .. detail_line .. "\n" .. tail_str .. persona_block
-            return common.clip(full, max_total)
+            rendered = common.clip(head_str .. "\n" .. detail_line .. "\n" .. tail_str .. persona_block, max_total)
+        else
+            rendered = common.clip(head_str .. "\n" .. tail_str .. persona_block, max_total)
         end
 
-        return common.clip(head_str .. "\n" .. tail_str .. persona_block, max_total)
+        -- 水印始终附着在首行末尾，绝不参与 clip 裁剪
+        local nl = rendered:find("\n", 1, true)
+        if nl then
+            return rendered:sub(1, nl - 1) .. common.WATERMARK .. rendered:sub(nl)
+        end
+        return rendered .. common.WATERMARK
     end
 
     return M

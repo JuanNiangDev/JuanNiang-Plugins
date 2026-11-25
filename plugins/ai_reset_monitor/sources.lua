@@ -284,13 +284,179 @@ return function(jn, common)
     end
 
     -- ----------------------------------------------------------------
-    -- 构建本次轮询任务列表（按已订阅产品裁剪，减少无效请求）
+    -- 官方故障详情页与 RSS 多阶段时间线解析
     -- ----------------------------------------------------------------
-    function M.build_source_list(needed_products, fetch_all)
+    local function normalize_stage_label(s)
+        local low = tostring(s or ""):lower()
+        if low:find("resolved", 1, true) or low:find("已解决", 1, true) or low:find("已恢复", 1, true) then
+            return "Resolved(已恢复)"
+        elseif low:find("monitoring", 1, true) or low:find("监控", 1, true) or low:find("观察", 1, true) then
+            return "Monitoring(观察中)"
+        elseif low:find("identified", 1, true) or low:find("已定位", 1, true) or low:find("实施修复", 1, true) then
+            return "Identified(已定位)"
+        elseif low:find("investigating", 1, true) or low:find("排查", 1, true) then
+            return "Investigating(排查中)"
+        elseif low:find("update", 1, true) or low:find("更新", 1, true) then
+            return "Update(进展)"
+        end
+        return "Update"
+    end
+
+    local function fmt_hhmm_cst(ts, fallback_label)
+        if ts and ts > 0 then
+            return os.date("!%m-%d %H:%M", ts + 8 * 3600) .. " CST"
+        end
+        return common.trim(fallback_label or "未知时间")
+    end
+
+    function M.extract_status_timeline(raw_body, desc_raw, ref_ts, lookback_sec)
+        lookback_sec = math.max(300, tonumber(lookback_sec) or 3600)
+        ref_ts = (ref_ts and ref_ts > 0) and ref_ts or os.time()
+        local entries, seen = {}, {}
+
+        local function push_entry(ts, time_label, stage, text)
+            local body_txt = common.clean_html(text or "")
+            body_txt = common.trim(body_txt:gsub("%s+", " "))
+            if body_txt == "" then return end
+            local ts_num = tonumber(ts) or 0
+            local st_label = normalize_stage_label((stage or "") .. " " .. body_txt)
+            local label = (ts_num > 0) and fmt_hhmm_cst(ts_num, time_label) or common.trim(time_label or "")
+            local sig = tostring(ts_num) .. "|" .. label .. "|" .. body_txt:sub(1, 64)
+            if not seen[sig] then
+                seen[sig] = true
+                entries[#entries + 1] = {
+                    ts = ts_num,
+                    time_label = label,
+                    stage = st_label,
+                    text = body_txt,
+                    seq = #entries + 1,
+                }
+            end
+        end
+
+        local sources_to_scan = {}
+        if type(raw_body) == "string" and raw_body ~= "" then sources_to_scan[#sources_to_scan + 1] = raw_body end
+        if type(desc_raw) == "string" and desc_raw ~= "" then sources_to_scan[#sources_to_scan + 1] = desc_raw end
+
+        for _, blob in ipairs(sources_to_scan) do
+            -- 1. 解析 JSON 嵌入（Atlassian Statuspage incident_updates / Instatus JSON）
+            local ok_j, obj = pcall(jn.json.decode, blob)
+            if ok_j and type(obj) == "table" then
+                local up_lists = {}
+                if type(obj.incident_updates) == "table" then up_lists[#up_lists + 1] = obj.incident_updates end
+                if type(obj.incident) == "table" and type(obj.incident.incident_updates) == "table" then
+                    up_lists[#up_lists + 1] = obj.incident.incident_updates
+                end
+                if type(obj.updates) == "table" then up_lists[#up_lists + 1] = obj.updates end
+                for _, ul in ipairs(up_lists) do
+                    for _, u in ipairs(ul) do
+                        if type(u) == "table" then
+                            local t_raw = u.created_at or u.createdAt or u.display_at or u.updated_at or u.timestamp or ""
+                            local msg = u.body or u.message or u.description or u.text or ""
+                            local st = u.status or u.state or ""
+                            local ep = common.parse_timestamp(t_raw) or 0
+                            push_entry(ep, t_raw, st, msg)
+                        end
+                    end
+                end
+            end
+
+            -- 2. 从 HTML / RSS description 提取嵌套的 JSON 对象片段（如 Instatus __NEXT_DATA__）
+            for status_v, msg_v, dt_v in blob:gmatch('"status"%s*:%s*"([^"]+)"[^}]*"message"%s*:%s*"([^"]-)"[^}]*"createdAt"%s*:%s*"([^"]+)"') do
+                local unesc = msg_v:gsub("\\n", "\n"):gsub('\\"', '"')
+                push_entry(common.parse_timestamp(dt_v) or 0, dt_v, status_v, unesc)
+            end
+            for status_v, body_v, dt_v in blob:gmatch('"status"%s*:%s*"([^"]+)"[^}]*"body"%s*:%s*"([^"]-)"[^}]*"created_at"%s*:%s*"([^"]+)"') do
+                local unesc = body_v:gsub("\\n", "\n"):gsub('\\"', '"')
+                push_entry(common.parse_timestamp(dt_v) or 0, dt_v, status_v, unesc)
+            end
+
+            -- 3. Atlassian Statuspage RSS <p><small>Nov 25, 01:10 UTC</small><br><strong>Identified</strong> - ...</p>
+            for t_part, st_part, body_part in blob:gmatch("<[pP][^>]*>%s*<[sS][mM][aA][lL][lL][^>]*>(.-)</[sS][mM][aA][lL][lL]>.-<[sS][tT][rR][oO][nN][gG][^>]*>(.-)</[sS][tT][rR][oO][nN][gG]>%s*%-?(.-)</[pP]>") do
+                local clean_t = common.clean_html(t_part)
+                local ep = common.parse_timestamp(clean_t) or 0
+                if ep == 0 then
+                    -- 解析 "Nov 25, 01:10 UTC"（无年份，按当前年 UTC 解析）
+                    local mon_s, day_s, hh_s, mm_s = clean_t:match("(%a%a%a)%s+(%d%d?),%s*(%d%d):(%d%d)%s*UTC")
+                    local MONTHS_MAP = { jan=1, feb=2, mar=3, apr=4, may=5, jun=6, jul=7, aug=8, sep=9, oct=10, nov=11, dec=12 }
+                    local mo = mon_s and MONTHS_MAP[mon_s:lower()]
+                    if mo then
+                        local now_utc = os.date("!*t", ref_ts)
+                        local iso = string.format("%04d-%02d-%02dT%02d:%02d:00Z", now_utc.year, mo, tonumber(day_s), tonumber(hh_s), tonumber(mm_s))
+                        ep = common.parse_timestamp(iso) or 0
+                    end
+                end
+                push_entry(ep, clean_t, common.clean_html(st_part), body_part)
+            end
+
+            -- 4. 通用 HTML 时间节点行（兼容 Instatus / 中文时间如 "09:10 AM" / "2026-11-25 09:10"）
+            local clean_lines = common.clean_html(blob)
+            for line in (clean_lines .. "\n"):gmatch("([^\n]+)\n") do
+                local dt_iso = line:match("(%d%d%d%d%-%d%d%-%d%d[T ]%d%d:%d%d:%d%d[^%s]*)")
+                if dt_iso then
+                    local ep = common.parse_timestamp(dt_iso) or 0
+                    push_entry(ep, dt_iso, line, line)
+                else
+                    local hh, mm, ampm = line:match("(%d%d?):(%d%d)%s*([AP]M)")
+                    if hh and mm then
+                        local h = tonumber(hh)
+                        if ampm == "PM" and h < 12 then h = h + 12 end
+                        if ampm == "AM" and h == 12 then h = 0 end
+                        -- 尝试推断为当前参考日期 CST，再转为 epoch
+                        local cst_day = os.date("!%Y-%m-%d", ref_ts + 8 * 3600)
+                        local iso = string.format("%sT%02d:%02d:00+08:00", cst_day, h, tonumber(mm))
+                        local ep = common.parse_timestamp(iso) or 0
+                        if ep > ref_ts + 12 * 3600 then ep = ep - 86400 end
+                        push_entry(ep, string.format("%02d:%02d %s", tonumber(hh), tonumber(mm), ampm), line, line)
+                    end
+                end
+            end
+        end
+
+        if #entries == 0 then return nil end
+
+        -- 按时间戳从早到晚排序；无明确 timestamp 时保留原文逆序纠正为从早到晚
+        local has_ts = false
+        for _, e in ipairs(entries) do
+            if e.ts and e.ts > 0 then has_ts = true; break end
+        end
+        if has_ts then
+            table.sort(entries, function(a, b)
+                if (a.ts or 0) ~= (b.ts or 0) then
+                    return (a.ts or 0) < (b.ts or 0)
+                end
+                return a.seq > b.seq
+            end)
+        end
+
+        -- 优先筛选统一溯源时间窗 lookback_sec 内的全部阶段；若全部早于该窗则至少保留该故障最近阶段
+        local cutoff = ref_ts - lookback_sec
+        local in_window = {}
+        for _, e in ipairs(entries) do
+            if e.ts == 0 or e.ts >= cutoff then
+                in_window[#in_window + 1] = e
+            end
+        end
+        local chosen = (#in_window > 0) and in_window or entries
+        local lines = {}
+        for _, e in ipairs(chosen) do
+            lines[#lines + 1] = string.format("[%s] %s：%s",
+                e.time_label ~= "" and e.time_label or "时间未知", e.stage, e.text)
+        end
+        return table.concat(lines, "\n"), #chosen
+    end
+
+    -- ----------------------------------------------------------------
+    -- 构建本次轮询任务列表（支持 scope="all" | "status" | "x" 按独立频率裁剪）
+    -- ----------------------------------------------------------------
+    function M.build_source_list(needed_products, fetch_all, scope)
+        scope = scope or "all"
+        local want_x = (scope == "all" or scope == "x")
+        local want_status = (scope == "all" or scope == "status")
         local sources = {}
-        local fx_on = common.cfg_bool("enable_fxtwitter_sources", true)
-        local agg_on = common.cfg_bool("enable_aggregator_sources", true)
-        local st_on = common.cfg_bool("enable_status_sources", true)
+        local fx_on = want_x and common.cfg_bool("enable_fxtwitter_sources", true)
+        local agg_on = want_x and common.cfg_bool("enable_aggregator_sources", true)
+        local st_on = want_status and common.cfg_bool("enable_status_sources", true)
         local f_proxy = common.cfg_string("foreign_proxy", "")
         local c_proxy = common.cfg_string("cn_proxy", "")
 
@@ -422,26 +588,28 @@ return function(jn, common)
         end
 
         -- 自定义扩展 RSS / Atom 源（参考 juya，支持 RSSHub 等多源）
-        for idx, line in ipairs(common.cfg_list("extra_rss_feeds")) do
-            local pkey, url = line:match("^([%w_%-]+)|(https?://.+)$")
-            local mapped = nil
-            if pkey and url then
-                mapped = common.norm_product(pkey)
-            else
-                url = line
-            end
-            if url:match("^https?://") and (not mapped or need(mapped)) then
-                sources[#sources + 1] = {
-                    id = "extra_" .. tostring(idx) .. "_" .. common.fnv1a_hex(url),
-                    kind = "custom_rss",
-                    product = mapped,
-                    name = "Custom RSS #" .. tostring(idx),
-                    url = url,
-                    -- 内网地址（localhost/127.0.0.1/172.x/10.x/192.168.x/rsshub）不走海外代理
-                    proxy = (url:find("127%.0%.0%.1") or url:find("localhost")
-                        or url:find("172%.") or url:find("10%.") or url:find("192%.168%.")
-                        or url:find("rsshub:")) and "" or f_proxy,
-                }
+        if want_x then
+            for idx, line in ipairs(common.cfg_list("extra_rss_feeds")) do
+                local pkey, url = line:match("^([%w_%-]+)|(https?://.+)$")
+                local mapped = nil
+                if pkey and url then
+                    mapped = common.norm_product(pkey)
+                else
+                    url = line
+                end
+                if url:match("^https?://") and (not mapped or need(mapped)) then
+                    sources[#sources + 1] = {
+                        id = "extra_" .. tostring(idx) .. "_" .. common.fnv1a_hex(url),
+                        kind = "custom_rss",
+                        product = mapped,
+                        name = "Custom RSS #" .. tostring(idx),
+                        url = url,
+                        -- 内网地址（localhost/127.0.0.1/172.x/10.x/192.168.x/rsshub）不走海外代理
+                        proxy = (url:find("127%.0%.0%.1") or url:find("localhost")
+                            or url:find("172%.") or url:find("10%.") or url:find("192%.168%.")
+                            or url:find("rsshub:")) and "" or f_proxy,
+                    }
+                end
             end
         end
 
@@ -757,6 +925,9 @@ return function(jn, common)
                     -- 关键：同一故障每次阶段推进（Investigating→Identified→Monitoring→Resolved）都有新 pubDate / 新 description，
                     -- 因此 hash(guid + desc前缀 + pub) 可以精确做到「每阶段推进都推送一次，未变不重复」
                     local stage_sig = common.fnv1a_hex((it.guid or it.link) .. "|" .. it.pub_raw .. "|" .. common.clip(it.desc, 160))
+                    local lookback_sec = math.max(5, common.cfg_num("lookback_minutes", 60)) * 60
+                    local rss_timeline = M.extract_status_timeline(nil, it.desc_raw, it.ts > 0 and it.ts or os.time(), lookback_sec)
+                    local detail_url = (it.link ~= "" and it.link:find("/incidents/", 1, true)) and it.link or nil
                     candidates[#candidates + 1] = {
                         event_key = "st:" .. src.product .. ":" .. stage_sig,
                         product = src.product,
@@ -766,6 +937,11 @@ return function(jn, common)
                         source_url = it.link ~= "" and it.link or src.url,
                         title = it.title,
                         raw_text = combined,
+                        desc_raw = it.desc_raw,
+                        timeline_text = rss_timeline or "",
+                        needs_status_lookup = (detail_url ~= nil),
+                        status_detail_url = detail_url,
+                        status_proxy = src.proxy or "",
                         announced_ts = it.ts,
                         preverified_structured = true,
                     }
