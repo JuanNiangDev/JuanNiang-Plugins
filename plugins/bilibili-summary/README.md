@@ -3,8 +3,8 @@
 识别群聊/私聊里的 B 站内容并自动总结，支持：
 
 - 视频长链 `https://www.bilibili.com/video/BV.../?p=2`
-- 短链 `https://b23.tv/xxxxxxx`（302 到视频 / 专栏 / 动态）
-- QQ 小程序卡片（`meta.detail_1.qqdocurl` 里的 b23 链接）
+- 短链 `https://b23.tv/xxxxxxx`、`https://bili2233.cn/xxxxxxx`（302 到视频 / 专栏 / 动态）
+- QQ 小程序卡片（`meta.detail_1.qqdocurl` 里的 `b23.tv` / `bili2233.cn` 链接）
 - 专栏 `https://www.bilibili.com/opus/<id>`、旧版 `read/cv<id>`
 
 ## 输出格式
