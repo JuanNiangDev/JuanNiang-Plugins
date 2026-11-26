@@ -339,23 +339,36 @@ return function(jn, common)
         if type(desc_raw) == "string" and desc_raw ~= "" then sources_to_scan[#sources_to_scan + 1] = desc_raw end
 
         for _, blob in ipairs(sources_to_scan) do
-            -- 1. 解析 JSON 嵌入（Atlassian Statuspage incident_updates / Instatus JSON）
-            local ok_j, obj = pcall(jn.json.decode, blob)
-            if ok_j and type(obj) == "table" then
-                local up_lists = {}
-                if type(obj.incident_updates) == "table" then up_lists[#up_lists + 1] = obj.incident_updates end
-                if type(obj.incident) == "table" and type(obj.incident.incident_updates) == "table" then
-                    up_lists[#up_lists + 1] = obj.incident.incident_updates
+            local structured_before = #entries
+
+            -- 0. 解析 RSS 2.0 / Atom（如 incident.io 的 /incidents/<id>/feed.rss 逐阶段更新）
+            if blob:find("<item[%s>]", 1) or blob:find("<entry[%s>]", 1) then
+                local feed_items = M.parse_feed_xml(blob, 30)
+                for _, fi in ipairs(feed_items) do
+                    local body_txt = (fi.desc ~= "" and fi.desc) or fi.title
+                    push_entry(fi.ts, fi.pub_raw, (fi.title or "") .. " " .. body_txt, body_txt)
                 end
-                if type(obj.updates) == "table" then up_lists[#up_lists + 1] = obj.updates end
-                for _, ul in ipairs(up_lists) do
-                    for _, u in ipairs(ul) do
-                        if type(u) == "table" then
-                            local t_raw = u.created_at or u.createdAt or u.display_at or u.updated_at or u.timestamp or ""
-                            local msg = u.body or u.message or u.description or u.text or ""
-                            local st = u.status or u.state or ""
-                            local ep = common.parse_timestamp(t_raw) or 0
-                            push_entry(ep, t_raw, st, msg)
+            end
+
+            -- 1. 解析 JSON 嵌入（Atlassian Statuspage incident_updates / Instatus JSON）
+            if #entries == structured_before then
+                local ok_j, obj = pcall(jn.json.decode, blob)
+                if ok_j and type(obj) == "table" then
+                    local up_lists = {}
+                    if type(obj.incident_updates) == "table" then up_lists[#up_lists + 1] = obj.incident_updates end
+                    if type(obj.incident) == "table" and type(obj.incident.incident_updates) == "table" then
+                        up_lists[#up_lists + 1] = obj.incident.incident_updates
+                    end
+                    if type(obj.updates) == "table" then up_lists[#up_lists + 1] = obj.updates end
+                    for _, ul in ipairs(up_lists) do
+                        for _, u in ipairs(ul) do
+                            if type(u) == "table" then
+                                local t_raw = u.created_at or u.createdAt or u.display_at or u.updated_at or u.timestamp or ""
+                                local msg = u.body or u.message or u.description or u.text or ""
+                                local st = u.status or u.state or ""
+                                local ep = common.parse_timestamp(t_raw) or 0
+                                push_entry(ep, t_raw, st, msg)
+                            end
                         end
                     end
                 end
@@ -363,62 +376,56 @@ return function(jn, common)
 
             -- 2. 从 HTML / RSS description 提取嵌套的 JSON 对象片段（如 Instatus __NEXT_DATA__）
             -- 先按单层 {...} 分块再字段匹配，避免 [^}]* 在大 HTML 上产生 O(N^2) 回溯
-            for obj_str in blob:gmatch("{[^%{%}]+}") do
-                if #obj_str <= 4000 and obj_str:find('"status"', 1, true) then
-                    local status_v = obj_str:match('"status"%s*:%s*"([^"]+)"')
-                    local msg_v = obj_str:match('"message"%s*:%s*"([^"]-)"') or obj_str:match('"body"%s*:%s*"([^"]-)"')
-                    local dt_v = obj_str:match('"createdAt"%s*:%s*"([^"]+)"') or obj_str:match('"created_at"%s*:%s*"([^"]+)"')
-                    if status_v and msg_v and dt_v then
-                        local unesc = msg_v:gsub("\\n", "\n"):gsub('\\"', '"')
-                        push_entry(common.parse_timestamp(dt_v) or 0, dt_v, status_v, unesc)
+            if #entries == structured_before then
+                for obj_str in blob:gmatch("{[^%{%}]+}") do
+                    if #obj_str <= 4000 and obj_str:find('"status"', 1, true) then
+                        local status_v = obj_str:match('"status"%s*:%s*"([^"]+)"')
+                        local msg_v = obj_str:match('"message"%s*:%s*"([^"]-)"') or obj_str:match('"body"%s*:%s*"([^"]-)"')
+                        local dt_v = obj_str:match('"createdAt"%s*:%s*"([^"]+)"') or obj_str:match('"created_at"%s*:%s*"([^"]+)"')
+                        if status_v and msg_v and dt_v then
+                            local unesc = msg_v:gsub("\\n", "\n"):gsub('\\"', '"')
+                            push_entry(common.parse_timestamp(dt_v) or 0, dt_v, status_v, unesc)
+                        end
                     end
                 end
             end
 
             -- 3. Atlassian Statuspage RSS <p><small>Nov 25, 01:10 UTC</small><br><strong>Identified</strong> - ...</p>
             -- 先按 <p>...</p> 分块再局部提取，防止多段 (.-) 跨标签回溯
-            for p_inner in blob:gmatch("<[pP][^>]*>(.-)</[pP]>") do
-                if #p_inner <= 2000 then
-                    local t_part = p_inner:match("<[sS][mM][aA][lL][lL][^>]*>(.-)</[sS][mM][aA][lL][lL]>")
-                    local st_part, body_part = p_inner:match("<[sS][tT][rR][oO][nN][gG][^>]*>(.-)</[sS][tT][rR][oO][nN][gG]>%s*%-?(.*)")
-                    if t_part and st_part then
-                        local clean_t = common.clean_html(t_part)
-                        local ep = common.parse_timestamp(clean_t) or 0
-                        if ep == 0 then
-                            -- 解析 "Nov 25, 01:10 UTC"（无年份，按当前年 UTC 解析）
-                            local mon_s, day_s, hh_s, mm_s = clean_t:match("(%a%a%a)%s+(%d%d?),%s*(%d%d):(%d%d)%s*UTC")
-                            local MONTHS_MAP = { jan=1, feb=2, mar=3, apr=4, may=5, jun=6, jul=7, aug=8, sep=9, oct=10, nov=11, dec=12 }
-                            local mo = mon_s and MONTHS_MAP[mon_s:lower()]
-                            if mo then
-                                local now_utc = os.date("!*t", ref_ts)
-                                local iso = string.format("%04d-%02d-%02dT%02d:%02d:00Z", now_utc.year, mo, tonumber(day_s), tonumber(hh_s), tonumber(mm_s))
-                                ep = common.parse_timestamp(iso) or 0
+            if #entries == structured_before then
+                for p_inner in blob:gmatch("<[pP][^>]*>(.-)</[pP]>") do
+                    if #p_inner <= 2000 then
+                        local t_part = p_inner:match("<[sS][mM][aA][lL][lL][^>]*>(.-)</[sS][mM][aA][lL][lL]>")
+                        local st_part, body_part = p_inner:match("<[sS][tT][rR][oO][nN][gG][^>]*>(.-)</[sS][tT][rR][oO][nN][gG]>%s*%-?(.*)")
+                        if t_part and st_part then
+                            local clean_t = common.clean_html(t_part)
+                            local ep = common.parse_timestamp(clean_t) or 0
+                            if ep == 0 then
+                                -- 解析 "Nov 25, 01:10 UTC"（无年份，按当前年 UTC 解析）
+                                local mon_s, day_s, hh_s, mm_s = clean_t:match("(%a%a%a)%s+(%d%d?),%s*(%d%d):(%d%d)%s*UTC")
+                                local MONTHS_MAP = { jan=1, feb=2, mar=3, apr=4, may=5, jun=6, jul=7, aug=8, sep=9, oct=10, nov=11, dec=12 }
+                                local mo = mon_s and MONTHS_MAP[mon_s:lower()]
+                                if mo then
+                                    local now_utc = os.date("!*t", ref_ts)
+                                    local iso = string.format("%04d-%02d-%02dT%02d:%02d:00Z", now_utc.year, mo, tonumber(day_s), tonumber(hh_s), tonumber(mm_s))
+                                    ep = common.parse_timestamp(iso) or 0
+                                end
                             end
+                            push_entry(ep, clean_t, common.clean_html(st_part), body_part or "")
                         end
-                        push_entry(ep, clean_t, common.clean_html(st_part), body_part or "")
                     end
                 end
             end
 
-            -- 4. 通用 HTML 时间节点行（兼容 Instatus / 中文时间如 "09:10 AM" / "2026-11-25 09:10"）
-            local clean_lines = common.clean_html(blob)
-            for line in (clean_lines .. "\n"):gmatch("([^\n]+)\n") do
-                local dt_iso = line:match("(%d%d%d%d%-%d%d%-%d%d[T ]%d%d:%d%d:%d%d[^%s]*)")
-                if dt_iso then
-                    local ep = common.parse_timestamp(dt_iso) or 0
-                    push_entry(ep, dt_iso, line, line)
-                else
-                    local hh, mm, ampm = line:match("(%d%d?):(%d%d)%s*([AP]M)")
-                    if hh and mm then
-                        local h = tonumber(hh)
-                        if ampm == "PM" and h < 12 then h = h + 12 end
-                        if ampm == "AM" and h == 12 then h = 0 end
-                        -- 尝试推断为当前参考日期 CST，再转为 epoch
-                        local cst_day = os.date("!%Y-%m-%d", ref_ts + 8 * 3600)
-                        local iso = string.format("%sT%02d:%02d:00+08:00", cst_day, h, tonumber(mm))
-                        local ep = common.parse_timestamp(iso) or 0
-                        if ep > ref_ts + 12 * 3600 then ep = ep - 86400 end
-                        push_entry(ep, string.format("%02d:%02d %s", tonumber(hh), tonumber(mm), ampm), line, line)
+            -- 4. 仅当前面结构化源均未提取到任何节点时，再兜底扫纯文本带完整日期时间戳的行
+            -- （避免对无时区的 AM/PM 本地渲染如 incident.io PST 页面错当 CST）
+            if #entries == 0 then
+                local clean_lines = common.clean_html(blob)
+                for line in (clean_lines .. "\n"):gmatch("([^\n]+)\n") do
+                    local dt_iso = line:match("(%d%d%d%d%-%d%d%-%d%d[T ]%d%d:%d%d:%d%d[^%s]*)")
+                    if dt_iso then
+                        local ep = common.parse_timestamp(dt_iso) or 0
+                        push_entry(ep, dt_iso, line, line)
                     end
                 end
             end
@@ -931,6 +938,11 @@ return function(jn, common)
                 end
             elseif src.kind == "status_rss" or src.kind == "deepseek_official_rss" then
                 if wants(src.product) then
+                    local clean_link = common.trim(it.link)
+                    local scheme, rest = clean_link:match("^(https?://)(.+)$")
+                    if scheme and rest then
+                        clean_link = scheme .. rest:gsub("//+", "/")
+                    end
                     local combined = it.title .. "\n" .. it.desc
                     local st_kind, is_maj = infer_status_stage(combined)
                     -- 关键：同一故障每次阶段推进（Investigating→Identified→Monitoring→Resolved）都有新 pubDate / 新 description，
@@ -938,14 +950,18 @@ return function(jn, common)
                     local stage_sig = common.fnv1a_hex((it.guid or it.link) .. "|" .. it.pub_raw .. "|" .. common.clip(it.desc, 160))
                     local lookback_sec = math.max(5, common.cfg_num("lookback_minutes", 60)) * 60
                     local rss_timeline = M.extract_status_timeline(nil, it.desc_raw, it.ts > 0 and it.ts or os.time(), lookback_sec)
-                    local detail_url = (it.link ~= "" and it.link:find("/incidents/", 1, true)) and it.link or nil
+                    local detail_url = (clean_link ~= "" and clean_link:find("/incidents/", 1, true)) and clean_link or nil
+                    -- incident.io（OpenAI Status）提供每事件纯净 /feed.rss，比抓 Next.js HTML 更轻量且时间带准确 GMT
+                    if detail_url and detail_url:find("^https?://status%.openai%.com/incidents/[^/?#]+$") then
+                        detail_url = detail_url .. "/feed.rss"
+                    end
                     candidates[#candidates + 1] = {
                         event_key = "st:" .. src.product .. ":" .. stage_sig,
                         product = src.product,
                         event_kind = st_kind,
                         is_major = is_maj,
                         source_name = src.name,
-                        source_url = it.link ~= "" and it.link or src.url,
+                        source_url = clean_link ~= "" and clean_link or src.url,
                         title = it.title,
                         raw_text = combined,
                         desc_raw = it.desc_raw,

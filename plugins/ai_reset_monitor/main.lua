@@ -640,7 +640,14 @@ local function process_source_candidates(batch, src, body)
     end
 
     local replay_cutoff = replay_mode and (os.time() - batch.replay_hours * 3600) or 0
-    local lookback_sec = math.max(5, common.cfg_num("lookback_minutes", 60)) * 60
+    local lookback_min = math.max(5, common.cfg_num("lookback_minutes", 60))
+    local max_poll_min = math.max(
+        common.cfg_num("poll_interval_minutes", 60),
+        common.cfg_num("status_poll_interval_minutes", 20)
+    )
+    local lookback_sec = lookback_min * 60
+    -- 候选淘汰门槛至少覆盖最大轮询间隔 + 15 分钟余量，避免 poll == lookback 时因 30s tick 抖动漏推边界条目
+    local fresh_cutoff_sec = math.max(lookback_min, max_poll_min + 15) * 60
     local now_ts = os.time()
 
     for _, cand in ipairs(candidates) do
@@ -666,8 +673,8 @@ local function process_source_candidates(batch, src, body)
                 -- 冷启动首轮：写入基线标记，防止旧帖子全部在群里刷屏
                 batch.baseline_marks[#batch.baseline_marks + 1] = cand
             elseif not store.has_seen(cand.event_key) then
-                -- 统一溯源时间窗：超出 lookback_minutes 的旧条目仅写基线不补发，避免联动触发翻出历史旧帖
-                if (cand.announced_ts or 0) > 0 and (now_ts - cand.announced_ts > lookback_sec) then
+                -- 统一溯源时间窗：超出有效窗口的旧条目仅写基线不补发，避免联动触发翻出历史旧帖
+                if (cand.announced_ts or 0) > 0 and (now_ts - cand.announced_ts > fresh_cutoff_sec) then
                     batch.baseline_marks[#batch.baseline_marks + 1] = cand
                 else
                     enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
