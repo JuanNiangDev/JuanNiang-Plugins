@@ -75,11 +75,11 @@ return function(jn, common)
         if is_status and auto_len then
             local cap_hint = status_cap > 0 and string.format("总推送控制在 %d 字以内", status_cap) or "总字数可按故障过程详略自行把握"
             len_rule = string.format(
-                "6. 字数与过程完整度：title ≤ 28 字；scope ≤ 24 字；objective_summary 必须按时间顺序完整汇报过去 %d 分钟（及当前故障）内的全部状态变更时间线（例如 `09:10 已定位原因，正在实施修复 → 09:20 问题已解决，服务恢复`），严禁只写最后恢复结论而丢掉前面定位/排查过程；摘要字数由你自行判断（简单事件简短，多阶段故障可详细列出每个时间节点），%s；persona_comment ≤ 90 字。",
+                "7. 字数与过程完整度：title ≤ 28 字；scope ≤ 24 字；objective_summary 必须按时间顺序完整汇报过去 %d 分钟（及当前故障）内的全部状态变更时间线（例如 `09:10 已定位原因，正在实施修复 → 09:20 问题已解决，服务恢复`），严禁只写最后恢复结论而丢掉前面定位/排查过程；摘要字数由你自行判断（简单事件简短，多阶段故障可详细列出每个时间节点），%s；persona_comment ≤ 90 字。",
                 lookback_min, cap_hint
             )
         else
-            len_rule = "6. 字数精简：title ≤ 28 字；scope ≤ 24 字；objective_summary 控制在 60~180 字（清晰交代原因、受影响对象与最新阶段进展；若时间线/近期上下文含多个状态变化须完整列出）；persona_comment ≤ 90 字，确保整条最终消息不超过 450 字。"
+            len_rule = "7. 字数精简：title ≤ 28 字；scope ≤ 24 字；objective_summary ≤ 180 字，按原意能短则短（禁止凑字数，原文简短时 1~2 句直接说完即可；若含多个状态时间节点再完整列出）；persona_comment ≤ 90 字，确保整条最终消息不超过 450 字。"
         end
 
         local sys_parts = {
@@ -105,14 +105,15 @@ return function(jn, common)
             "5. is_major 仅在「全员或全付费用户直接重置 (direct_reset)」「发放重置卡 (banked_reset)」或「影响核心对话/API 的重大宕机 (Major Outage)」时为 true；预告、规则变动、轻度局部异常、已恢复设为 false。",
             "6. 【强制使用 UTC+8 北京时间】原文若包含 UTC / GMT / PST / EST 等非东八区时刻，在 title、objective_summary、persona_comment 中提及具体时间点时必须换算为北京时间（UTC+8，如 01:10 UTC → 09:10），严禁直接照抄未换算的 UTC 原文时间；请优先采用下方已换算为 UTC+8 的时间线。",
             len_rule,
+            "8. 【零废话】objective_summary 只陈述原文给出的有效事实（具体动作、受影响套餐/模型、原因、生效或恢复时间）。严禁输出“该消息属于……类动作”“并非故障通报”“该动作由官方账号直接确认”“具体可用范围/使用方式以官方后续说明为准”等自我分类、凑字数套话或免责废话；原文未提原因或细节时不要凑字。",
         }
 
         if persona ~= "" then
-            sys_parts[#sys_parts + 1] = "7. persona_comment 用下方【Bot 人格设定】的第一人称口吻写 1~2 句中文提示/吐槽（提醒大家回满血继续用额度，或调侃服务异常，不得编造事实）。"
+            sys_parts[#sys_parts + 1] = "9. persona_comment 用下方【Bot 人格设定】的第一人称口吻写 1~2 句中文提示/吐槽（提醒大家回满血继续用额度，或调侃服务异常，不得编造事实）。"
             sys_parts[#sys_parts + 1] = ""
             sys_parts[#sys_parts + 1] = "【Bot 人格设定】\n" .. common.clip(persona, 1000)
         else
-            sys_parts[#sys_parts + 1] = "7. persona_comment 用轻快幽默的中文口吻写 1 句提示。"
+            sys_parts[#sys_parts + 1] = "9. persona_comment 用轻快幽默的中文口吻写 1 句提示。"
         end
 
         sys_parts[#sys_parts + 1] = ""
