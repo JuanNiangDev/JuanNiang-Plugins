@@ -114,7 +114,7 @@ return function(jn, common, prompts)
     end
 
     local function read_resplit_config()
-        local max_depth = math.max(0, math.min(3, math.floor(common.da_num("map_resplit_max_depth", 3))))
+        local max_depth = math.max(0, math.min(3, math.floor(common.da_num("map_resplit_max_depth", 2))))
         local l1 = math.max(0, math.min(32, math.floor(common.da_num("map_resplit_count", 8))))
         local l2 = math.max(2, math.min(16, math.floor(common.da_num("map_resplit_l2_count", 4))))
         local l3 = math.max(2, math.min(8, math.floor(common.da_num("map_resplit_l3_count", 2))))
@@ -196,9 +196,15 @@ return function(jn, common, prompts)
         end)
     end
 
-    local function run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, section_caps, llm_timeout, chunk_chars, model_desc, on_done, forced_chunks, initial_depth)
+    local function run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, section_caps, llm_timeout, chunk_chars, model_desc, touch_watchdog, on_done, forced_chunks, initial_depth)
+        local function touch(extra_sec)
+            if type(touch_watchdog) == "function" then
+                pcall(touch_watchdog, extra_sec)
+            end
+        end
         local chunks = forced_chunks or partition_stream_chunks(stream_messages, chunk_chars, 8)
         if #chunks <= 1 then
+            touch(llm_timeout + 240)
             local stream_txt = common.format_chat_stream(stream_messages)
             local prompt = prompts.build_analysis_prompt(stream_txt, stats, persona_prompt, section_caps)
             jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 超时: %ds, 模型: %s)...",
@@ -225,13 +231,19 @@ return function(jn, common, prompts)
         end
 
         local resplit_cfg = read_resplit_config()
+        local waves = math.ceil(#chunks / 2)
+        -- 按并发轮数 + Reduce 阶段动态核定初始看门狗预算，并在分片完成与 Reduce 启动时继续顺延
+        local mr_budget = waves * llm_timeout + llm_timeout + 240
+        touch(mr_budget)
         jn.log.info(string.format("[%s] 群 %d %s，启动 Map-Reduce 分段分析（%d 段，并发 2，最大拆片级=%d，模型: %s）...",
             PLUGIN_NAME, group_id, forced_chunks and "二次拆片挽救" or "语料超阈值", #chunks, resplit_cfg.max_depth, model_desc))
         local resplit_budget = { remaining = math.max(24, #chunks * 12) }
         local start_depth = initial_depth or 0
 
         run_with_concurrency(chunks, 2, function(idx, c, cb)
+            touch(llm_timeout + 240)
             run_map_slice_resplit(group_id, c.msgs, c.start_idx, idx, #chunks, persona_prompt, llm_timeout, start_depth, resplit_budget, resplit_cfg, function(obj, err, io_c, dropped)
+                touch(llm_timeout + 240)
                 cb({ data = obj, err = err, io_chars = io_c or 0, dropped = dropped or 0 })
             end)
         end, function(results)
@@ -245,6 +257,7 @@ return function(jn, common, prompts)
                 on_done(nil, results[1] and results[1].err or "全部分片分析失败", math.floor(total_io_chars / 2))
                 return
             end
+            touch(llm_timeout + 240)
             local reduce_prompt = prompts.build_reduce_prompt(results, stats, persona_prompt, section_caps)
             total_io_chars = total_io_chars + #reduce_prompt
             jn.log.info(string.format("[%s] 群 %d Map 完成 (%d/%d 成功，隔离丢弃敏感消息 %d 条)，执行 Reduce 终稿汇总 (字符数: %d)...",
@@ -274,14 +287,18 @@ return function(jn, common, prompts)
         local chunk_chars = math.max(8000, common.da_num("map_chunk_chars", 35000))
         local target_str = common.da_string("text_provider_id", "")
         local fallback_str = common.da_string("fallback_text_provider", "")
+        local touch_watchdog = hooks and hooks.touch_watchdog
 
         local model_desc, primary_id = hooks.acquire_provider_slot(target_str)
 
         local function run_with_msgs(msgs, cur_desc, allow_map, cb)
             local txt = common.format_chat_stream(msgs)
             if allow_map and #txt > map_thresh then
-                run_map_reduce_async(group_id, msgs, stats, persona_prompt, section_caps, llm_timeout, chunk_chars, cur_desc, cb)
+                run_map_reduce_async(group_id, msgs, stats, persona_prompt, section_caps, llm_timeout, chunk_chars, cur_desc, touch_watchdog, cb)
                 return
+            end
+            if type(touch_watchdog) == "function" then
+                pcall(touch_watchdog, llm_timeout + 240)
             end
             local prompt = prompts.build_analysis_prompt(txt, stats, persona_prompt, section_caps)
             jn.log.info(string.format("[%s] 开始调用 LLM 分析群 %d 消息 (字符数: %d, 超时: %ds, 模型: %s)...",
@@ -326,7 +343,7 @@ return function(jn, common, prompts)
                 if #forced_chunks >= 2 then
                     jn.log.warn(string.format("[%s] 群 %d 单次请求命中敏感审查 (%d 条)，拆分为 %d 片（最多支持 %d 级隔离）...",
                         PLUGIN_NAME, group_id, #stream_messages, #forced_chunks, resplit_cfg.max_depth))
-                    run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, section_caps, llm_timeout, chunk_chars, model_desc, function(mdata, merr, mtokens)
+                    run_map_reduce_async(group_id, stream_messages, stats, persona_prompt, section_caps, llm_timeout, chunk_chars, model_desc, touch_watchdog, function(mdata, merr, mtokens)
                         if mdata then
                             on_done(mdata, nil, mtokens, model_desc)
                         else

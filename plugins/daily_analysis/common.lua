@@ -289,6 +289,12 @@ return function(jn)
     -- ----------------------------------------------------------------
     local chat_pending = {}
 
+    local function touch_activity(extra_sec)
+        if type(M.on_activity) == "function" then
+            pcall(M.on_activity, extra_sec)
+        end
+    end
+
     function M.llm_chat_async(messages, opts, cb)
         if type(cb) ~= "function" then return end
         opts = opts or {}
@@ -308,8 +314,9 @@ return function(jn)
         end
         local entry = { cb = cb, done = false }
         chat_pending[rid] = entry
+        local wait_sec = math.max(30, tonumber(opts.timeout) or 360) + 20
+        touch_activity(wait_sec + 180)
         if jn.timer and jn.timer.after then
-            local wait_sec = math.max(30, tonumber(opts.timeout) or 360) + 20
             pcall(jn.timer.after, wait_sec, { action = "da_llm_timeout", rid = rid })
         end
     end
@@ -329,6 +336,7 @@ return function(jn)
         if not entry or entry.done then return false end
         entry.done = true
         chat_pending[req_id] = nil
+        touch_activity()
         invoke_chat_cb(entry, content, err)
         return true
     end
@@ -339,6 +347,7 @@ return function(jn)
         if not entry or entry.done then return true end
         entry.done = true
         chat_pending[ctx.rid] = nil
+        touch_activity()
         invoke_chat_cb(entry, nil, "llm_async_timeout")
         return true
     end

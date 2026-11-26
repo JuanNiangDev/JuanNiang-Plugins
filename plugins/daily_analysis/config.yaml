@@ -79,8 +79,8 @@ configs:
   - key: map_resplit_max_depth
     type: string
     label: "敏感审查最大二次拆片级数"
-    description: "最多允许递归拆片级数（默认 3 即最多三级二次拆片、共 4 次尝试机会；范围 0~3）"
-    default: "3"
+    description: "最多允许递归拆片级数（默认 2 即最多失败后分片两次、共 3 次尝试机会；范围 0~3）"
+    default: "2"
 
   - key: auto_analysis_time
     type: string

@@ -62,6 +62,7 @@ local state = {
     queued_gids = {},
     active_group = nil,
     active_started = 0,
+    active_deadline = 0,
     provider_hold = nil,
 }
 
@@ -810,6 +811,27 @@ end
 
 local pump_group_queue
 
+local function extend_active_watchdog(min_window_sec)
+    if not state.active_group then return end
+    local now = os.time()
+    local timeout_sec = math.max(30, common.da_num("llm_timeout", 360))
+    local window_sec = math.max(timeout_sec + 240, tonumber(min_window_sec) or 0)
+    local max_total = math.max(3600, timeout_sec * 12)
+    local started = state.active_started or now
+    local candidate = math.min(now + window_sec, started + max_total)
+    if candidate > (state.active_deadline or 0) then
+        state.active_deadline = candidate
+    end
+end
+
+local function is_watchdog_expired(now)
+    if not state.active_group then return false end
+    local timeout_sec = math.max(30, common.da_num("llm_timeout", 360))
+    local fallback_deadline = (state.active_started or 0) + timeout_sec + 240
+    local deadline = math.max(state.active_deadline or 0, fallback_deadline)
+    return (now or os.time()) > deadline
+end
+
 local function force_release_active_group(reason)
     local gid = state.active_group
     if gid then
@@ -819,6 +841,7 @@ local function force_release_active_group(reason)
     end
     state.active_group = nil
     state.active_started = 0
+    state.active_deadline = 0
     release_provider_slot()
     common.clear_pending_chats()
 end
@@ -841,11 +864,14 @@ local function start_group_pipeline(spec, on_pipeline_done)
     state.is_analyzing[group_id] = true
     state.active_group = group_id
     state.active_started = os.time()
+    state.active_deadline = 0
+    extend_active_watchdog()
 
     local function complete(ok, err_msg)
         state.is_analyzing[group_id] = nil
         state.active_group = nil
         state.active_started = 0
+        state.active_deadline = 0
         release_provider_slot()
         on_pipeline_done(ok, err_msg)
     end
@@ -896,6 +922,7 @@ local function start_group_pipeline(spec, on_pipeline_done)
         if m.content ~= before then expanded = expanded + 1 end
     end
     local stream_messages, merged_count, filtered_count = build_stream_messages(messages)
+    extend_active_watchdog()
     jn.log.info(string.format("[%s] 语料展开：%d/%d 条消息含 CQ 码，图片描述 %d 张；复读归并：%d → %d 条；过滤低质水贴：%d 条",
         PLUGIN_NAME, expanded, #messages, sources.vision_used(), #messages, merged_count, filtered_count))
     local chat_stream = format_chat_stream(stream_messages)
@@ -921,12 +948,15 @@ local function start_group_pipeline(spec, on_pipeline_done)
     end
 
     local function after_wx_fetched()
+        extend_active_watchdog()
         local persona_prompt = prompts.get_bot_persona_prompt()
         local section_caps = build_section_caps()
         local function proceed_main_llm()
             mapreduce.run_main_llm_with_fallback(group_id, stream_messages, stats, persona_prompt, section_caps, {
                 acquire_provider_slot = acquire_provider_slot,
+                touch_watchdog = extend_active_watchdog,
             }, function(analysis_data, err, est_tokens, active_model_desc)
+                extend_active_watchdog()
                 if err or not analysis_data then
                     jn.log.error("[" .. PLUGIN_NAME .. "] LLM 分析失败: " .. tostring(err))
                     complete(false, "LLM 调用失败: " .. tostring(err))
@@ -1047,13 +1077,10 @@ local function start_group_pipeline(spec, on_pipeline_done)
 end
 
 pump_group_queue = function()
-    if state.active_group then
-        local timeout_sec = math.max(30, common.da_num("llm_timeout", 360))
-        if (os.time() - (state.active_started or 0)) > (timeout_sec + 240) then
-            force_release_active_group("超时看门狗解锁")
-        else
-            return
-        end
+    if is_watchdog_expired() then
+        force_release_active_group("超时看门狗解锁")
+    elseif state.active_group then
+        return
     end
     if not state.group_queue or #state.group_queue == 0 then return end
     local spec = table.remove(state.group_queue, 1)
@@ -1255,6 +1282,8 @@ local function parse_hhmm_minutes(hhmm)
     return h * 60 + m
 end
 
+common.on_activity = extend_active_watchdog
+
 common.on_async_panic = function(perr)
     force_release_active_group("异步回调异常恢复: " .. tostring(perr))
     pcall(pump_group_queue)
@@ -1360,12 +1389,9 @@ function check_daily_timer()
     pcall(backfill_target_groups, false)
 
     -- 看门狗巡检：防止个别群异步回调异常丢失后长期锁死队列
-    if state.active_group then
-        local timeout_sec = math.max(30, common.da_num("llm_timeout", 360))
-        if (os.time() - (state.active_started or 0)) > (timeout_sec + 240) then
-            force_release_active_group("巡检看门狗超时解锁")
-            pcall(pump_group_queue)
-        end
+    if is_watchdog_expired() then
+        force_release_active_group("巡检看门狗超时解锁")
+        pcall(pump_group_queue)
     end
 
     local now_time = os.date("*t")
