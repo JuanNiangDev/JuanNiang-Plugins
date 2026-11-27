@@ -253,6 +253,7 @@ return function(jn, common, prompts)
                                 list[#list + 1] = {
                                     part = k,
                                     msg_id = q.msg_id,
+                                    msg_ids = (type(q.msg_ids) == "table" and #q.msg_ids > 0) and q.msg_ids or nil,
                                     sender = tostring(q.sender or "群友"),
                                     content = content,
                                     reason = tostring(q.reason or ""),
@@ -309,6 +310,8 @@ return function(jn, common, prompts)
                             local rtxt = tostring(item.reason or (src_cand and src_cand.reason) or "")
                             curated[#curated + 1] = {
                                 msg_id = (src_cand and src_cand.msg_id) or item.msg_id,
+                                msg_ids = (src_cand and src_cand.msg_ids)
+                                    or ((type(item.msg_ids) == "table" and #item.msg_ids > 0) and item.msg_ids or nil),
                                 sender = (src_cand and src_cand.sender) or tostring(item.sender or "群友"),
                                 content = content,
                                 reason = rtxt,

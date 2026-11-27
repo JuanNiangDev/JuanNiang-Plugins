@@ -814,23 +814,50 @@ return function(jn, common)
         return projects, articles
     end
 
-    function M.quote_source_text(messages, msg_id)
-        local idx = tonumber(msg_id)
-        if not idx then return nil end
-        local row = messages[idx]
-        if type(row) ~= "table" then return nil end
-        local m = row._source_msg or row
-        local raw = tostring(m.raw_message or "")
-        local fid = raw:match("%[CQ:forward,id=([^,%]]+)%]")
-            or tostring(m.content or ""):match("%[CQ:forward,id=([^,%]]+)%]")
-        if fid then
-            raw = M.da_forward_text(fid, true, 0, false)
-        else
-            raw = tostring(m.content or "")
+    function M.quote_source_text(messages, msg_id_or_ids)
+        if type(messages) ~= "table" then return nil end
+
+        local function extract_single(idx)
+            local row = messages[idx]
+            if type(row) ~= "table" then return nil, nil end
+            local m = row._source_msg or row
+            local uid = m.user_id ~= nil and tostring(m.user_id) or nil
+            local raw = tostring(m.raw_message or "")
+            local fid = raw:match("%[CQ:forward,id=([^,%]]+)%]")
+                or tostring(m.content or ""):match("%[CQ:forward,id=([^,%]]+)%]")
+            if fid then
+                raw = M.da_forward_text(fid, true, 0, false)
+            else
+                raw = tostring(m.content or "")
+            end
+            local text = clean_quote_text(raw)
+            if text == "" then return nil, uid end
+            return text, uid
         end
-        local text = clean_quote_text(raw)
-        if text == "" then return nil end
-        return text
+
+        if type(msg_id_or_ids) == "table" then
+            local parts, seen_idx, base_uid = {}, {}, nil
+            for _, raw_id in ipairs(msg_id_or_ids) do
+                local idx = tonumber(raw_id)
+                if idx and not seen_idx[idx] then
+                    seen_idx[idx] = true
+                    local txt, uid = extract_single(idx)
+                    if txt then
+                        if not base_uid then base_uid = uid end
+                        if not base_uid or not uid or uid == base_uid then
+                            parts[#parts + 1] = txt
+                        end
+                    end
+                end
+            end
+            if #parts == 0 then return nil end
+            return table.concat(parts, "\n")
+        end
+
+        local idx = tonumber(msg_id_or_ids)
+        if not idx then return nil end
+        local txt = extract_single(idx)
+        return txt
     end
 
     return M

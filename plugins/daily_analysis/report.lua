@@ -441,7 +441,8 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
                 local seen, n = {}, 0
                 for _, q in ipairs(analysis_data.golden_quotes) do
                     local content = common.clean_quote_text(q.content)
-                    local src = sources.quote_source_text(chat_messages or messages, q.msg_id)
+                    local ref_ids = (type(q.msg_ids) == "table" and #q.msg_ids > 0) and q.msg_ids or q.msg_id
+                    local src = sources.quote_source_text(chat_messages or messages, ref_ids)
                     if src and #src > #content and #src >= 4 then content = src end
                     local dedup = content:gsub("%s+", "")
                     if #content >= 4 and not seen[dedup] then
