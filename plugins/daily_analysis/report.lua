@@ -256,7 +256,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         end)
     end
 
-    local function fetch_juya_items()
+    local function fetch_juya_items(target_ts)
         local feeds = {}
         local list = jn.config.get("news_feeds")
         if type(list) == "table" then
@@ -280,7 +280,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
             return {}
         end
         local ok, url, html, _, ferr = pcall(function()
-            return juya.fetch_issue(feeds, os.date("%Y-%m-%d"))
+            return juya.fetch_issue(feeds, os.date("%Y-%m-%d", target_ts or os.time()))
         end)
         if ok and html then
             local items = juya.flatten(juya.parse_issue(html))
@@ -408,12 +408,13 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         end
 
         local top_n = math.max(1, math.floor(common.da_num("top_users_count", 5)))
+        local report_ts = (type(stats) == "table" and tonumber(stats.started_at)) or os.time()
 
         for _, s in ipairs(sec_configs) do
             local items = {}
             if s.key == "overview" then
                 items[1] = string.format("🏢 分析群聊: %s (%d)\n📅 统计时间: %s\n💬 消息总量: %d 条\n👥 参与人数: %d 人\n⏰ 最活跃时段: %s",
-                    group_name, group_id, os.date("%Y年%m月%d日"), stats.total_count, stats.user_count, stats.peak_period)
+                    group_name, group_id, os.date("%Y年%m月%d日", report_ts), stats.total_count, stats.user_count, stats.peak_period)
             elseif s.key == "top" then
                 if stats.top_users and #stats.top_users > 0 then
                     local lines = {}
@@ -535,7 +536,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
                 on_done(assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, {}))
                 return
             end
-            local juya_items = fetch_juya_items()
+            local juya_items = fetch_juya_items(type(stats) == "table" and stats.started_at or nil)
             merge_news_async(articles, juya_items, news_lim, function(news_items)
                 on_done(assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, news_items))
             end)
@@ -808,7 +809,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         return count, count
     end
 
-    function M.persist_report(group_id, target_id, sections, mode, node_count)
+    function M.persist_report(group_id, target_id, sections, mode, node_count, report_date)
         local flat = {}
         for _, sec in ipairs(sections or {}) do
             flat[#flat + 1] = "## " .. tostring(sec.title or sec.key or "")
@@ -819,10 +820,12 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         local content = table.concat(flat, "\n")
         local ok_enc, encoded = pcall(jn.json.encode, sections)
         if not ok_enc then encoded = "" end
+        local date_str = (type(report_date) == "string" and report_date:match("^%d%d%d%d%-%d%d%-%d%d$"))
+            and report_date or os.date("%Y-%m-%d")
         local _, err = jn.database.exec([[INSERT INTO ]] .. common.TABLE_REPORTS .. [[
             (group_id, target_id, report_date, mode, section_count, node_count, sections, content)
-            VALUES (?, ?, CURRENT_DATE, ?, ?, ?, ?, ?)
-        ]], { group_id, target_id, tostring(mode), #sections, node_count or 0,
+            VALUES (?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?)
+        ]], { group_id, target_id, date_str, tostring(mode), #sections, node_count or 0,
               tostring(encoded or ""), content })
         if err then
             jn.log.error("[" .. common.PLUGIN_NAME .. "] 日报持久化失败: " .. tostring(err))

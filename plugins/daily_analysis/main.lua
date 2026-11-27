@@ -851,7 +851,10 @@ local function start_group_pipeline(spec, on_pipeline_done)
     local send_target_id = spec.send_target_id or group_id
     local is_private_target = spec.is_private_target
     local force = spec.force
-    local cur_date = os.date("%Y-%m-%d")
+    local start_time = os.time()
+    local report_ts = tonumber(spec.report_ts) or start_time
+    local cur_date = (type(spec.report_date) == "string" and spec.report_date ~= "")
+        and spec.report_date or os.date("%Y-%m-%d", report_ts)
 
     if not group_id then on_pipeline_done(false, "非法群号"); return end
     if not force and is_group_done_today(group_id, cur_date) then
@@ -884,8 +887,6 @@ local function start_group_pipeline(spec, on_pipeline_done)
             jn.onebot11.send_group_msg(group_id, tip)
         end
     end
-    local start_time = os.time()
-
     -- 1. 查询 24h 历史消息；过滤机器人自身消息与水印卡片
     local all_messages = fetch_group_messages(group_id, 24)
     local messages = {}
@@ -909,6 +910,7 @@ local function start_group_pipeline(spec, on_pipeline_done)
 
     -- 2. 全量统计概况（不受低质过滤影响）+ CQ 展开（含转发图片与编号索引）+ 归并过滤 + 紧凑流
     local stats = analyze_statistics(messages)
+    stats.started_at = report_ts
     sources.reset_vision_counter()
     local expanded = 0
     local expanded_by_msg_id = {}
@@ -1017,7 +1019,7 @@ local function start_group_pipeline(spec, on_pipeline_done)
                         jn.log.info(string.format("[%s] 群 %d 日报已发送到 %s:%d（模式=%s，板块 %d 个，发送 %d 次 / 节点 %d）",
                             PLUGIN_NAME, group_id, target_type, dest_id, mode, #sections, sent, nodes))
 
-                        pcall(report.persist_report, group_id, dest_id, sections, mode, nodes)
+                        pcall(report.persist_report, group_id, dest_id, sections, mode, nodes, cur_date)
                         prune_expired_messages()
                         complete(true, nil)
                     end
@@ -1413,8 +1415,16 @@ function check_daily_timer()
         jn.log.info(string.format("[%s] 内部定时器触发每日总结 (当前 %02d:%02d, 设定 %s)...",
             PLUGIN_NAME, now_time.hour, now_time.min, auto_time))
         local specs = {}
+        local trig_ts = os.time()
         for gid, _ in pairs(get_target_groups()) do
-            specs[#specs + 1] = { group_id = gid, send_target_id = gid, is_private_target = false, force = false }
+            specs[#specs + 1] = {
+                group_id = gid,
+                send_target_id = gid,
+                is_private_target = false,
+                force = false,
+                report_date = trigger_date,
+                report_ts = trig_ts,
+            }
         end
         local ok, qerr = pcall(enqueue_groups, specs)
         if not ok then
