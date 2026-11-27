@@ -423,6 +423,9 @@ local function finish_batch_if_ready(batch)
         for _, cand in ipairs(batch.baseline_marks) do
             store.mark_seen(cand, false)
         end
+        for _, cand in ipairs(batch.suppressed_marks or {}) do
+            store.mark_seen(cand, false)
+        end
         for _, src_key in ipairs(batch.seed_marks) do
             store.mark_seen({ event_key = src_key, product = "_meta", event_kind = "seed", title = src_key }, false)
         end
@@ -648,6 +651,7 @@ local function process_source_candidates(batch, src, body)
     local lookback_sec = lookback_min * 60
     -- 候选淘汰门槛至少覆盖最大轮询间隔 + 15 分钟余量，避免 poll == lookback 时因 30s tick 抖动漏推边界条目
     local fresh_cutoff_sec = math.max(lookback_min, max_poll_min + 15) * 60
+    local status_dedup_incident = common.cfg_bool("status_only_start_and_resolved", true)
     local now_ts = os.time()
 
     for _, cand in ipairs(candidates) do
@@ -665,18 +669,34 @@ local function process_source_candidates(batch, src, body)
             batch.seen_in_batch[cand.event_key] = true
             if slot_key then batch.seen_slots[slot_key] = true end
 
+            local inc_key = status_dedup_incident and cand.incident_notify_key or nil
             if replay_mode then
-                if (cand.announced_ts or 0) >= replay_cutoff then
+                local dup_inc = inc_key and batch.seen_incidents[inc_key]
+                if not dup_inc and (cand.announced_ts or 0) >= replay_cutoff then
+                    if inc_key then batch.seen_incidents[inc_key] = true end
                     enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
                 end
             elseif skip_cold then
                 -- 冷启动首轮：写入基线标记，防止旧帖子全部在群里刷屏
+                if inc_key then batch.seen_incidents[inc_key] = true end
                 batch.baseline_marks[#batch.baseline_marks + 1] = cand
             elseif not store.has_seen(cand.event_key) then
-                -- 统一溯源时间窗：超出有效窗口的旧条目仅写基线不补发，避免联动触发翻出历史旧帖
-                if (cand.announced_ts or 0) > 0 and (now_ts - cand.announced_ts > fresh_cutoff_sec) then
+                -- 同一事故的中间阶段更新（Update / Monitoring）已在首次发生时提醒过，静默记录不再群发
+                if inc_key and (batch.seen_incidents[inc_key] or store.has_seen(inc_key)) then
+                    batch.suppressed_marks[#batch.suppressed_marks + 1] = {
+                        event_key = cand.event_key,
+                        product = cand.product,
+                        event_kind = "incident_suppressed",
+                        title = cand.title,
+                        source_url = cand.source_url,
+                        announced_ts = cand.announced_ts,
+                    }
+                elseif (cand.announced_ts or 0) > 0 and (now_ts - cand.announced_ts > fresh_cutoff_sec) then
+                    -- 统一溯源时间窗：超出有效窗口的旧条目仅写基线不补发，避免联动触发翻出历史旧帖
+                    if inc_key then batch.seen_incidents[inc_key] = true end
                     batch.baseline_marks[#batch.baseline_marks + 1] = cand
                 else
+                    if inc_key then batch.seen_incidents[inc_key] = true end
                     enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
                 end
             end
@@ -856,7 +876,9 @@ start_poll = function(is_manual, scope, trigger_reason)
         llm_count = 0,
         seen_in_batch = {},
         seen_slots = {},
+        seen_incidents = {},
         baseline_marks = {},
+        suppressed_marks = {},
         seed_marks = {},
         latest_by_prod = {},
         x_auth = x_auth,

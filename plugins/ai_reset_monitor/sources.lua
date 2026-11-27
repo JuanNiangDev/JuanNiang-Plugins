@@ -945,9 +945,17 @@ return function(jn, common)
                     end
                     local combined = it.title .. "\n" .. it.desc
                     local st_kind, is_maj = infer_status_stage(combined)
-                    -- 关键：同一故障每次阶段推进（Investigating→Identified→Monitoring→Resolved）都有新 pubDate / 新 description，
-                    -- 因此 hash(guid + desc前缀 + pub) 可以精确做到「每阶段推进都推送一次，未变不重复」
+                    -- 同一故障每次阶段推进（Investigating→Identified→Monitoring→Resolved）都有新 pubDate / 新 description
                     local stage_sig = common.fnv1a_hex((it.guid or it.link) .. "|" .. it.pub_raw .. "|" .. common.clip(it.desc, 160))
+                    -- 按稳态事故原链 / guid 生成事故级去重键，配合 status_only_start_and_resolved 实现同一故障仅推首次与恢复
+                    local inc_ref = (clean_link ~= "" and clean_link:find("/incidents/", 1, true) and clean_link)
+                        or (it.guid and it.guid ~= "" and it.guid)
+                        or (clean_link ~= "" and clean_link)
+                        or it.title
+                        or stage_sig
+                    inc_ref = tostring(inc_ref):gsub("[?#].*$", ""):gsub("/+$", ""):lower()
+                    local inc_sig = common.fnv1a_hex(src.product .. "|" .. inc_ref)
+                    local inc_phase = (st_kind == "status_resolved") and "resolved" or "incident"
                     local lookback_sec = math.max(5, common.cfg_num("lookback_minutes", 60)) * 60
                     local rss_timeline = M.extract_status_timeline(nil, it.desc_raw, it.ts > 0 and it.ts or os.time(), lookback_sec)
                     local detail_url = (clean_link ~= "" and clean_link:find("/incidents/", 1, true)) and clean_link or nil
@@ -957,6 +965,7 @@ return function(jn, common)
                     end
                     candidates[#candidates + 1] = {
                         event_key = "st:" .. src.product .. ":" .. stage_sig,
+                        incident_notify_key = "stinc:" .. src.product .. ":" .. inc_phase .. ":" .. inc_sig,
                         product = src.product,
                         event_kind = st_kind,
                         is_major = is_maj,

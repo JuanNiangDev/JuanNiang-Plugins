@@ -87,41 +87,53 @@ return function(jn, common)
 
     function M.mark_seen(ev, notified)
         if not ev or not ev.event_key or ev.event_key == "" then return end
-        mem_seen[ev.event_key] = true
-        if jn.cache and jn.cache.set then
-            jn.cache.set(cache_key(ev.event_key), { seen = true }, 30 * 86400)
-        end
-        if not (jn.database and jn.database.exec) then return end
-        M.init()
-        local payload_json = ""
-        local ok, enc = pcall(jn.json.encode, {
-            scope = ev.scope or "",
-            objective_summary = ev.objective_summary or "",
-            persona_comment = ev.persona_comment or "",
-            is_major = ev.is_major == true,
-            source_name = ev.source_name or "",
-        })
-        if ok and type(enc) == "string" then payload_json = enc end
 
-        local sql = [[
-            INSERT INTO ]] .. TABLE_SEEN .. [[
-                (event_key, product, event_kind, title, source_url, announced_ts, payload_json, notified)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (event_key) DO UPDATE SET
-                notified = ]] .. TABLE_SEEN .. [[.notified OR EXCLUDED.notified
-        ]]
-        local _, err = jn.database.exec(sql, {
-            tostring(ev.event_key):sub(1, 250),
-            tostring(ev.product or ""),
-            tostring(ev.event_kind or ""),
-            tostring(ev.title or ""),
-            tostring(ev.source_url or ""),
-            tonumber(ev.announced_ts) or 0,
-            payload_json,
-            notified == true,
-        })
-        if err then
-            jn.log.warn("[" .. common.PLUGIN_NAME .. "] 写入 seen 记录失败: " .. tostring(err))
+        local function persist_row(key, prod, kind, ttl, url, ts, pjson, is_notified)
+            mem_seen[key] = true
+            if jn.cache and jn.cache.set then
+                jn.cache.set(cache_key(key), { seen = true }, 30 * 86400)
+            end
+            if not (jn.database and jn.database.exec) then return end
+            M.init()
+            local sql = [[
+                INSERT INTO ]] .. TABLE_SEEN .. [[
+                    (event_key, product, event_kind, title, source_url, announced_ts, payload_json, notified)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (event_key) DO UPDATE SET
+                    notified = ]] .. TABLE_SEEN .. [[.notified OR EXCLUDED.notified
+            ]]
+            local _, err = jn.database.exec(sql, {
+                tostring(key):sub(1, 250),
+                tostring(prod or ""),
+                tostring(kind or ""),
+                tostring(ttl or ""),
+                tostring(url or ""),
+                tonumber(ts) or 0,
+                tostring(pjson or ""),
+                is_notified == true,
+            })
+            if err then
+                jn.log.warn("[" .. common.PLUGIN_NAME .. "] 写入 seen 记录失败: " .. tostring(err))
+            end
+        end
+
+        local payload_json = ""
+        if ev.event_kind ~= "incident_suppressed" and ev.event_kind ~= "incident_notified" then
+            local ok, enc = pcall(jn.json.encode, {
+                scope = ev.scope or "",
+                objective_summary = ev.objective_summary or "",
+                persona_comment = ev.persona_comment or "",
+                is_major = ev.is_major == true,
+                source_name = ev.source_name or "",
+            })
+            if ok and type(enc) == "string" then payload_json = enc end
+        end
+
+        persist_row(ev.event_key, ev.product, ev.event_kind, ev.title, ev.source_url, ev.announced_ts, payload_json, notified)
+
+        if (ev.event_kind == "status_incident" or ev.event_kind == "status_resolved")
+            and ev.incident_notify_key and ev.incident_notify_key ~= "" then
+            persist_row(ev.incident_notify_key, "_meta", "incident_notified", ev.title, ev.source_url, ev.announced_ts, "", notified)
         end
     end
 
@@ -203,7 +215,7 @@ return function(jn, common)
             FROM ]] .. TABLE_SEEN .. [[
             WHERE product = ?
               AND announced_ts >= ?
-              AND event_kind NOT IN ('unrelated', 'seed', 'active', 'cleared')
+              AND event_kind NOT IN ('unrelated', 'seed', 'active', 'cleared', 'incident_suppressed', 'incident_notified')
             ORDER BY announced_ts ASC, created_at ASC
         ]]
         local rows, err = jn.database.query(sql, { product, cutoff })

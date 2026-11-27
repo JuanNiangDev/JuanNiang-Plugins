@@ -47,6 +47,12 @@ configs:
     description: 检测到官方服务处于未恢复故障（Investigating/Identified/Monitoring）时，状态页自动切换为此间隔高频跟踪直到恢复，默认 3 分钟；填 0 不加速
     default: "3"
 
+  - key: status_only_start_and_resolved
+    type: bool
+    label: 同一故障仅推首次与恢复
+    description: 开启后（默认），同一官方故障按原链去重，仅在「首次发现故障」与「最终已恢复 Resolved」时各推送 1 次；中间定位/部署修复阶段更新不再重复发群，待恢复时汇总完整时间线
+    default: true
+
   - key: lookback_minutes
     type: string
     label: 统一事件溯源时间窗（分钟）
@@ -108,7 +114,7 @@ configs:
   - key: enable_status_sources
     type: bool
     label: 启用官方故障状态监控
-    description: 监控 OpenAI (status.openai.com)、Claude (status.claude.com) 与 DeepSeek 官方故障/恢复进展（每次状态阶段推进均推送）
+    description: 监控 OpenAI (status.openai.com)、Claude (status.claude.com) 与 DeepSeek 官方故障/恢复进展（默认同一故障仅推送首次发现与最终恢复）
     default: true
 
   - key: deepseek_try_official_first
