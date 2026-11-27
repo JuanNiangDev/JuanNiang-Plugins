@@ -1008,8 +1008,8 @@ local function start_group_pipeline(spec, on_pipeline_done)
                             return
                         end
 
-                        -- 仅在发回本群的正式日报成功发送后才写入今日已完成（手动私聊/发往测试群不阻断当晚定时发报；失败更不写入）
-                        if (not force) or (dest_id == group_id and not resolved_private) then
+                        -- 仅定时正式任务成功发回本群后才写入今日已完成（任何手动触发/补发/私聊测试均不阻断当晚定时发报；失败更不写入）
+                        if (not force) and dest_id == group_id and not resolved_private then
                             mark_group_done(group_id, cur_date)
                         end
                         local mode = common.da_string("report_mode", "forward")
