@@ -427,9 +427,78 @@ local function repo_cache_set(e, content)
     jn.cache.set(repo_cache_key(e), content, cfg_num("cache_ttl", 604800))
 end
 
+local TABLE_REPO_HISTORY = "pluggin_repo_intro_history"
+
+local function init_db()
+    if type(jn.database) ~= "table" or type(jn.database.exec) ~= "function" then return end
+    local sql = [[
+        CREATE TABLE IF NOT EXISTS ]] .. TABLE_REPO_HISTORY .. [[ (
+            id BIGSERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL DEFAULT 0,
+            repo_key TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'github',
+            name TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            desc_cn TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            card_text TEXT NOT NULL DEFAULT '',
+            images_json TEXT NOT NULL DEFAULT '[]',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_prih_key_grp ON ]] .. TABLE_REPO_HISTORY .. [[ (repo_key, group_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_prih_created ON ]] .. TABLE_REPO_HISTORY .. [[ (created_at);
+    ]]
+    local _, err = jn.database.exec(sql)
+    if err then
+        jn.log.warn("[repo-intro] 初始化历史持久化表失败: " .. tostring(err))
+    end
+end
+
+local function persist_repo_history(group_id, e, card_text, imgs)
+    if type(jn.database) ~= "table" or type(jn.database.exec) ~= "function" then return end
+    if type(e) ~= "table" or not has_valid_llm(e) then return end
+    local gid = tonumber(group_id) or 0
+    local repo_key = ""
+    if (e.owner or "") ~= "" and (e.repo or "") ~= "" then
+        repo_key = (tostring(e.owner) .. "/" .. tostring(e.repo)):lower()
+    elseif e.meta and e.meta.name and e.meta.name ~= "" then
+        repo_key = tostring(e.meta.name):lower()
+    else
+        repo_key = tostring(e.key or ""):lower()
+    end
+    if repo_key == "" then return end
+
+    local m = e.meta or {}
+    local llm = e.llm or {}
+    local name = tostring(m.name or ((e.owner or "") ~= "" and (e.owner .. "/" .. e.repo)) or repo_key)
+    local imgs_json = "[]"
+    if type(imgs) == "table" and #imgs > 0 and jn.json and jn.json.encode then
+        local ok, enc = pcall(jn.json.encode, imgs)
+        if ok and type(enc) == "string" and enc ~= "" then imgs_json = enc end
+    end
+
+    pcall(jn.database.exec,
+        "DELETE FROM " .. TABLE_REPO_HISTORY .. " WHERE group_id = ? AND repo_key = ?",
+        { gid, repo_key })
+    local _, err = jn.database.exec(
+        "INSERT INTO " .. TABLE_REPO_HISTORY ..
+        " (group_id, repo_key, kind, name, url, title, desc_cn, summary, card_text, images_json, created_at) " ..
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())",
+        {
+            gid, repo_key, tostring(e.kind or "github"), name, tostring(e.url or ""),
+            tostring(llm.title or ""), tostring(llm.desc_cn or ""), tostring(llm.summary or ""),
+            tostring(card_text or ""), imgs_json,
+        })
+    if err then
+        jn.log.warn("[repo-intro] 写入仓库历史持久化失败: " .. tostring(err))
+    end
+end
+
 local card = load_module("card", common, modeldb, {
     collect_readme_images = collect_readme_images,
     repo_cache_set = repo_cache_set,
+    persist_repo_history = persist_repo_history,
 })
 
 -- --------------------------------------------------------------------
@@ -1053,4 +1122,5 @@ function on_message(event)
     return true, false
 end
 
+init_db()
 jn.log.info("[repo-intro] 仓库介绍插件已加载")

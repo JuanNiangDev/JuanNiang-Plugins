@@ -11,5 +11,6 @@ permissions:
   - file
   - t2i
   - timer
+  - database
 system: false
 enabled: true

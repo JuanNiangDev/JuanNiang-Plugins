@@ -233,9 +233,37 @@ return function(jn)
                  :gsub("\226\128\141", ""):gsub("\239\187\191", ""))
     end
 
+    local function strip_reply_prefixes(txt)
+        -- 逐层剥离「【回复 某人：「...」】」引用头，正确处理多层嵌套回复
+        while true do
+            local i, j = txt:find("【回复", 1, true)
+            if not i then break end
+            local depth, k, close_end = 1, j + 1, nil
+            while k <= #txt do
+                local o = txt:find("【", k, true)
+                local c = txt:find("】", k, true)
+                if not c then break end
+                if o and o < c then
+                    depth = depth + 1
+                    k = o + #"【"
+                else
+                    depth = depth - 1
+                    k = c + #"】"
+                    if depth == 0 then
+                        close_end = c + #"】" - 1
+                        break
+                    end
+                end
+            end
+            if not close_end then break end
+            txt = txt:sub(1, i - 1) .. txt:sub(close_end + 1)
+        end
+        return txt
+    end
+
     function M.clean_quote_text(s)
         s = M.strip_wm(tostring(s or ""))
-        s = s:gsub("【回复.-」】", "")
+        s = strip_reply_prefixes(s)
         s = s:gsub("%[CQ:[^%]]*%]", "")
         s = s:gsub("%[图片[^%]]*%]", "")
         s = s:gsub("%[图#%d+：[^%]]*%]", "")

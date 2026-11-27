@@ -9,5 +9,6 @@ permissions:
   - cache
   - llm
   - timer
+  - database
 system: false
 enabled: true

@@ -106,11 +106,13 @@ return function(jn, common, modeldb, deps)
 
     local function compose_segments(batch)
         local segs = {}
+        local persisted = {}
         local send_card = common.cfg_bool("card_enabled", true)
         local first = true
         for _, e in ipairs(batch.entries) do
             if not e.skipped and (e.llm or not e.err) then
-                local text = compose_section(e._group_view or e)
+                local view = e._group_view or e
+                local text = compose_section(view)
                 if not first then
                     text = "\n\n" .. text
                 end
@@ -120,16 +122,26 @@ return function(jn, common, modeldb, deps)
                 if not imgs and deps.collect_readme_images then
                     imgs = deps.collect_readme_images(e)
                 end
+                local entry_imgs = {}
                 for _, img in ipairs(imgs or {}) do
                     segs[#segs + 1] = { type = "image", data = { file = img } }
+                    entry_imgs[#entry_imgs + 1] = img
                 end
                 if send_card and e.card_url and e.card_url ~= "" then
                     segs[#segs + 1] = { type = "image", data = { file = e.card_url } }
+                    entry_imgs[#entry_imgs + 1] = e.card_url
+                end
+                if common.has_valid_llm(view) then
+                    persisted[#persisted + 1] = {
+                        entry = view,
+                        text = compose_section(view),
+                        images = entry_imgs,
+                    }
                 end
             end
         end
-        if #segs == 0 then return nil end
-        return segs
+        if #segs == 0 then return nil, nil end
+        return segs, persisted
     end
 
     local function send_intro(batch, segments)
@@ -151,9 +163,16 @@ return function(jn, common, modeldb, deps)
                 jn.cache.del("dedup:" .. e.key)
             end
         end
-        local segments = compose_segments(batch)
+        local segments, persisted = compose_segments(batch)
         if segments then
             send_intro(batch, segments)
+            if persisted and deps.persist_repo_history then
+                local t = batch.target or {}
+                local gid = (t.message_type == "group") and (tonumber(t.target_id) or 0) or 0
+                for _, item in ipairs(persisted) do
+                    pcall(deps.persist_repo_history, gid, item.entry, item.text, item.images)
+                end
+            end
         end
     end
 

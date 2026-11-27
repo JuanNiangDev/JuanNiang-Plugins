@@ -128,9 +128,9 @@ return function(jn, common, prompts)
         return resplit_cfg.counts[depth] or 2
     end
 
-    local function run_map_slice_resplit(group_id, msgs, start_idx, label, total_parts, persona_prompt, llm_timeout, depth, budget, resplit_cfg, on_slice_done)
+    local function run_map_slice_resplit(group_id, msgs, start_idx, label, total_parts, persona_prompt, llm_timeout, depth, budget, resplit_cfg, section_caps, on_slice_done)
         local c_stream = common.format_chat_stream(msgs, start_idx)
-        local mprompt = prompts.build_map_prompt(c_stream, label, total_parts, persona_prompt)
+        local mprompt = prompts.build_map_prompt(c_stream, label, total_parts, persona_prompt, section_caps)
         local io_chars = #mprompt
 
         common.llm_chat_async({
@@ -163,7 +163,7 @@ return function(jn, common, prompts)
                         PLUGIN_NAME, group_id, tostring(label), depth + 1, #msgs, #sub_slices))
                     run_with_concurrency(sub_slices, 2, function(k, sub, cb)
                         local sub_label = string.format("%s.%d", tostring(label), k)
-                        run_map_slice_resplit(group_id, sub.msgs, sub.start_idx, sub_label, total_parts, persona_prompt, llm_timeout, depth + 1, budget, resplit_cfg, function(s_obj, s_err, s_chars, s_dropped)
+                        run_map_slice_resplit(group_id, sub.msgs, sub.start_idx, sub_label, total_parts, persona_prompt, llm_timeout, depth + 1, budget, resplit_cfg, section_caps, function(s_obj, s_err, s_chars, s_dropped)
                             cb({ data = s_obj, err = s_err, chars = s_chars or 0, dropped = s_dropped or 0 })
                         end)
                     end, function(sub_results)
@@ -232,17 +232,101 @@ return function(jn, common, prompts)
 
         local resplit_cfg = read_resplit_config()
         local waves = math.ceil(#chunks / 2)
-        -- 按并发轮数 + Reduce 阶段动态核定初始看门狗预算，并在分片完成与 Reduce 启动时继续顺延
-        local mr_budget = waves * llm_timeout + llm_timeout + 240
+        -- 按并发轮数 + Reduce + 串行金句终筛动态核定初始看门狗预算，并在分片完成与阶段切换时继续顺延
+        local mr_budget = waves * llm_timeout + llm_timeout * 2 + 240
         touch(mr_budget)
         jn.log.info(string.format("[%s] 群 %d %s，启动 Map-Reduce 分段分析（%d 段，并发 2，最大拆片级=%d，模型: %s）...",
             PLUGIN_NAME, group_id, forced_chunks and "二次拆片挽救" or "语料超阈值", #chunks, resplit_cfg.max_depth, model_desc))
         local resplit_budget = { remaining = math.max(24, #chunks * 12) }
         local start_depth = initial_depth or 0
 
+        local function collect_quote_candidates(results)
+            local list, seen = {}, {}
+            for k, r in ipairs(results) do
+                if r.data and type(r.data.golden_quotes) == "table" then
+                    for _, q in ipairs(r.data.golden_quotes) do
+                        if type(q) == "table" then
+                            local content = common.clean_quote_text(q.content)
+                            local dedup = content:gsub("%s+", "")
+                            if #content >= 4 and not seen[dedup] then
+                                seen[dedup] = true
+                                list[#list + 1] = {
+                                    part = k,
+                                    msg_id = q.msg_id,
+                                    sender = tostring(q.sender or "群友"),
+                                    content = content,
+                                    reason = tostring(q.reason or ""),
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+            return list
+        end
+
+        local function curate_quotes_serial(obj, candidates, ok_parts, io_chars)
+            local quote_cap = section_caps and tonumber(section_caps.quotes)
+            if quote_cap == 0 then
+                obj.golden_quotes = {}
+                on_done(obj, nil, math.floor(io_chars / 2))
+                return
+            end
+            if #candidates == 0 or not prompts.build_quote_curation_prompt then
+                on_done(obj, nil, math.floor(io_chars / 2))
+                return
+            end
+            touch(llm_timeout + 240)
+            local qprompt = prompts.build_quote_curation_prompt(candidates, ok_parts, persona_prompt, quote_cap or -1)
+            io_chars = io_chars + #qprompt
+            jn.log.info(string.format("[%s] 群 %d Reduce 完成，串行执行金句二次终筛（候选 %d 条，上限=%s）...",
+                PLUGIN_NAME, group_id, #candidates, tostring(quote_cap or -1)))
+            common.llm_chat_async({
+                { role = "system", content = persona_prompt },
+                { role = "user", content = qprompt },
+            }, { timeout = llm_timeout }, function(qresp, qerr)
+                if qerr or not qresp or qresp == "" then
+                    jn.log.warn(string.format("[%s] 群 %d 金句二次终筛失败，回退 Reduce 结果: %s",
+                        PLUGIN_NAME, group_id, tostring(qerr or "空响应")))
+                    on_done(obj, nil, math.floor(io_chars / 2))
+                    return
+                end
+                io_chars = io_chars + #qresp
+                local qobj, qperr = common.decode_llm_json(qresp, "金句终筛")
+                if not qobj or type(qobj.golden_quotes) ~= "table" then
+                    jn.log.warn(string.format("[%s] 群 %d 金句二次终筛解析失败，回退 Reduce 结果: %s",
+                        PLUGIN_NAME, group_id, tostring(qperr or "缺少 golden_quotes")))
+                    on_done(obj, nil, math.floor(io_chars / 2))
+                    return
+                end
+                local curated = {}
+                for _, item in ipairs(qobj.golden_quotes) do
+                    if type(item) == "table" then
+                        local cid = tonumber(item.id)
+                        local src_cand = cid and candidates[cid] or nil
+                        local content = src_cand and src_cand.content or common.clean_quote_text(item.content)
+                        if content ~= "" then
+                            local rtxt = tostring(item.reason or (src_cand and src_cand.reason) or "")
+                            curated[#curated + 1] = {
+                                msg_id = (src_cand and src_cand.msg_id) or item.msg_id,
+                                sender = (src_cand and src_cand.sender) or tostring(item.sender or "群友"),
+                                content = content,
+                                reason = rtxt,
+                            }
+                        end
+                        if quote_cap and quote_cap > 0 and #curated >= quote_cap then
+                            break
+                        end
+                    end
+                end
+                obj.golden_quotes = curated
+                on_done(obj, nil, math.floor(io_chars / 2))
+            end)
+        end
+
         run_with_concurrency(chunks, 2, function(idx, c, cb)
             touch(llm_timeout + 240)
-            run_map_slice_resplit(group_id, c.msgs, c.start_idx, idx, #chunks, persona_prompt, llm_timeout, start_depth, resplit_budget, resplit_cfg, function(obj, err, io_c, dropped)
+            run_map_slice_resplit(group_id, c.msgs, c.start_idx, idx, #chunks, persona_prompt, llm_timeout, start_depth, resplit_budget, resplit_cfg, section_caps, function(obj, err, io_c, dropped)
                 touch(llm_timeout + 240)
                 cb({ data = obj, err = err, io_chars = io_c or 0, dropped = dropped or 0 })
             end)
@@ -276,7 +360,8 @@ return function(jn, common, prompts)
                     on_done(nil, perr or "Reduce JSON 解析失败", math.floor(total_io_chars / 2))
                     return
                 end
-                on_done(obj, nil, math.floor(total_io_chars / 2))
+                local candidates = collect_quote_candidates(results)
+                curate_quotes_serial(obj, candidates, ok_count, total_io_chars)
             end)
         end)
     end

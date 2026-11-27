@@ -541,9 +541,9 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         end
 
         if common.da_bool("enable_projects", true) and enrich.enrich_repos_async then
-            enrich.enrich_repos_async(projects, after_repos)
+            enrich.enrich_repos_async(projects, after_repos, group_id)
         else
-            if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects) end
+            if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects, group_id) end
             after_repos()
         end
     end
@@ -555,7 +555,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         else
             projects, articles = sources.collect_sources(messages or {})
         end
-        if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects) end
+        if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects, group_id) end
 
         local sec_configs = M.parse_sections_config()
         local juya_items, news_items, news_lim = {}, {}, 70

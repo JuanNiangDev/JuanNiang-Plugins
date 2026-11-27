@@ -943,7 +943,7 @@ local function start_group_pipeline(spec, on_pipeline_done)
         local projs, arts = sources.collect_sources(all_messages)
         precollected = { projects = projs, articles = arts }
         if common.da_bool("enable_news", true) then
-            pending_wx = enrich.prepare_article_fetch(arts, 20)
+            pending_wx = enrich.prepare_article_fetch(arts, 20, group_id)
         end
     end
 

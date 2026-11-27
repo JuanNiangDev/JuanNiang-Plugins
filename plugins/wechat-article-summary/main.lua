@@ -648,6 +648,56 @@ local function chunk_text(text, max)
     return out
 end
 
+local TABLE_WX_HISTORY = "pluggin_wx_article_history"
+
+local function init_db()
+    if type(jn.database) ~= "table" or type(jn.database.exec) ~= "function" then return end
+    local sql = [[
+        CREATE TABLE IF NOT EXISTS ]] .. TABLE_WX_HISTORY .. [[ (
+            id BIGSERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL DEFAULT 0,
+            canon_key TEXT NOT NULL,
+            url TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            account TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_pwah_key_grp ON ]] .. TABLE_WX_HISTORY .. [[ (canon_key, group_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_pwah_created ON ]] .. TABLE_WX_HISTORY .. [[ (created_at);
+    ]]
+    local _, err = jn.database.exec(sql)
+    if err then
+        jn.log.warn("[wechat-article-summary] 初始化历史持久化表失败: " .. tostring(err))
+    end
+end
+
+local function persist_wx_history(target, entries)
+    if type(jn.database) ~= "table" or type(jn.database.exec) ~= "function" then return end
+    if type(entries) ~= "table" or #entries == 0 then return end
+    local gid = (target and target.message_type == "group") and (tonumber(target.target_id) or 0) or 0
+    for _, e in ipairs(entries) do
+        local ckey = tostring(e.key or "")
+        local title = tostring((e.meta and e.meta.title) or "")
+        local account = tostring((e.meta and e.meta.account) or "")
+        local summary = tostring((e.llm and e.llm.summary) or "")
+        if ckey ~= "" and (title ~= "" or summary ~= "") then
+            pcall(jn.database.exec,
+                "DELETE FROM " .. TABLE_WX_HISTORY .. " WHERE group_id = ? AND canon_key = ?",
+                { gid, ckey })
+            local _, err = jn.database.exec(
+                "INSERT INTO " .. TABLE_WX_HISTORY ..
+                " (group_id, canon_key, url, title, account, summary, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())",
+                { gid, ckey, tostring(e.url or ""), title, account, summary })
+            if err then
+                jn.log.warn("[wechat-article-summary] 写入文章历史持久化失败: " .. tostring(err))
+            end
+        end
+    end
+end
+
+init_db()
+
 local function via_text(target, text, quote_id)
     local segs = { { type = "text", data = { text = text } } }
     if quote_id and tostring(quote_id) ~= "" and tostring(quote_id) ~= "0" then
@@ -669,6 +719,7 @@ local function deliver(batch)
         end
     end
     if #entries == 0 then return end -- 全部失败：静默
+    pcall(persist_wx_history, batch.target, entries)
 
     local t = batch.target
     local threshold = math.max(1, cfg_num("batch_threshold", 3))

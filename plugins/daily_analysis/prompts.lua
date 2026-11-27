@@ -32,7 +32,14 @@ return function(jn, common)
 
     local SLANG_AND_MEDIA_RULES = table.concat({
         "- 【图片与合并转发关联（严禁输出内部编号）】：聊天流里的 `[图#编号：...]` 与 `[转发#编号｜N条] ...` 仅是供你理解上下文的内部参考标签。请结合回复引用与上下文发言确认围绕它展开的讨论，但在最终输出的所有展示文案中**严禁出现 `[图#1]`、`[转发#1]` 这类编号标签**，必须改用自然语言（如「某人发的图片」「某人转发的聊天记录」）。",
-        "- 【网络黑话与谐音梗识别】：群友常使用谐音词、黑话、双关语、隐晦开车/开黄腔调侃或网络热梗（如读音相近替代词、科普概念借代等）。请结合上下文准确识别这些隐喻笑点，合适地收录进话题叙事或金句中（话题叙事中点破笑点但用较克制幽默的措辞表达，避免输出本身过于露骨触发内容审查；金句则保留原句谐音文本并在 reason 中点出梗所在）。",
+        "- 【网络黑话与谐音梗识别】：群友常使用谐音词、黑话、双关语、隐晦开车调侃或网络热梗。请在话题叙事中结合上下文自然点破笑点（措辞适度克制避免触碰审查），在金句里保留原句文本并在 `reason` 中说明梗点。",
+    }, "\n")
+
+    local QUOTE_CRITERIA_RULES = table.concat({
+        "   ⚠️【明确算金句（欢迎收录以下 6 类）】：① 复制粘贴段子/模板文学（如发疯文学、V我50变体、反向凡尔赛等）；② 常规谐音词/普通或隐晦开车玩梗；③ 神反转抖包袱；④ 反常识逆天暴论；⑤ 用专业/技术概念降维精准吐槽生活或人际关系；⑥ 戏剧张力极强的群友神回。",
+        "   ⚠️【明确不收（宁缺毋滥，以下一律淘汰）】：① 脱离前文上下文就看不懂、没头没尾的 3~8 字短接话碎片 / 普通反问 / 日常提问（例如「HIV吗」「这还需要ai吗」「原来那个字念jìng吗」「这是几晚上的问题吗」「好看我也不给」——单独挂出来既看不懂笑点又容易让群友莫名其妙；若笑点靠前两句铺垫，必须是同人连续发言合并后完整自洽才收，否则留给话题分析）；② 普通的技术排查、参数解释（如解释 application id）、日常闲聊、问好或单纯伸手求图。",
+        "   ⚠️【只取本人正文】只收发言人自己打出的字。严禁把「【回复 某人：「…」】」这类被引用的原文写进 content；清掉 [CQ:...] 等占位符；若该金句针对某张图片或转发记录吐槽，在 `reason` 中用「针对某人发的图片/转发的聊天记录」自然说明，严禁输出 `[图#k]` 或 `[转发#k]`。",
+        "   ⚠️【合并同人连发 & 防拆分】同一个人连续 2-3 条消息如果合起来才成立（铺垫 + 抖包袱），合并成一条，content 用 \\n 保留原貌；每行 `[#编号 HH:MM]` 是完整发言不得按空行拆条，msg_id 填对应的数字编号，sender 必须是真实昵称。",
     }, "\n")
 
     function M.build_analysis_prompt(chat_stream, stats, persona_prompt, caps)
@@ -54,9 +61,9 @@ return function(jn, common)
 
         local quotes_rule
         if max_quotes > 0 then
-            quotes_rule = string.format("甄选不多于 %d 句最具冲击力、反差感、神反转、谐音神梗的「群圣经/高光金句」；引用必须逐字完整，禁止省略或概括", max_quotes)
+            quotes_rule = string.format("从全天聊天中严选不多于 %d 句真正够格登上「群圣经」的高光金句（宁缺毋滥，不足则按实际精品数输出）；引用必须逐字完整，禁止省略或概括", max_quotes)
         elseif max_quotes == -1 then
-            quotes_rule = "甄选今日所有的逆天、反差、高光、神谐音「群圣经/金句」，不限数量上限；引用必须逐字完整，禁止省略或概括"
+            quotes_rule = "不设固定条数上限，但务必宁缺毋滥：只甄选脱离前文依然好笑、完整自洽的高光「群圣经/金句」，坚决淘汰平淡接话与凑数短句；引用必须逐字完整，禁止省略或概括"
         else
             quotes_rule = "无需提取金句（本项已关闭）"
         end
@@ -98,10 +105,7 @@ return function(jn, common)
    - 标题不超过 20 字，禁止「讨论 XX」「关于 XX」这种空壳标题。
 %s
 2. 群圣经甄选：%s。
-   ⚠️【入选门槛】只收让人拍案叫绝的内容：逆天逻辑、神反转、离谱反差、精准吐槽、神谐音梗、或者真的牛逼。纯报错、纯复读、无信息短句一律不收，宁缺毋滥。
-   ⚠️【只取本人正文】只收发言人自己打出的字。严禁把「【回复 某人：「…」】」这类被引用的原文写进 content；清掉 [CQ:...] 等占位符；若该金句针对某张图片或转发记录吐槽，在 `reason` 中用「针对某人发的图片/转发的聊天记录」自然说明，严禁输出 `[图#k]` 或 `[转发#k]`。
-   ⚠️【合并同人连发】同一个人连续 2-3 条消息如果合起来才成立（铺垫 + 抖包袱），合并成一条，content 用 \n 保留原貌。
-   ⚠️【防拆分】每行 `[#编号 HH:MM]` 是一条完整发言，不得按空行拆成多条；msg_id 填对应的数字编号，sender 必须是真实昵称。
+%s
 3. 群友头衔：%s。user 必须填群友真实昵称。
 4. 质量锐评与人设点评：%s。
 
@@ -145,14 +149,23 @@ return function(jn, common)
 
 ## 群聊记录数据流（共 %d 条）：
 %s
-]], persona_prompt, topics_rule, SLANG_AND_MEDIA_RULES, quotes_rule, titles_rule, critique_rule, stats.total_count, clean_stream)
+]], persona_prompt, topics_rule, SLANG_AND_MEDIA_RULES, quotes_rule, QUOTE_CRITERIA_RULES, titles_rule, critique_rule, stats.total_count, clean_stream)
     end
 
-    function M.build_map_prompt(chunk_stream, part_idx, total_parts, persona_prompt)
+    function M.build_map_prompt(chunk_stream, part_idx, total_parts, persona_prompt, section_caps)
         local clean_stream = common.strip_wm(chunk_stream or "")
+        local max_quotes = section_caps and tonumber(section_caps.quotes) or -1
+        local map_quote_rule
+        if max_quotes == 0 then
+            map_quote_rule = "【切片金句配额】：当前已关闭金句板块，`golden_quotes` 必须返回空数组 `[]`。"
+        elseif max_quotes > 0 then
+            map_quote_rule = string.format("【切片金句配额】：本切片至多初选 %d 条最强候选金句（宁缺毋滥，不够不硬凑，无合适可返回 `[]`），留待汇总阶段在全天所有分片候选中二次精选。", max_quotes)
+        else
+            map_quote_rule = "【切片金句配额】：不限制本切片候选条数上限，但严格按门槛初选（宁缺毋滥，不凑平淡接话，无合适可返回 `[]`），留待汇总阶段二次淘汰筛选。"
+        end
         return string.format([[%s
 
-你正在执行大群日报的【第 %s/%d 时段切片提炼】任务。请从以下聊天片段中提取关键话题、图片/合并转发独立摘要、高光金句与氛围亮点，严格返回纯 JSON：
+你正在执行大群日报的【第 %s/%d 时段切片提炼】任务。请从以下聊天片段中提取关键话题、图片/合并转发独立摘要、候选金句与氛围亮点，严格返回纯 JSON：
 ```json
 {
   "media_summaries": [
@@ -166,7 +179,7 @@ return function(jn, common)
     { "title": "话题标题(≤20字)", "summary": "80-180字分段叙事（点名真实昵称、交代起因结论；若围绕某人发的图片或转发记录展开请自然写明核心内容，严禁输出 [图#k] 或 [转发#k]）", "participants": "主要讨论者昵称，逗号分隔" }
   ],
   "golden_quotes": [
-    { "msg_id": 1, "sender": "真实昵称", "content": "逐字原话(不含回复引用和CQ码)", "reason": "简短入选理由（含谐音梗点拨或对某人发的图片/转发记录的吐槽，严禁输出 [图#k] 或 [转发#k]）" }
+    { "msg_id": 1, "sender": "真实昵称", "content": "逐字原话(不含回复引用和CQ码；同人连发用\\n串联)", "reason": "简短入选理由（说明笑点/反转/梗点或对某人发的图片/转发的吐槽，严禁输出 [图#k] 或 [转发#k]）" }
   ],
   "highlights": ["1-2条时段氛围或活跃人物特点简述"]
 }
@@ -174,11 +187,65 @@ return function(jn, common)
 要求：
 1. 每行 `[#编号 HH:MM] 昵称: 内容` 中的编号即 `msg_id`；零散无关链接可合并或忽略。
 2. 【切片独立总结图片与转发】：本片断只要出现 `[图#k：...]` 或 `[转发#k...]` 且有内容价值或引出讨论，必须在 `media_summaries` 单独总结它讲了什么，并确认切片内哪几条讨论围绕它展开。
-3. 【识别谐音梗与黑话】：遇到谐音梗、黑话或隐晦开黄腔玩梗时，在 `topics`（用较委婉幽默的表述点破笑点）与 `golden_quotes` 中准确捕捉。
+3. 【金句初选标准】%s
+%s
 4. 只输出纯 JSON，不要多余解释。
 
 ## 群聊切片记录：
-%s]], persona_prompt, tostring(part_idx), tonumber(total_parts) or 1, clean_stream)
+%s]], persona_prompt, tostring(part_idx), tonumber(total_parts) or 1, map_quote_rule, QUOTE_CRITERIA_RULES, clean_stream)
+    end
+
+    function M.build_quote_curation_prompt(candidates, total_parts, persona_prompt, max_quotes)
+        local n_lim = tonumber(max_quotes) or -1
+        local payload = {}
+        for i, c in ipairs(candidates or {}) do
+            payload[#payload + 1] = {
+                id = i,
+                part = c.part,
+                msg_id = c.msg_id,
+                sender = c.sender,
+                content = c.content,
+                reason = c.reason,
+            }
+        end
+        local quota_rule
+        if n_lim > 0 then
+            quota_rule = string.format(
+                "当前全天共从 %d 个时段切片初选出 %d 条候选金句。请你站在全天横向对比的视角执行【严格二次终筛】，优中选优、淘汰相对平淡或弱上下文的条目，最终仅保留最炸裂的 **至多 %d 条**（不足 %d 条按实际精品数保留，严禁硬凑）。",
+                tonumber(total_parts) or 1, #payload, n_lim, n_lim)
+        else
+            quota_rule = string.format(
+                "当前全天共从 %d 个时段切片初选出 %d 条候选金句（配额设为不限上限）。请你站在全天横向对比的视角执行【严格二次淘汰】：主动删掉其中相对平淡、凑数、或脱离前文就没头没尾（如 3~8 字短反问/单句接话/日常提问/普通技术解释）的后排候选，通常淘汰掉相对较弱的那一部分，只保留真正配得上「群圣经」的精品（宁缺毋滥）。",
+                tonumber(total_parts) or 1, #payload)
+        end
+
+        return string.format([[%s
+
+你现在专门负责为今日群聊日报执行「群圣经 / 金句」的最终二次筛选。
+%s
+
+%s
+
+输出格式要求：
+1. 严格只返回纯 JSON，不要输出 markdown 代码块之外的任何杂质：
+```json
+{
+  "golden_quotes": [
+    {
+      "id": 1,
+      "msg_id": 123,
+      "sender": "发言人真实昵称",
+      "content": "完整保留候选原话（禁止修改、缩减或加省略号）",
+      "reason": "精炼犀利的入选理由（严禁出现 [图#k] 或 [转发#k]）"
+    }
+  ]
+}
+```
+2. `id` 必须严格对应下方候选列表中的 `id`（不得凭空捏造新候选），按精彩程度从高到低排序。
+
+## 全天分片初选候选列表（共 %d 条）：
+%s
+]], persona_prompt, quota_rule, QUOTE_CRITERIA_RULES, #payload, common.strip_wm(jn.json.encode(payload)))
     end
 
     function M.build_reduce_prompt(map_items, stats, persona_prompt, caps)

@@ -72,42 +72,96 @@ return function(jn, common, sources)
         return "", ""
     end
 
-    -- 优先从数据库历史带水印的 repo-intro 卡片中恢复完整介绍，避免跨日或缓存缺失后降级
-    local function find_db_bot_repo(r)
+    -- 优先从本群数据库历史带水印卡片或 repo-intro 持久化表中恢复完整介绍，避免大群刷屏丢失后降级
+    local function find_db_bot_repo(r, group_id)
         if not (jn.database and jn.database.query and sources and sources.parse_bot_blocks) then
             return nil
         end
-        local ok, rows = pcall(jn.database.query, [[
-            SELECT raw_message FROM ]] .. common.TABLE_MESSAGES .. [[
-            WHERE LOWER(raw_message) LIKE ?
-            ORDER BY created_at DESC, id DESC
-            LIMIT 12
-        ]], { "%" .. tostring(r.key or ""):lower() .. "%" })
-        if not ok or type(rows) ~= "table" then return nil end
-        local best = nil
-        for _, row in ipairs(rows) do
-            if type(row) == "table" and type(row.raw_message) == "string" then
-                for _, b in ipairs(sources.parse_bot_blocks(row.raw_message)) do
-                    if b.kind == "repo" and b.text and b.text ~= ""
-                        and tostring(b.name or ""):lower() == tostring(r.key or ""):lower() then
-                        if not best or #b.text > #best.text then
-                            best = b
+        local gid = tonumber(group_id) or 0
+        local rkey = tostring(r.key or ""):lower()
+
+        -- 1) 先在本群（若未传 group_id 则全表兼容）消息表中查找带水印的 repo-intro 卡片
+        local ok, rows
+        if gid > 0 then
+            ok, rows = pcall(jn.database.query, [[
+                SELECT raw_message FROM ]] .. common.TABLE_MESSAGES .. [[
+                WHERE group_id = ? AND LOWER(raw_message) LIKE ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 12
+            ]], { gid, "%" .. rkey .. "%" })
+        else
+            ok, rows = pcall(jn.database.query, [[
+                SELECT raw_message FROM ]] .. common.TABLE_MESSAGES .. [[
+                WHERE LOWER(raw_message) LIKE ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 12
+            ]], { "%" .. rkey .. "%" })
+        end
+        if ok and type(rows) == "table" then
+            local best = nil
+            for _, row in ipairs(rows) do
+                if type(row) == "table" and type(row.raw_message) == "string" then
+                    for _, b in ipairs(sources.parse_bot_blocks(row.raw_message)) do
+                        if b.kind == "repo" and b.text and b.text ~= ""
+                            and tostring(b.name or ""):lower() == rkey then
+                            if not best or #b.text > #best.text then
+                                best = b
+                            end
                         end
                     end
                 end
             end
+            if best then return best end
         end
-        return best
+
+        -- 2) 本群消息未留存（如大群刷屏超 200 条历史窗口）时，回退查 repo-intro 共享持久化表（优先当前群）
+        local ok_hist, hrows = pcall(jn.database.query, [[
+            SELECT group_id, card_text, images_json, title, desc_cn, summary, url
+            FROM pluggin_repo_intro_history
+            WHERE repo_key = ? AND created_at >= NOW() - INTERVAL '7 days'
+            ORDER BY CASE WHEN group_id = ? THEN 0 ELSE 1 END, created_at DESC, id DESC
+            LIMIT 1
+        ]], { rkey, gid })
+        if ok_hist and type(hrows) == "table" and type(hrows[1]) == "table" then
+            local h = hrows[1]
+            local card_text = tostring(h.card_text or "")
+            local summary = tostring(h.summary or h.desc_cn or "")
+            local title = tostring(h.title or "")
+            if card_text ~= "" or summary ~= "" then
+                local imgs = {}
+                if type(h.images_json) == "string" and h.images_json ~= "" and jn.json and jn.json.decode then
+                    local okd, decoded = pcall(jn.json.decode, h.images_json)
+                    if okd and type(decoded) == "table" then imgs = decoded end
+                end
+                return {
+                    kind = "repo",
+                    name = r.name,
+                    text = card_text ~= "" and card_text or nil,
+                    images = imgs,
+                    title = title,
+                    desc_cn = tostring(h.desc_cn or ""),
+                    summary = summary,
+                }
+            end
+        end
+        return nil
     end
 
     -- 对群内无水印的开源项目裸链：优先复用历史 repo-intro 完整卡片，否则仅拉取平台官方 API 介绍
-    local function enrich_one(r)
-        local db_block = find_db_bot_repo(r)
+    local function enrich_one(r, group_id)
+        local db_block = find_db_bot_repo(r, group_id)
         if db_block then
             r.text = db_block.text
             r.images = db_block.images or {}
             r.summary = db_block.summary or ""
             r.title = db_block.title or ""
+            if not r.text and (db_block.title ~= "" or db_block.desc_cn ~= "" or db_block.summary ~= "") then
+                r.ri = {
+                    title = db_block.title or "",
+                    desc_cn = db_block.desc_cn or "",
+                    summary = db_block.summary or "",
+                }
+            end
             return
         end
 
@@ -142,17 +196,17 @@ return function(jn, common, sources)
         jn.cache.set(cache_key, { summary = summary, invalid = false }, summary ~= "" and 604800 or 86400)
     end
 
-    function M.enrich_repos(repos)
+    function M.enrich_repos(repos, group_id)
         if not repos or #repos == 0 then return end
         for _, r in ipairs(repos) do
             if not r.text and (r.summary or "") == "" then
-                pcall(enrich_one, r)
+                pcall(enrich_one, r, group_id)
             end
         end
     end
 
-    function M.enrich_repos_async(repos, on_done)
-        M.enrich_repos(repos)
+    function M.enrich_repos_async(repos, on_done, group_id)
+        M.enrich_repos(repos, group_id)
         if on_done then on_done() end
     end
 
@@ -427,9 +481,10 @@ return function(jn, common, sources)
         return "da:wx_sum:v1:" .. key
     end
 
-    function M.prepare_article_fetch(articles, max_fetch)
+    function M.prepare_article_fetch(articles, max_fetch, group_id)
         if type(articles) ~= "table" or #articles == 0 then return {} end
         local limit = tonumber(max_fetch) or 12
+        local gid = tonumber(group_id) or 0
         local pending = {}
         for _, a in ipairs(articles) do
             local u = tostring(a.url or "")
@@ -446,6 +501,32 @@ return function(jn, common, sources)
                             end
                             if (a.account or "") == "" and type(cached.account) == "string" and cached.account ~= "" then
                                 a.account = trim(cached.account)
+                            end
+                        end
+                    end
+                end
+                if ((a.title or "") == "" or (a.summary or "") == "") and jn.database and jn.database.query then
+                    local ckey = (a.canon_key and a.canon_key ~= "") and a.canon_key
+                        or (sources and sources.wx_article_key and sources.wx_article_key(u))
+                        or ""
+                    if ckey ~= "" or u ~= "" then
+                        local okh, wrows = pcall(jn.database.query, [[
+                            SELECT title, account, summary
+                            FROM pluggin_wx_article_history
+                            WHERE (canon_key = ? OR url = ?) AND created_at >= NOW() - INTERVAL '7 days'
+                            ORDER BY CASE WHEN group_id = ? THEN 0 ELSE 1 END, created_at DESC, id DESC
+                            LIMIT 1
+                        ]], { ckey, u, gid })
+                        if okh and type(wrows) == "table" and type(wrows[1]) == "table" then
+                            local wr = wrows[1]
+                            if (a.title or "") == "" and type(wr.title) == "string" and wr.title ~= "" then
+                                a.title = trim(wr.title)
+                            end
+                            if (a.account or "") == "" and type(wr.account) == "string" and wr.account ~= "" then
+                                a.account = trim(wr.account)
+                            end
+                            if (a.summary or "") == "" and type(wr.summary) == "string" and wr.summary ~= "" then
+                                a.summary = trim(wr.summary)
                             end
                         end
                     end
