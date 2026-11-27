@@ -75,7 +75,7 @@ return function(jn, common)
         if is_status and auto_len then
             local cap_hint = status_cap > 0 and string.format("总推送控制在 %d 字以内", status_cap) or "总字数可按故障过程详略自行把握"
             len_rule = string.format(
-                "7. 字数与过程完整度：title ≤ 28 字；scope ≤ 24 字；objective_summary 必须按时间顺序完整汇报过去 %d 分钟（及当前故障）内的全部状态变更时间线（例如 `09:10 已定位原因，正在实施修复 → 09:20 问题已解决，服务恢复`），严禁只写最后恢复结论而丢掉前面定位/排查过程；摘要字数由你自行判断（简单事件简短，多阶段故障可详细列出每个时间节点），%s；persona_comment ≤ 90 字。",
+                "7. 字数与过程完整度：title ≤ 28 字；scope ≤ 24 字（写清受影响模型/产品与端，如 API / Claude Code / claude.ai）；objective_summary 必须按时间正序完整汇报最近 %d 分钟及本起故障至今的**每一次状态阶段推进与组件变动**（如 `18:34 调查请求错误升高（网页/API 等降级） → 18:34 确认病因并升级为部分中断 → 18:40 部署修复，API 与 Claude Code 已先行恢复、claude.ai 观察中 → 18:49 全部恢复`），严禁只写最后一跳结论或漏掉周期内的多次状态/组件变化；%s；persona_comment ≤ 90 字。",
                 lookback_min, cap_hint
             )
         else
@@ -128,8 +128,17 @@ return function(jn, common)
             "时间(北京时间): " .. common.format_cst(cand.announced_ts or 0),
             "链接: " .. tostring(cand.source_url or ""),
         }
+        if cand.stage_label and cand.stage_label ~= "" then
+            parts[#parts + 1] = "当前阶段: " .. tostring(cand.stage_label)
+        end
+        if cand.impact and cand.impact ~= "" then
+            parts[#parts + 1] = "官方严重级别(impact): " .. tostring(cand.impact)
+        end
+        if cand.components_summary and cand.components_summary ~= "" then
+            parts[#parts + 1] = "当前组件健康矩阵: " .. tostring(cand.components_summary)
+        end
         if cand.timeline_text and cand.timeline_text ~= "" then
-            parts[#parts + 1] = "详情页回源状态时间线（已换算为 UTC+8 北京时间，按时间正序）:\n" .. common.clip(common.convert_utc_text_to_cst(common.strip_wm(cand.timeline_text)), 2400)
+            parts[#parts + 1] = "状态演变与组件变动完整时间线（已换算为 UTC+8 北京时间，按时间正序）:\n" .. common.clip(common.convert_utc_text_to_cst(common.strip_wm(cand.timeline_text)), 2800)
         end
         if cand.lookback_context and cand.lookback_context ~= "" then
             parts[#parts + 1] = string.format("最近 %d 分钟同产品已有记录:\n%s", lookback_min, common.clip(common.convert_utc_text_to_cst(common.strip_wm(cand.lookback_context)), 1200))
@@ -154,6 +163,8 @@ return function(jn, common)
         local kind = common.trim(d.event_kind or ""):lower()
         if not valid_kinds[kind] then
             kind = cand.event_kind or "unrelated"
+        elseif kind ~= "unrelated" and (cand.event_kind == "status_incident" or cand.event_kind == "status_resolved") then
+            kind = cand.event_kind
         end
 
         local prod = common.norm_product(d.product or "") or cand.product
@@ -271,6 +282,19 @@ return function(jn, common)
 
         local prod_label = common.PRODUCT_LABELS[ev.product] or tostring(ev.product or "AI 服务")
         local kind_label = M.kind_label(ev.event_kind)
+        if ev.event_kind == "status_incident" then
+            local st_part = common.trim(ev.stage_label or "")
+            local imp_part = common.trim(ev.impact or "")
+            if st_part ~= "" and imp_part ~= "" then
+                kind_label = st_part .. " · " .. imp_part
+            elseif st_part ~= "" then
+                kind_label = st_part .. "（" .. kind_label .. "）"
+            elseif imp_part ~= "" then
+                kind_label = kind_label .. " · " .. imp_part
+            end
+        elseif ev.event_kind == "status_resolved" and ev.impact and ev.impact ~= "" then
+            kind_label = kind_label .. "（曾为 " .. ev.impact .. "）"
+        end
         local icon = "🔔"
         if ev.event_kind == "status_incident" then icon = "🚨"
         elseif ev.event_kind == "status_resolved" then icon = "✅"
@@ -309,6 +333,9 @@ return function(jn, common)
         end
         if ev.scope and ev.scope ~= "" then
             head_lines[#head_lines + 1] = "🎯 范围：" .. common.clip(ev.scope, 50)
+        end
+        if ev.components_summary and ev.components_summary ~= "" then
+            head_lines[#head_lines + 1] = "🧩 组件：" .. common.clip(ev.components_summary, 140)
         end
 
         local tail_lines = {

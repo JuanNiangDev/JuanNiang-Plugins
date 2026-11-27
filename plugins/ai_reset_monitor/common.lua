@@ -11,7 +11,7 @@ return function(jn)
         "glm", "qoder", "kimi", "gemini_cli", "cursor",
     }
     M.STATUS_PRODUCTS = {
-        "openai_status", "claude_status", "deepseek_status",
+        "openai_status", "claude_status", "deepseek_status", "grok_status",
     }
 
     M.PRODUCT_LABELS = {
@@ -28,6 +28,7 @@ return function(jn)
         openai_status   = "OpenAI 服务状态",
         claude_status   = "Claude 服务状态",
         deepseek_status = "DeepSeek 服务状态",
+        grok_status     = "Grok 服务状态",
     }
 
     local PRODUCT_ALIAS = {
@@ -62,6 +63,8 @@ return function(jn)
         ["deepseek-status"] = "deepseek_status",
         deepseek_status     = "deepseek_status",
         deepseek            = "deepseek_status",
+        ["grok-status"]     = "grok_status",
+        grok_status         = "grok_status",
     }
 
     local VALID_STYLES = {

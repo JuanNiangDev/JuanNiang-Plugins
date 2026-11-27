@@ -15,7 +15,7 @@ configs:
   - key: group_subscriptions
     type: list
     label: 分群订阅规则
-    description: "每行一条，格式：群号|订阅键(all / reset_all / status_all / 逗号分隔产品键)|可选风格覆写(objective/persona/both/major_persona)。产品键：codex, antigravity, claude, grok, grok_bot, glm, qoder, kimi, gemini_cli, cursor, openai_status, claude_status, deepseek_status。示例：1007385018|all|both"
+    description: "每行一条，格式：群号|订阅键(all / reset_all / status_all / 逗号分隔产品键)|可选风格覆写(objective/persona/both/major_persona)。产品键：codex, antigravity, claude, grok, grok_bot, glm, qoder, kimi, gemini_cli, cursor, openai_status, claude_status, deepseek_status, grok_status。示例：1007385018|all|both"
     default: []
 
   - key: summary_style
@@ -50,8 +50,8 @@ configs:
   - key: status_only_start_and_resolved
     type: bool
     label: 同一故障仅推首次与恢复
-    description: 开启后（默认），同一官方故障按原链去重，仅在「首次发现故障」与「最终已恢复 Resolved」时各推送 1 次；中间定位/部署修复阶段更新不再重复发群，待恢复时汇总完整时间线
-    default: true
+    description: 默认关闭（有阶段或组件状态实质变动即跟进推送，并在详情写出完整时间线与变动；已恢复故障的事后文案微调默认自动忽略）；开启后仅在首次发现故障与最终已恢复时各推送 1 次
+    default: false
 
   - key: lookback_minutes
     type: string
@@ -114,7 +114,7 @@ configs:
   - key: enable_status_sources
     type: bool
     label: 启用官方故障状态监控
-    description: 监控 OpenAI (status.openai.com)、Claude (status.claude.com) 与 DeepSeek 官方故障/恢复进展（默认同一故障仅推送首次发现与最终恢复）
+    description: 监控 OpenAI (status.openai.com JSON+组件)、Claude (status.claude.com JSON+组件)、DeepSeek (官方RSS+Entireweb) 与 Grok (StatusGator状态监测)，默认阶段/组件变动即跟进并附完整时间线
     default: true
 
   - key: deepseek_try_official_first

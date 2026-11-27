@@ -125,6 +125,9 @@ return function(jn, common)
                 persona_comment = ev.persona_comment or "",
                 is_major = ev.is_major == true,
                 source_name = ev.source_name or "",
+                impact = ev.impact or "",
+                stage_label = ev.stage_label or "",
+                components_summary = ev.components_summary or "",
             })
             if ok and type(enc) == "string" then payload_json = enc end
         end
@@ -134,6 +137,9 @@ return function(jn, common)
         if (ev.event_kind == "status_incident" or ev.event_kind == "status_resolved")
             and ev.incident_notify_key and ev.incident_notify_key ~= "" then
             persist_row(ev.incident_notify_key, "_meta", "incident_notified", ev.title, ev.source_url, ev.announced_ts, "", notified)
+        end
+        if ev.event_kind == "status_resolved" and ev.resolved_once_key and ev.resolved_once_key ~= "" then
+            persist_row(ev.resolved_once_key, "_meta", "incident_notified", ev.title, ev.source_url, ev.announced_ts, "", notified)
         end
     end
 
@@ -230,7 +236,7 @@ return function(jn, common)
         local sql = [[
             SELECT DISTINCT ON (product) product, event_kind, announced_ts
             FROM ]] .. TABLE_SEEN .. [[
-            WHERE product IN ('openai_status', 'claude_status', 'deepseek_status')
+            WHERE product IN ('openai_status', 'claude_status', 'deepseek_status', 'grok_status')
               AND announced_ts >= ?
               AND event_kind IN ('status_incident', 'status_resolved')
             ORDER BY product, announced_ts DESC, created_at DESC

@@ -283,6 +283,91 @@ return function(jn, common)
         return nil, nil
     end
 
+    local function comp_status_badge(st)
+        local low = tostring(st or ""):lower()
+        if low == "operational" then return "✅正常"
+        elseif low == "degraded_performance" then return "⚠️降级"
+        elseif low == "partial_outage" then return "🟠部分中断"
+        elseif low == "major_outage" then return "🔴严重中断"
+        elseif low == "under_maintenance" then return "🔧维护中"
+        end
+        return tostring(st or "")
+    end
+
+    local function short_comp_name(name)
+        local s = common.trim(name or "")
+        s = s:gsub("%s*%([^%)]*%)$", "")
+        return s
+    end
+
+    local function impact_badge(impact)
+        local low = tostring(impact or ""):lower()
+        if low == "critical" then return "Critical"
+        elseif low == "major" then return "Major"
+        elseif low == "minor" then return "Minor"
+        end
+        return ""
+    end
+
+    local function stage_cn_short(s, is_resolved)
+        if is_resolved then return "已恢复" end
+        local low = tostring(s or ""):lower()
+        if low:find("resolved", 1, true) or low:find("postmortem", 1, true) then return "已恢复"
+        elseif low:find("monitoring", 1, true) then return "修复监控中"
+        elseif low:find("identified", 1, true) then return "已定位原因"
+        elseif low:find("investigating", 1, true) then return "排查中"
+        elseif low:find("update", 1, true) then return "进展更新"
+        end
+        return "服务异常"
+    end
+
+    function M.format_status_components(components, max_items)
+        if type(components) ~= "table" or #components == 0 then return "" end
+        local list = {}
+        for _, c in ipairs(components) do
+            if type(c) == "table" and c.name and c.name ~= "" then
+                local st = tostring(c.status or ""):lower()
+                list[#list + 1] = {
+                    name = short_comp_name(c.name),
+                    status = st,
+                    unhealthy = (st ~= "operational" and st ~= ""),
+                }
+            end
+        end
+        if #list == 0 then return "" end
+        table.sort(list, function(a, b)
+            if a.unhealthy ~= b.unhealthy then return a.unhealthy end
+            return a.name < b.name
+        end)
+        local cap = max_items or 6
+        local parts = {}
+        for i = 1, math.min(cap, #list) do
+            local item = list[i]
+            parts[#parts + 1] = item.name .. " " .. comp_status_badge(item.status)
+        end
+        if #list > cap then
+            parts[#parts + 1] = string.format("等%d项", #list)
+        end
+        return table.concat(parts, " ｜ ")
+    end
+
+    function M.parse_summary_components(body)
+        local ok, data = pcall(jn.json.decode, body)
+        if not (ok and type(data) == "table" and type(data.components) == "table") then
+            return nil
+        end
+        local unhealthy = {}
+        for _, c in ipairs(data.components) do
+            if type(c) == "table" and c.status and tostring(c.status):lower() ~= "operational" then
+                unhealthy[#unhealthy + 1] = c
+            end
+        end
+        if #unhealthy > 0 then
+            return M.format_status_components(unhealthy, 6)
+        end
+        return nil
+    end
+
     -- ----------------------------------------------------------------
     -- 官方故障详情页与 RSS 多阶段时间线解析
     -- ----------------------------------------------------------------
@@ -569,20 +654,27 @@ return function(jn, common)
             if need("openai_status") then
                 sources[#sources + 1] = {
                     id = "status_openai",
-                    kind = "status_rss",
+                    kind = "status_v2_json",
                     product = "openai_status",
                     name = "OpenAI Status",
-                    url = "https://status.openai.com/feed.rss",
+                    url = "https://status.openai.com/api/v2/incidents.json",
+                    summary_url = "https://status.openai.com/api/v2/summary.json",
+                    fallback_urls = {
+                        { kind = "status_rss", url = "https://status.openai.com/feed.rss", proxy = f_proxy },
+                    },
                     proxy = f_proxy,
                 }
             end
             if need("claude_status") then
                 sources[#sources + 1] = {
                     id = "status_claude",
-                    kind = "status_rss",
+                    kind = "status_v2_json",
                     product = "claude_status",
                     name = "Claude Status",
-                    url = "https://status.claude.com/history.rss",
+                    url = "https://status.claude.com/api/v2/incidents.json",
+                    fallback_urls = {
+                        { kind = "status_rss", url = "https://status.claude.com/history.rss", proxy = f_proxy },
+                    },
                     proxy = f_proxy,
                 }
             end
@@ -601,6 +693,16 @@ return function(jn, common)
                         { kind = "deepseek_entireweb", url = "https://www.entireweb.com/zh-cn/status/deepseek", proxy = f_proxy ~= "" and f_proxy or c_proxy },
                     } or nil,
                     proxy = primary_ds and c_proxy or (f_proxy ~= "" and f_proxy or c_proxy),
+                }
+            end
+            if need("grok_status") then
+                sources[#sources + 1] = {
+                    id = "status_grok",
+                    kind = "grok_statusgator",
+                    product = "grok_status",
+                    name = "Grok Status (StatusGator)",
+                    url = "https://statusgator.com/services/grok",
+                    proxy = f_proxy,
                 }
             end
         end
@@ -827,9 +929,11 @@ return function(jn, common)
             local state_tag = unhealthy and "outage" or "normal"
             candidates[#candidates + 1] = {
                 event_key = "ds_entireweb_state:" .. state_tag,
+                state_flag_key = "ds_entireweb_active",
                 product = "deepseek_status",
                 event_kind = unhealthy and "status_incident" or "status_resolved",
                 is_major = unhealthy and (h1 >= thresh * 2 or explicit_down),
+                stage_label = unhealthy and "监测异常" or "已恢复",
                 source_name = "Entireweb DeepSeek 监控",
                 source_url = src.url,
                 title = unhealthy and "DeepSeek 服务状态异常（Entireweb 监测）" or "DeepSeek 服务运行正常（Entireweb 监测）",
@@ -842,6 +946,188 @@ return function(jn, common)
                 entireweb_state = state_tag,
                 skip_unless_state_changed = true,
             }
+            return candidates
+        end
+
+        if src.kind == "grok_statusgator" then
+            if not wants("grok_status") then return candidates end
+            local p1 = body:find("Last checked from Grok official status page", 1, true)
+                or body:find("Is Grok down?", 1, true)
+            if not p1 then return candidates end
+            local p2 = body:find("Grok outage reports", p1, true)
+                or body:find("Recent community", p1, true)
+                or (p1 + 3500)
+            local hero = common.clean_html(body:sub(p1, math.min(#body, p2)))
+            local check_low = hero:lower()
+                :gsub("report an outage", "")
+                :gsub("user%-submitted reports? of outages?", "")
+            local is_normal = (check_low:find("grok is up", 1, true) ~= nil)
+                or (check_low:find("service was operational", 1, true) ~= nil)
+            local explicit_down = (not is_normal) and (
+                check_low:find("grok is down", 1, true) ~= nil
+                or check_low:find("service was down", 1, true) ~= nil
+                or check_low:find("service is down", 1, true) ~= nil
+                or check_low:find("service was degraded", 1, true) ~= nil
+                or check_low:find("experiencing an outage", 1, true) ~= nil
+                or check_low:find("facing minor", 1, true) ~= nil
+                or check_low:find("facing major", 1, true) ~= nil
+                or check_low:find("major outage", 1, true) ~= nil
+                or check_low:find("partial outage", 1, true) ~= nil
+                or check_low:find("not operational", 1, true) ~= nil
+            )
+            local unhealthy = explicit_down or (not is_normal)
+            local report_cnt = tonumber(hero:match("(%d+)%s+user%-submitted report")) or 0
+            local checked_age = common.trim(hero:match("Last checked from Grok official status page%s*([^\n]+)") or "")
+            local checked_at = common.trim(hero:match("StatusGator last checked the status of Grok on%s*(.-)%s*and the service") or "")
+            local state_tag = unhealthy and "outage" or "normal"
+            candidates[#candidates + 1] = {
+                event_key = "grok_sg_state:" .. state_tag,
+                state_flag_key = "grok_sg_active",
+                product = "grok_status",
+                event_kind = unhealthy and "status_incident" or "status_resolved",
+                is_major = unhealthy and (check_low:find("major outage", 1, true) ~= nil or check_low:find("grok is down", 1, true) ~= nil),
+                stage_label = unhealthy and "状态异常" or "已恢复",
+                components_summary = unhealthy and "Grok ⚠️状态异常" or "Grok ✅运行正常",
+                source_name = "StatusGator Grok 监测",
+                source_url = src.url,
+                title = unhealthy and "Grok 服务状态异常（StatusGator 监测）" or "Grok 服务已恢复正常（StatusGator 监测）",
+                raw_text = string.format(
+                    "Grok 官方状态监测=%s；检测描述=%s%s%s；过去24小时用户异常报告=%d",
+                    unhealthy and "异常/中断" or "运行正常",
+                    checked_at ~= "" and checked_at or "未知时间",
+                    checked_age ~= "" and ("（" .. checked_age .. "）") or "",
+                    hero ~= "" and ("；状态摘要=" .. common.clip(hero:gsub("\n+", " "), 200)) or "",
+                    report_cnt
+                ),
+                announced_ts = os.time(),
+                entireweb_state = state_tag,
+                skip_unless_state_changed = true,
+            }
+            return candidates
+        end
+
+        if src.kind == "status_v2_json" then
+            if not wants(src.product) then return candidates end
+            local ok_j, data = pcall(jn.json.decode, body)
+            if not (ok_j and type(data) == "table" and type(data.incidents) == "table") then
+                return candidates
+            end
+            local lookback_sec = math.max(5, common.cfg_num("lookback_minutes", 60)) * 60
+            for idx = 1, math.min(15, #data.incidents) do
+                local inc = data.incidents[idx]
+                if type(inc) == "table" then
+                    local inc_id = tostring(inc.id or "")
+                    local clean_link = common.trim(inc.shortlink or "")
+                    if clean_link == "" and inc_id ~= "" then
+                        if src.product == "claude_status" then
+                            clean_link = "https://status.claude.com/incidents/" .. inc_id
+                        elseif src.product == "openai_status" then
+                            clean_link = "https://status.openai.com/incidents/" .. inc_id
+                        else
+                            clean_link = src.url
+                        end
+                    end
+                    local scheme, rest = clean_link:match("^(https?://)(.+)$")
+                    if scheme and rest then clean_link = scheme .. rest:gsub("//+", "/") end
+
+                    local inc_status = tostring(inc.status or ""):lower()
+                    local impact = tostring(inc.impact or "none"):lower()
+                    local st_kind = (inc_status == "resolved" or inc_status == "postmortem") and "status_resolved" or "status_incident"
+                    local is_maj = (st_kind == "status_incident") and (impact == "major" or impact == "critical")
+                    local st_label = stage_cn_short(inc_status, st_kind == "status_resolved")
+                    local imp_lbl = impact_badge(impact)
+
+                    -- 当前受影响组件快照与确定性签名
+                    local comp_sig_parts = {}
+                    local inc_comps = type(inc.components) == "table" and inc.components or {}
+                    for _, c in ipairs(inc_comps) do
+                        if type(c) == "table" and c.name then
+                            comp_sig_parts[#comp_sig_parts + 1] = tostring(c.name) .. ":" .. tostring(c.status or "")
+                        end
+                    end
+                    table.sort(comp_sig_parts)
+                    local comp_sig = table.concat(comp_sig_parts, ";")
+                    local comp_summary = M.format_status_components(inc_comps, 6)
+
+                    -- 按时间正序整理完整更新节点与每次组件变更轨迹
+                    local raw_upds = (type(inc.incident_updates) == "table" and #inc.incident_updates > 0)
+                        and inc.incident_updates
+                        or { { id = inc_id, status = inc_status, created_at = inc.updated_at or inc.created_at, body = inc.name } }
+                    local asc = {}
+                    for ui, u in ipairs(raw_upds) do
+                        if type(u) == "table" then
+                            local t_raw = u.created_at or u.display_at or u.updated_at or inc.updated_at or inc.created_at or ""
+                            local uts = common.parse_timestamp(t_raw) or 0
+                            asc[#asc + 1] = { u = u, ts = uts, seq = ui }
+                        end
+                    end
+                    table.sort(asc, function(a, b)
+                        if a.ts ~= b.ts then return a.ts < b.ts end
+                        return a.seq > b.seq
+                    end)
+
+                    local tl_lines = {}
+                    local start_i = math.max(1, #asc - 11)
+                    for ai = start_i, #asc do
+                        local u = asc[ai].u
+                        local uts = asc[ai].ts
+                        local tstr = uts > 0 and fmt_hhmm_cst(uts, "") or "时间未知"
+                        local ustage = normalize_stage_label(u.status or "")
+                        local deltas = {}
+                        if type(u.affected_components) == "table" then
+                            for _, ac in ipairs(u.affected_components) do
+                                if type(ac) == "table" and ac.name then
+                                    local cn = short_comp_name(ac.name)
+                                    local os_raw = tostring(ac.old_status or "")
+                                    local ns_raw = tostring(ac.new_status or "")
+                                    if os_raw ~= "" and ns_raw ~= "" and os_raw ~= ns_raw then
+                                        deltas[#deltas + 1] = cn .. " " .. comp_status_badge(os_raw) .. "→" .. comp_status_badge(ns_raw)
+                                    elseif ns_raw ~= "" then
+                                        deltas[#deltas + 1] = cn .. " " .. comp_status_badge(ns_raw)
+                                    end
+                                end
+                            end
+                        end
+                        local delta_str = (#deltas > 0) and (" [组件变动: " .. table.concat(deltas, "；") .. "]") or ""
+                        local btxt = common.trim(common.clean_html(u.body or ""))
+                        tl_lines[#tl_lines + 1] = string.format("[%s] %s%s：%s",
+                            tstr, ustage, delta_str, btxt ~= "" and btxt or tostring(inc.name or ""))
+                    end
+
+                    local latest = asc[#asc]
+                    local latest_u = latest and latest.u or {}
+                    local latest_id = tostring(latest_u.id or latest_u.updated_at or latest_u.created_at or inc.updated_at or "")
+                    local latest_ts = (latest and latest.ts > 0) and latest.ts
+                        or (common.parse_timestamp(inc.updated_at or inc.created_at or "") or 0)
+                    local state_sig = common.fnv1a_hex(inc_id .. "|" .. latest_id .. "|" .. inc_status .. "|" .. impact .. "|" .. comp_sig)
+                    local inc_sig = common.fnv1a_hex(src.product .. "|" .. (inc_id ~= "" and inc_id or clean_link))
+                    local inc_phase = (st_kind == "status_resolved") and "resolved" or "incident"
+
+                    local has_summary_lookup = (src.summary_url ~= nil and src.summary_url ~= "")
+                    candidates[#candidates + 1] = {
+                        event_key = "st:" .. src.product .. ":" .. state_sig,
+                        incident_notify_key = "stinc:" .. src.product .. ":" .. inc_phase .. ":" .. inc_sig,
+                        resolved_once_key = (st_kind == "status_resolved") and ("stres:" .. src.product .. ":" .. inc_sig) or nil,
+                        product = src.product,
+                        event_kind = st_kind,
+                        is_major = is_maj,
+                        impact = imp_lbl,
+                        stage_label = st_label,
+                        components_summary = comp_summary,
+                        source_name = src.name,
+                        source_url = clean_link ~= "" and clean_link or src.url,
+                        title = tostring(inc.name or ""),
+                        raw_text = tostring(inc.name or "") .. "\n" .. common.trim(common.clean_html(latest_u.body or "")),
+                        timeline_text = table.concat(tl_lines, "\n"),
+                        needs_status_lookup = has_summary_lookup,
+                        status_detail_url = has_summary_lookup and src.summary_url or nil,
+                        status_is_summary_json = has_summary_lookup,
+                        status_proxy = src.proxy or "",
+                        announced_ts = latest_ts,
+                        preverified_structured = true,
+                    }
+                end
+            end
             return candidates
         end
 
@@ -945,9 +1231,10 @@ return function(jn, common)
                     end
                     local combined = it.title .. "\n" .. it.desc
                     local st_kind, is_maj = infer_status_stage(combined)
+                    local desc_norm = common.trim(tostring(it.desc or ""):gsub("%s+", " "))
                     -- 同一故障每次阶段推进（Investigating→Identified→Monitoring→Resolved）都有新 pubDate / 新 description
-                    local stage_sig = common.fnv1a_hex((it.guid or it.link) .. "|" .. it.pub_raw .. "|" .. common.clip(it.desc, 160))
-                    -- 按稳态事故原链 / guid 生成事故级去重键，配合 status_only_start_and_resolved 实现同一故障仅推首次与恢复
+                    local stage_sig = common.fnv1a_hex((it.guid or it.link) .. "|" .. it.pub_raw .. "|" .. common.clip(desc_norm, 160))
+                    -- 按稳态事故原链 / guid 生成事故级去重键
                     local inc_ref = (clean_link ~= "" and clean_link:find("/incidents/", 1, true) and clean_link)
                         or (it.guid and it.guid ~= "" and it.guid)
                         or (clean_link ~= "" and clean_link)
@@ -966,6 +1253,8 @@ return function(jn, common)
                     candidates[#candidates + 1] = {
                         event_key = "st:" .. src.product .. ":" .. stage_sig,
                         incident_notify_key = "stinc:" .. src.product .. ":" .. inc_phase .. ":" .. inc_sig,
+                        resolved_once_key = (st_kind == "status_resolved") and ("stres:" .. src.product .. ":" .. inc_sig) or nil,
+                        stage_label = stage_cn_short(combined, st_kind == "status_resolved"),
                         product = src.product,
                         event_kind = st_kind,
                         is_major = is_maj,

@@ -572,19 +572,21 @@ end
 submit_candidate_to_llm = function(batch, cand)
     if cand.skip_unless_state_changed then
         if batch.is_manual then return end
-        -- Entireweb 状态（normal / outage）：仅在状态发生真实切换时通报，正常时写基线不推送
-        local prev_outage = store.has_seen("ds_entireweb_active")
+        -- 外部状态切换源（Entireweb / StatusGator）：仅在状态发生真实切换时通报，正常时写基线不推送
+        local flag_key = cand.state_flag_key or "ds_entireweb_active"
+        local prefix = flag_key:gsub("_active$", "")
+        local prev_outage = store.has_seen(flag_key)
         if cand.entireweb_state == "normal" then
             if prev_outage then
-                store.mark_seen({ event_key = "ds_entireweb_active", product = "deepseek_status", event_kind = "cleared" }, false)
-                cand.event_key = "ds_entireweb_recovered:" .. tostring(os.time())
+                store.mark_seen({ event_key = flag_key, product = cand.product, event_kind = "cleared" }, false)
+                cand.event_key = prefix .. "_recovered:" .. tostring(os.time())
             else
                 return
             end
         else
             if prev_outage then return end
-            store.mark_seen({ event_key = "ds_entireweb_active", product = "deepseek_status", event_kind = "active" }, false)
-            cand.event_key = "ds_entireweb_outage:" .. tostring(os.time())
+            store.mark_seen({ event_key = flag_key, product = cand.product, event_kind = "active" }, false)
+            cand.event_key = prefix .. "_outage:" .. tostring(os.time())
         end
     end
 
@@ -651,7 +653,7 @@ local function process_source_candidates(batch, src, body)
     local lookback_sec = lookback_min * 60
     -- 候选淘汰门槛至少覆盖最大轮询间隔 + 15 分钟余量，避免 poll == lookback 时因 30s tick 抖动漏推边界条目
     local fresh_cutoff_sec = math.max(lookback_min, max_poll_min + 15) * 60
-    local status_dedup_incident = common.cfg_bool("status_only_start_and_resolved", true)
+    local status_dedup_incident = common.cfg_bool("status_only_start_and_resolved", false)
     local now_ts = os.time()
 
     for _, cand in ipairs(candidates) do
@@ -670,19 +672,38 @@ local function process_source_candidates(batch, src, body)
             if slot_key then batch.seen_slots[slot_key] = true end
 
             local inc_key = status_dedup_incident and cand.incident_notify_key or nil
+            local res_key = cand.resolved_once_key
             if replay_mode then
-                local dup_inc = inc_key and batch.seen_incidents[inc_key]
+                local dup_inc = (inc_key and batch.seen_incidents[inc_key])
+                    or (res_key and batch.seen_incidents[res_key])
                 if not dup_inc and (cand.announced_ts or 0) >= replay_cutoff then
                     if inc_key then batch.seen_incidents[inc_key] = true end
+                    if res_key then batch.seen_incidents[res_key] = true end
                     enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
                 end
             elseif skip_cold then
                 -- 冷启动首轮：写入基线标记，防止旧帖子全部在群里刷屏
-                if inc_key then batch.seen_incidents[inc_key] = true end
-                batch.baseline_marks[#batch.baseline_marks + 1] = cand
-            elseif not store.has_seen(cand.event_key) then
-                -- 同一事故的中间阶段更新（Update / Monitoring）已在首次发生时提醒过，静默记录不再群发
-                if inc_key and (batch.seen_incidents[inc_key] or store.has_seen(inc_key)) then
+                if cand.skip_unless_state_changed then
+                    if cand.entireweb_state == "outage" and cand.state_flag_key then
+                        batch.baseline_marks[#batch.baseline_marks + 1] = {
+                            event_key = cand.state_flag_key,
+                            product = cand.product,
+                            event_kind = "active",
+                            title = cand.title,
+                            source_url = cand.source_url,
+                            announced_ts = cand.announced_ts,
+                        }
+                    end
+                else
+                    if inc_key then batch.seen_incidents[inc_key] = true end
+                    if res_key then batch.seen_incidents[res_key] = true end
+                    batch.baseline_marks[#batch.baseline_marks + 1] = cand
+                end
+            elseif cand.skip_unless_state_changed or not store.has_seen(cand.event_key) then
+                local already_resolved = res_key and (batch.seen_incidents[res_key] or store.has_seen(res_key))
+                local suppressed_stage = inc_key and (batch.seen_incidents[inc_key] or store.has_seen(inc_key))
+                if already_resolved or suppressed_stage then
+                    -- 已恢复事故的事后文案修订，或启用了“仅推首次与恢复”时的中间更新，静默记录不再群发
                     batch.suppressed_marks[#batch.suppressed_marks + 1] = {
                         event_key = cand.event_key,
                         product = cand.product,
@@ -694,9 +715,11 @@ local function process_source_candidates(batch, src, body)
                 elseif (cand.announced_ts or 0) > 0 and (now_ts - cand.announced_ts > fresh_cutoff_sec) then
                     -- 统一溯源时间窗：超出有效窗口的旧条目仅写基线不补发，避免联动触发翻出历史旧帖
                     if inc_key then batch.seen_incidents[inc_key] = true end
+                    if res_key then batch.seen_incidents[res_key] = true end
                     batch.baseline_marks[#batch.baseline_marks + 1] = cand
                 else
                     if inc_key then batch.seen_incidents[inc_key] = true end
+                    if res_key then batch.seen_incidents[res_key] = true end
                     enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
                 end
             end
@@ -1111,10 +1134,19 @@ function on_http_response(req_id, ctx, result, err)
     elseif ctx.stage == "verify_status" then
         local cand = ctx.cand
         if ok_resp then
-            local ref_ts = (cand.announced_ts and cand.announced_ts > 0) and cand.announced_ts or os.time()
-            local timeline = sources.extract_status_timeline(body, cand.desc_raw, ref_ts, ctx.lookback_sec or 3600)
-            if timeline and timeline ~= "" then
-                cand.timeline_text = timeline
+            if cand.status_is_summary_json then
+                local comp_sum = sources.parse_summary_components(body)
+                if comp_sum and comp_sum ~= "" then
+                    cand.components_summary = comp_sum
+                elseif cand.event_kind == "status_resolved" and (cand.components_summary or "") == "" then
+                    cand.components_summary = "全组件当前 ✅运行正常"
+                end
+            else
+                local ref_ts = (cand.announced_ts and cand.announced_ts > 0) and cand.announced_ts or os.time()
+                local timeline = sources.extract_status_timeline(body, cand.desc_raw, ref_ts, ctx.lookback_sec or 3600)
+                if timeline and timeline ~= "" then
+                    cand.timeline_text = timeline
+                end
             end
         end
         submit_candidate_to_llm(batch, cand)

@@ -23,13 +23,14 @@
 | `gemini_cli` | Gemini CLI (Google) | `whenaireset.com`（及 `extra_rss_feeds`） |
 | `cursor` | Cursor | `whenaireset.com`（及 `extra_rss_feeds`） |
 
-### 2. 官方故障状态监控（同一故障默认仅推首次与恢复）
+### 2. 官方故障状态监控（细粒度组件矩阵 + 阶段变动跟进 + 完整时间线）
 
 | 订阅键 | 服务 | 数据源与降级策略 |
 |---|---|---|
-| `openai_status` | OpenAI 服务状态 | `status.openai.com/feed.rss` |
-| `claude_status` | Claude 服务状态 | `status.claude.com/history.rss` |
+| `openai_status` | OpenAI 服务状态 | 优先 `status.openai.com/api/v2/incidents.json` + `summary.json`（组件状态），失败自动回落 `feed.rss` |
+| `claude_status` | Claude 服务状态 | 优先 `status.claude.com/api/v2/incidents.json`（含 `impact` 与逐阶段组件状态变化），失败自动回落 `history.rss` |
 | `deepseek_status` | DeepSeek 服务状态 | 优先直探 `status.deepseek.com/history.rss` 与 `feed.rss`（带浏览器 UA）；不可达时自动降级采样 `entireweb.com/zh-cn/status/deepseek` |
+| `grok_status` | Grok 服务状态 | `statusgator.com/services/grok` 状态变更监测（状态切换时告警/恢复） |
 
 ---
 
@@ -74,7 +75,7 @@
 - `enable_fxtwitter_sources` / `enable_x_cookie_sources` / `x_cookies`：默认直连公开 FxTwitter RSS（无需登录）；若填入 X 登录态 `x_cookies`（含 `auth_token` 与 `ct0`），插件会额外直连 X 官方 GraphQL 时间线并作原帖回源兜底，跨源按推文 ID 自动去重。
 - **分级轮询与状态联动 X**：
   - `status_poll_interval_minutes`：OpenAI / Claude / DeepSeek 官方状态页独立轮询间隔，默认 `"20"` 分钟；检出未恢复故障时自动按 `status_incident_poll_minutes`（默认 `"3"` 分钟）高频跟踪直至恢复。
-  - `status_only_start_and_resolved`：默认 `true`，同一故障按事故原链 / `guid` 去重，仅在首次发现故障与最终 `Resolved` 恢复时各推送 1 次，中间 `Update / Monitoring` 进展静默记录不再连续刷屏。
+  - `status_only_start_and_resolved`：默认 `false`（每次阶段推进、严重度变化或组件状态变动均跟进推送，并附完整时间线与组件状态；已恢复故障的事后文案编辑仍自动去重）；设为 `true` 时只推送首次发生与最终 `Resolved` 恢复。
   - `poll_interval_minutes`：X 与重置聚合源轮询间隔，默认 `"60"` 分钟（设 `"0"` 可关闭自动轮询仅靠 CronJob）。
   - `status_trigger_x`：默认开启，官方状态页检出新故障或恢复变化时立即联动抓一次 X 与聚合源。
 - **统一事件溯源时间窗（`lookback_minutes`）**：默认 `"60"` 分钟，**状态页与 X/聚合源共用同一溯源窗口**——状态页推送会自动回源 `/incidents/...` 详情页按时间先后汇总最近 N 分钟内的全部阶段演变（避免只看到最终恢复结果），X/聚合源同步过滤与关联该窗口内的最新动态。

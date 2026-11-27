@@ -305,6 +305,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         openai_status = "OpenAI 服务状态",
         claude_status = "Claude 服务状态",
         deepseek_status = "DeepSeek 服务状态",
+        grok_status = "Grok 服务状态",
     }
 
     local AI_KIND_LABELS = {
