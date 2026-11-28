@@ -20,9 +20,21 @@ configs:
 
   - key: compliance_filter
     type: bool
-    label: 合规安全过滤（拦截键政/推塔/违法违规）
-    description: 开启后自动审核推文、X 长文及被引用/被回复内容；涉及中国境内键政/推塔、涉政敏感、暴力极端、色情低俗、诈骗违禁等违反中文互联网法律法规的内容，一律跳过总结并禁止转发原文、链接、媒体与仓库卡片
+    label: 全局默认开启合规安全过滤
+    description: 全局默认开关（拦截键政/推塔/违法违规等违反中文互联网法律法规的内容，不总结、不翻译、不转发原文/媒体/仓库卡片）；可配合下方开启/关闭群聊名单按群覆盖
     default: true
+
+  - key: compliance_enable_groups
+    type: list
+    label: 开启审查的群聊名单
+    description: 无论全局默认开关是否开启，名单内的群号均强制开启合规安全过滤（每行一个群号；与关闭名单重叠时本名单优先）
+    default: []
+
+  - key: compliance_disable_groups
+    type: list
+    label: 关闭审查的群聊名单
+    description: 当全局默认开启时，名单内的群号将跳过合规安全过滤（每行一个群号）
+    default: []
 
   - key: blocked_notice
     type: string

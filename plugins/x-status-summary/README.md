@@ -38,7 +38,7 @@ X（推特）链接总结插件。给一条消息里的 `x.com` / `twitter.com` 
 
 ## 配置
 
-见 `config.yaml`：包含总开关（`enabled`/`enable_summary`/`compliance_filter`/`blocked_notice`/`group_only`/`reply_quote`）、媒体开关与代理改写（`send_media`/`max_images`/`video_enabled`/`video_max_seconds`/`video_max_mb`/`proxy_image_rewrite`/`video_url_rewrite`）、仓库卡片联动（`repo_card`/`github_token`）、抓取接口与网络代理（`api_base`/`proxy`）、以及链接上限、LLM 超时、缓存 TTL 与手动测试（`manual_trigger`/`test_links`/`test_group`/`test_video_only`）。
+见 `config.yaml`：包含总开关（`enabled`/`enable_summary`/`compliance_filter`/`compliance_enable_groups`/`compliance_disable_groups`/`blocked_notice`/`group_only`/`reply_quote`）、媒体开关与代理改写（`send_media`/`max_images`/`video_enabled`/`video_max_seconds`/`video_max_mb`/`proxy_image_rewrite`/`video_url_rewrite`）、仓库卡片联动（`repo_card`/`github_token`）、抓取接口与网络代理（`api_base`/`proxy`）、以及链接上限、LLM 超时、缓存 TTL 与手动测试（`manual_trigger`/`test_links`/`test_group`/`test_video_only`）。
 
 ## 异步流水线
 
