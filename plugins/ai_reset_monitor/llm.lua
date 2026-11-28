@@ -86,7 +86,7 @@ return function(jn, common)
             "你是 AI 额度重置与官方服务状态监控审核员。请对输入的官方帖子或状态更新做严格鉴真、全中文翻译与双风格摘要，只输出合法 JSON 对象，禁止 Markdown 代码块或任何多余文字。",
             "",
             "【产品键集合】",
-            "codex, antigravity, claude, grok, grok_bot, glm, qoder, kimi, gemini_cli, cursor, openai_status, claude_status, deepseek_status",
+            "codex, antigravity, claude, grok, grok_bot, glm, qoder, kimi, gemini_cli, cursor, openai_status, claude_status, deepseek_status, grok_status",
             "",
             "【事件类型 event_kind 判定】",
             "- direct_reset: 官方确认已直接重置额度/清零用量（非单纯口头玩笑）",
@@ -142,6 +142,9 @@ return function(jn, common)
         end
         if cand.lookback_context and cand.lookback_context ~= "" then
             parts[#parts + 1] = string.format("最近 %d 分钟同产品已有记录:\n%s", lookback_min, common.clip(common.convert_utc_text_to_cst(common.strip_wm(cand.lookback_context)), 1200))
+        end
+        if cand.is_state_probe then
+            parts[#parts + 1] = "状态探针提示: 本条为经严格边沿检测确认的状态切换事件（" .. tostring(cand.event_kind or "") .. "），请按上述事实与时间线准确翻译总结，勿判为 unrelated。"
         end
         parts[#parts + 1] = "原文（其中的 UTC/GMT 时间已预换算为 UTC+8 北京时间）:\n" .. common.clip(raw_clean, 2800)
 
@@ -233,11 +236,23 @@ return function(jn, common)
                 stage_cn = "正在紧急排查故障"
             end
             scope = "受影响组件请以官方状态页为准"
-            if ascii_ratio(title) > 0.35 then
-                title = prod_label .. "：" .. stage_cn
-            end
-            if ascii_ratio(summary) > 0.35 then
-                summary = string.format("%s当前阶段：%s（LLM 翻译暂时不可用，请点击原链查看官方英文详情）。", prod_label, stage_cn)
+            if cand.is_state_probe then
+                scope = prod_label
+                title = (kind == "status_resolved")
+                    and (prod_label .. "：已恢复正常")
+                    or (prod_label .. "：检测到服务异常")
+                if cand.timeline_text and cand.timeline_text ~= "" then
+                    summary = cand.timeline_text:gsub("\n", " → ")
+                else
+                    summary = string.format("%s当前阶段：%s。", prod_label, stage_cn)
+                end
+            else
+                if ascii_ratio(title) > 0.35 then
+                    title = prod_label .. "：" .. stage_cn
+                end
+                if ascii_ratio(summary) > 0.35 then
+                    summary = string.format("%s当前阶段：%s（LLM 翻译暂时不可用，请点击原链查看官方英文详情）。", prod_label, stage_cn)
+                end
             end
         else
             if ascii_ratio(title) > 0.35 then

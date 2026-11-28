@@ -5,9 +5,11 @@ return function(jn, common)
 
     local TABLE_SEEN = "pluggin_ai_reset_monitor_seen"
     local TABLE_PENDING = "pluggin_ai_reset_monitor_pending"
+    local TABLE_PROBE = "pluggin_ai_reset_monitor_probe_state"
 
     local db_ready = false
     local mem_seen = {}
+    local probe_cache = {}
 
     function M.init()
         if db_ready or not (jn.database and jn.database.exec) then return end
@@ -37,6 +39,18 @@ return function(jn, common)
             );
             CREATE INDEX IF NOT EXISTS idx_arm_pending_gid
                 ON ]] .. TABLE_PENDING .. [[ (group_id, id);
+
+            CREATE TABLE IF NOT EXISTS ]] .. TABLE_PROBE .. [[ (
+                probe_key VARCHAR(128) PRIMARY KEY,
+                product VARCHAR(64) NOT NULL DEFAULT '',
+                current_state VARCHAR(32) NOT NULL DEFAULT 'normal',
+                notified_state VARCHAR(32) NOT NULL DEFAULT 'normal',
+                episode_id VARCHAR(64) NOT NULL DEFAULT '',
+                episode_started_at BIGINT NOT NULL DEFAULT 0,
+                last_checked_at BIGINT NOT NULL DEFAULT 0,
+                last_transition_at BIGINT NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
         ]]
         local _, err = jn.database.exec(sql)
         if err then
@@ -140,6 +154,99 @@ return function(jn, common)
         end
         if ev.event_kind == "status_resolved" and ev.resolved_once_key and ev.resolved_once_key ~= "" then
             persist_row(ev.resolved_once_key, "_meta", "incident_notified", ev.title, ev.source_url, ev.announced_ts, "", notified)
+        end
+    end
+
+    local function probe_cache_key(probe_key)
+        return "arm:probe:" .. tostring(probe_key)
+    end
+
+    local function norm_probe_record(probe_key, raw)
+        local r = type(raw) == "table" and raw or {}
+        local cur = (tostring(r.current_state or "normal") == "outage") and "outage" or "normal"
+        local not_st = (tostring(r.notified_state or "normal") == "outage") and "outage" or "normal"
+        return {
+            probe_key = tostring(probe_key),
+            product = tostring(r.product or ""),
+            current_state = cur,
+            notified_state = not_st,
+            episode_id = tostring(r.episode_id or ""),
+            episode_started_at = tonumber(r.episode_started_at) or 0,
+            last_checked_at = tonumber(r.last_checked_at) or 0,
+            last_transition_at = tonumber(r.last_transition_at) or 0,
+        }
+    end
+
+    -- 可变状态机存储（与只增不删的 seen 去重账本彻底隔离）
+    function M.get_probe_state(probe_key)
+        if not probe_key or probe_key == "" then
+            return norm_probe_record("", nil)
+        end
+        if probe_cache[probe_key] then
+            return norm_probe_record(probe_key, probe_cache[probe_key])
+        end
+        if jn.cache and jn.cache.get then
+            local ok_c, c = pcall(jn.cache.get, probe_cache_key(probe_key))
+            if ok_c and type(c) == "table" and c.probe_key then
+                local rec = norm_probe_record(probe_key, c)
+                probe_cache[probe_key] = rec
+                return norm_probe_record(probe_key, rec)
+            end
+        end
+        if jn.database and jn.database.query then
+            M.init()
+            local rows, err = jn.database.query(
+                "SELECT probe_key, product, current_state, notified_state, episode_id, episode_started_at, last_checked_at, last_transition_at FROM " .. TABLE_PROBE .. " WHERE probe_key = ? LIMIT 1",
+                { tostring(probe_key) }
+            )
+            if not err and type(rows) == "table" and #rows > 0 then
+                local rec = norm_probe_record(probe_key, rows[1])
+                probe_cache[probe_key] = rec
+                if jn.cache and jn.cache.set then
+                    pcall(jn.cache.set, probe_cache_key(probe_key), rec, 30 * 86400)
+                end
+                return norm_probe_record(probe_key, rec)
+            end
+        end
+        return norm_probe_record(probe_key, nil)
+    end
+
+    function M.set_probe_state(probe_key, raw)
+        if not probe_key or probe_key == "" then return end
+        local rec = norm_probe_record(probe_key, raw)
+        probe_cache[probe_key] = rec
+        if jn.cache and jn.cache.set then
+            pcall(jn.cache.set, probe_cache_key(probe_key), rec, 30 * 86400)
+        end
+        if jn.database and jn.database.exec then
+            M.init()
+            local sql = [[
+                INSERT INTO ]] .. TABLE_PROBE .. [[
+                    (probe_key, product, current_state, notified_state, episode_id, episode_started_at, last_checked_at, last_transition_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                ON CONFLICT (probe_key) DO UPDATE SET
+                    product = EXCLUDED.product,
+                    current_state = EXCLUDED.current_state,
+                    notified_state = EXCLUDED.notified_state,
+                    episode_id = EXCLUDED.episode_id,
+                    episode_started_at = EXCLUDED.episode_started_at,
+                    last_checked_at = EXCLUDED.last_checked_at,
+                    last_transition_at = EXCLUDED.last_transition_at,
+                    updated_at = NOW()
+            ]]
+            local _, err = jn.database.exec(sql, {
+                rec.probe_key,
+                rec.product,
+                rec.current_state,
+                rec.notified_state,
+                rec.episode_id,
+                rec.episode_started_at,
+                rec.last_checked_at,
+                rec.last_transition_at,
+            })
+            if err then
+                jn.log.warn("[" .. common.PLUGIN_NAME .. "] 更新探针状态失败: " .. tostring(err))
+            end
         end
     end
 

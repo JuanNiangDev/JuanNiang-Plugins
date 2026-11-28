@@ -925,25 +925,32 @@ return function(jn, common)
                 or hero:find("Major Outage", 1, true) ~= nil
             )
             local thresh = common.cfg_num("deepseek_entireweb_threshold", 50)
-            local unhealthy = explicit_down or (not is_normal) or (h1 >= thresh)
-            local state_tag = unhealthy and "outage" or "normal"
+            local probe_down = explicit_down or (h1 >= thresh)
+            local probe_up = is_normal and (not probe_down)
+            -- 未知页面结构/拦截页不触发状态切换，避免解析退化误报故障
+            if not probe_down and not probe_up then
+                return candidates
+            end
+            local state_tag = probe_down and "outage" or "normal"
             candidates[#candidates + 1] = {
-                event_key = "ds_entireweb_state:" .. state_tag,
-                state_flag_key = "ds_entireweb_active",
+                event_key = "ds_entireweb_probe:" .. state_tag,
+                probe_key = "ds_entireweb",
+                probe_state = state_tag,
+                is_state_probe = true,
+                preverified_structured = true,
                 product = "deepseek_status",
-                event_kind = unhealthy and "status_incident" or "status_resolved",
-                is_major = unhealthy and (h1 >= thresh * 2 or explicit_down),
-                stage_label = unhealthy and "监测异常" or "已恢复",
+                event_kind = probe_down and "status_incident" or "status_resolved",
+                is_major = probe_down and (h1 >= thresh * 2 or explicit_down),
+                stage_label = probe_down and "监测异常" or "已恢复",
                 source_name = "Entireweb DeepSeek 监控",
                 source_url = src.url,
-                title = unhealthy and "DeepSeek 服务状态异常（Entireweb 监测）" or "DeepSeek 服务运行正常（Entireweb 监测）",
+                title = probe_down and "DeepSeek 服务状态异常（Entireweb 监测）" or "DeepSeek 服务已恢复正常（Entireweb 监测）",
                 raw_text = string.format(
                     "页面状态=%s；最近1小时用户报告=%d（告警阈值=%d）；最近24小时报告=%d",
-                    unhealthy and "异常/故障上升" or "运行正常",
+                    probe_down and "异常/故障上升" or "运行正常",
                     h1, thresh, h24
                 ),
                 announced_ts = os.time(),
-                entireweb_state = state_tag,
                 skip_unless_state_changed = true,
             }
             return candidates
@@ -968,6 +975,7 @@ return function(jn, common)
                 or check_low:find("service was down", 1, true) ~= nil
                 or check_low:find("service is down", 1, true) ~= nil
                 or check_low:find("service was degraded", 1, true) ~= nil
+                or check_low:find("service was having issues", 1, true) ~= nil
                 or check_low:find("experiencing an outage", 1, true) ~= nil
                 or check_low:find("facing minor", 1, true) ~= nil
                 or check_low:find("facing major", 1, true) ~= nil
@@ -975,14 +983,21 @@ return function(jn, common)
                 or check_low:find("partial outage", 1, true) ~= nil
                 or check_low:find("not operational", 1, true) ~= nil
             )
-            local unhealthy = explicit_down or (not is_normal)
-            local report_cnt = tonumber(hero:match("(%d+)%s+user%-submitted report")) or 0
+            -- 严格三态隔离：未命中明确 Up 也未命中明确 Down 时按 unknown 静默跳过
+            if not explicit_down and not is_normal then
+                return candidates
+            end
+            local unhealthy = explicit_down
+            local report_cnt = tonumber(hero:match("(%d+)%s+user%-submitted report") or 0) or 0
             local checked_age = common.trim(hero:match("Last checked from Grok official status page%s*([^\n]+)") or "")
             local checked_at = common.trim(hero:match("StatusGator last checked the status of Grok on%s*(.-)%s*and the service") or "")
             local state_tag = unhealthy and "outage" or "normal"
             candidates[#candidates + 1] = {
-                event_key = "grok_sg_state:" .. state_tag,
-                state_flag_key = "grok_sg_active",
+                event_key = "grok_sg_probe:" .. state_tag,
+                probe_key = "grok_sg",
+                probe_state = state_tag,
+                is_state_probe = true,
+                preverified_structured = true,
                 product = "grok_status",
                 event_kind = unhealthy and "status_incident" or "status_resolved",
                 is_major = unhealthy and (check_low:find("major outage", 1, true) ~= nil or check_low:find("grok is down", 1, true) ~= nil),
@@ -1000,7 +1015,6 @@ return function(jn, common)
                     report_cnt
                 ),
                 announced_ts = os.time(),
-                entireweb_state = state_tag,
                 skip_unless_state_changed = true,
             }
             return candidates

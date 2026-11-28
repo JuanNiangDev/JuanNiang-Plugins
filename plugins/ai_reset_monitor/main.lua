@@ -281,6 +281,30 @@ local function dispatch_event_to_groups(batch, ev)
         batch.status_triggered_change = true
     end
     store.mark_seen(ev, delivered_any)
+    if not batch.is_manual and ev.is_state_probe and ev.probe_key then
+        local done_ts = os.time()
+        if ev.event_kind == "status_incident" then
+            store.set_probe_state(ev.probe_key, {
+                product = ev.product,
+                current_state = "outage",
+                notified_state = "outage",
+                episode_id = tostring(ev.episode_id or done_ts),
+                episode_started_at = tonumber(ev.episode_started_at) or done_ts,
+                last_checked_at = done_ts,
+                last_transition_at = done_ts,
+            })
+        elseif ev.event_kind == "status_resolved" then
+            store.set_probe_state(ev.probe_key, {
+                product = ev.product,
+                current_state = "normal",
+                notified_state = "normal",
+                episode_id = "",
+                episode_started_at = 0,
+                last_checked_at = done_ts,
+                last_transition_at = done_ts,
+            })
+        end
+    end
 end
 
 local start_poll
@@ -313,7 +337,10 @@ local function attach_lookback_context(cand, lookback_sec, now_ts)
 end
 
 local function enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
-    attach_lookback_context(cand, lookback_sec, now_ts)
+    -- 状态探针只依赖确定性边沿时间线，严禁回灌历史 status_resolved 摘要造成幻觉复查滚雪球
+    if not cand.is_state_probe then
+        attach_lookback_context(cand, lookback_sec, now_ts)
+    end
     local f_proxy = common.cfg_string("foreign_proxy", "")
     if cand.needs_x_lookup and cand.x_status_id then
         batch.pending_http = batch.pending_http + 1
@@ -421,7 +448,11 @@ local function finish_batch_if_ready(batch)
         end
     else
         for _, cand in ipairs(batch.baseline_marks) do
-            store.mark_seen(cand, false)
+            if cand._probe_baseline and cand.probe_key then
+                store.set_probe_state(cand.probe_key, cand)
+            else
+                store.mark_seen(cand, false)
+            end
         end
         for _, cand in ipairs(batch.suppressed_marks or {}) do
             store.mark_seen(cand, false)
@@ -570,24 +601,8 @@ local function pump_llm_queue(waited)
 end
 
 submit_candidate_to_llm = function(batch, cand)
-    if cand.skip_unless_state_changed then
-        if batch.is_manual then return end
-        -- 外部状态切换源（Entireweb / StatusGator）：仅在状态发生真实切换时通报，正常时写基线不推送
-        local flag_key = cand.state_flag_key or "ds_entireweb_active"
-        local prefix = flag_key:gsub("_active$", "")
-        local prev_outage = store.has_seen(flag_key)
-        if cand.entireweb_state == "normal" then
-            if prev_outage then
-                store.mark_seen({ event_key = flag_key, product = cand.product, event_kind = "cleared" }, false)
-                cand.event_key = prefix .. "_recovered:" .. tostring(os.time())
-            else
-                return
-            end
-        else
-            if prev_outage then return end
-            store.mark_seen({ event_key = flag_key, product = cand.product, event_kind = "active" }, false)
-            cand.event_key = prefix .. "_outage:" .. tostring(os.time())
-        end
+    if cand.is_state_probe and batch.is_manual then
+        return
     end
 
     if not jn.llm or not jn.llm.available or not jn.llm.available() or not jn.llm.chat_async then
@@ -603,6 +618,93 @@ submit_candidate_to_llm = function(batch, cand)
     else
         pump_llm_queue()
     end
+end
+
+local function prepare_state_probe_transition(cand, now_ts)
+    if not (cand and cand.is_state_probe and cand.probe_key) then
+        return false
+    end
+    local st = store.get_probe_state(cand.probe_key)
+    if cand.probe_state == "outage" then
+        if st.notified_state == "outage" then
+            if st.current_state ~= "outage" then
+                st.current_state = "outage"
+                st.last_checked_at = now_ts
+                store.set_probe_state(cand.probe_key, st)
+            end
+            return false
+        end
+        local started_at = (st.current_state == "outage" and st.episode_started_at > 0) and st.episode_started_at or now_ts
+        local ep = (st.current_state == "outage" and st.episode_id ~= "") and st.episode_id or tostring(started_at)
+        local ev_key = cand.probe_key .. "_outage:" .. ep
+        store.set_probe_state(cand.probe_key, {
+            product = cand.product,
+            current_state = "outage",
+            notified_state = "normal",
+            episode_id = ep,
+            episode_started_at = started_at,
+            last_checked_at = now_ts,
+            last_transition_at = st.last_transition_at,
+        })
+        cand.episode_id = ep
+        cand.episode_started_at = started_at
+        cand.event_key = ev_key
+        cand.timeline_text = string.format("[%s] 状态探针检测到服务异常切换", common.format_cst(started_at))
+        return true
+    end
+
+    -- cand.probe_state == "normal"
+    if st.notified_state ~= "outage" then
+        if st.current_state == "outage" then
+            store.set_probe_state(cand.probe_key, {
+                product = cand.product,
+                current_state = "normal",
+                notified_state = "normal",
+                episode_id = "",
+                episode_started_at = 0,
+                last_checked_at = now_ts,
+                last_transition_at = st.last_transition_at,
+            })
+        end
+        return false
+    end
+
+    local started_at = st.episode_started_at or 0
+    local ep = (st.episode_id ~= "") and st.episode_id or tostring(started_at > 0 and started_at or now_ts)
+    local ev_key = cand.probe_key .. "_resolved:" .. ep
+    if store.has_seen(ev_key) then
+        store.set_probe_state(cand.probe_key, {
+            product = cand.product,
+            current_state = "normal",
+            notified_state = "normal",
+            episode_id = "",
+            episode_started_at = 0,
+            last_checked_at = now_ts,
+            last_transition_at = now_ts,
+        })
+        return false
+    end
+
+    store.set_probe_state(cand.probe_key, {
+        product = cand.product,
+        current_state = "normal",
+        notified_state = "outage",
+        episode_id = ep,
+        episode_started_at = started_at,
+        last_checked_at = now_ts,
+        last_transition_at = st.last_transition_at,
+    })
+    cand.episode_id = ep
+    cand.episode_started_at = started_at
+    cand.event_key = ev_key
+    if started_at > 0 then
+        local dur_min = math.max(1, math.floor(math.max(0, now_ts - started_at) / 60))
+        cand.timeline_text = string.format("[%s] 监测到服务状态异常\n[%s] 监测确认服务已恢复正常（持续约 %d 分钟）",
+            common.format_cst(started_at), common.format_cst(now_ts), dur_min)
+    else
+        cand.timeline_text = string.format("[%s] 监测确认服务已恢复正常", common.format_cst(now_ts))
+    end
+    return true
 end
 
 local function process_source_candidates(batch, src, body)
@@ -674,32 +776,40 @@ local function process_source_candidates(batch, src, body)
             local inc_key = status_dedup_incident and cand.incident_notify_key or nil
             local res_key = cand.resolved_once_key
             if replay_mode then
-                local dup_inc = (inc_key and batch.seen_incidents[inc_key])
-                    or (res_key and batch.seen_incidents[res_key])
-                if not dup_inc and (cand.announced_ts or 0) >= replay_cutoff then
-                    if inc_key then batch.seen_incidents[inc_key] = true end
-                    if res_key then batch.seen_incidents[res_key] = true end
-                    enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
+                if not cand.is_state_probe then
+                    local dup_inc = (inc_key and batch.seen_incidents[inc_key])
+                        or (res_key and batch.seen_incidents[res_key])
+                    if not dup_inc and (cand.announced_ts or 0) >= replay_cutoff then
+                        if inc_key then batch.seen_incidents[inc_key] = true end
+                        if res_key then batch.seen_incidents[res_key] = true end
+                        enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
+                    end
                 end
             elseif skip_cold then
                 -- 冷启动首轮：写入基线标记，防止旧帖子全部在群里刷屏
-                if cand.skip_unless_state_changed then
-                    if cand.entireweb_state == "outage" and cand.state_flag_key then
-                        batch.baseline_marks[#batch.baseline_marks + 1] = {
-                            event_key = cand.state_flag_key,
-                            product = cand.product,
-                            event_kind = "active",
-                            title = cand.title,
-                            source_url = cand.source_url,
-                            announced_ts = cand.announced_ts,
-                        }
-                    end
+                if cand.is_state_probe and cand.probe_key then
+                    local pstate = (cand.probe_state == "outage") and "outage" or "normal"
+                    batch.baseline_marks[#batch.baseline_marks + 1] = {
+                        _probe_baseline = true,
+                        probe_key = cand.probe_key,
+                        product = cand.product,
+                        current_state = pstate,
+                        notified_state = pstate,
+                        episode_id = (pstate == "outage") and tostring(now_ts) or "",
+                        episode_started_at = (pstate == "outage") and now_ts or 0,
+                        last_checked_at = now_ts,
+                        last_transition_at = now_ts,
+                    }
                 else
                     if inc_key then batch.seen_incidents[inc_key] = true end
                     if res_key then batch.seen_incidents[res_key] = true end
                     batch.baseline_marks[#batch.baseline_marks + 1] = cand
                 end
-            elseif cand.skip_unless_state_changed or not store.has_seen(cand.event_key) then
+            elseif cand.is_state_probe and cand.probe_key then
+                if prepare_state_probe_transition(cand, now_ts) and not store.has_seen(cand.event_key) then
+                    enqueue_or_verify_candidate(batch, cand, lookback_sec, now_ts)
+                end
+            elseif not store.has_seen(cand.event_key) then
                 local already_resolved = res_key and (batch.seen_incidents[res_key] or store.has_seen(res_key))
                 local suppressed_stage = inc_key and (batch.seen_incidents[inc_key] or store.has_seen(inc_key))
                 if already_resolved or suppressed_stage then
@@ -1208,6 +1318,9 @@ function on_chat_response(req_id, content, err)
             cand.objective_summary = parsed.objective_summary
             cand.persona_comment = parsed.persona_comment
             dispatch_event_to_groups(batch, cand)
+        elseif cand.is_state_probe and cand.preverified_structured then
+            -- 探针已由确定性状态机确认切换（故障/恢复），若 LLM 误拒则自动降级为确定性中文播报，防止状态卡死
+            finalize_llm_fallback(batch, cand)
         else
             if not batch.is_manual then
                 cand.event_kind = "unrelated"
