@@ -15,8 +15,20 @@ configs:
   - key: enable_summary
     type: bool
     label: 启用 LLM 总结
-    description: 关闭后只发原文与图片，不调用 LLM
+    description: 关闭后只发原文与图片，不调用 LLM（若开启合规过滤，仍会先做安全审核）
     default: true
+
+  - key: compliance_filter
+    type: bool
+    label: 合规安全过滤（拦截键政/推塔/违法违规）
+    description: 开启后自动审核推文、X 长文及被引用/被回复内容；涉及中国境内键政/推塔、涉政敏感、暴力极端、色情低俗、诈骗违禁等违反中文互联网法律法规的内容，一律跳过总结并禁止转发原文、链接、媒体与仓库卡片
+    default: true
+
+  - key: blocked_notice
+    type: string
+    label: 合规拦截提示语
+    description: 命中合规拦截时给触发者的简洁提示（不含任何原文与敏感词）；留空则静默忽略
+    default: "⚠️ 该推文/长文涉及不适宜或违反相关法律法规的内容，已跳过总结。"
 
   - key: group_only
     type: bool

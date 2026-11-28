@@ -21,7 +21,10 @@ local jn = require("jn")
 local function cfg_bool(key, default)
     local v = jn.config.get(key)
     if v == nil then return default end
-    return v ~= false and v ~= "false" and v ~= "0"
+    if type(v) == "boolean" then return v end
+    local s = tostring(v):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+    if s == "" then return default end
+    return s ~= "false" and s ~= "0" and s ~= "no" and s ~= "off"
 end
 
 local function cfg_num(key, default)
@@ -35,6 +38,12 @@ end
 local function cfg_string(key, default)
     local v = jn.config.get(key)
     if v == nil or v == "" then return default end
+    return tostring(v)
+end
+
+local function cfg_string_allow_empty(key, default)
+    local v = jn.config.get(key)
+    if v == nil then return default end
     return tostring(v)
 end
 
@@ -100,7 +109,7 @@ end
 local WATERMARK = wm_encode(WM_TEXT)
 
 local function cache_key(id)
-    return "xstatus:v1:" .. id
+    return "xstatus:v2:" .. id
 end
 
 -- --------------------------------------------------------------------
@@ -150,6 +159,36 @@ end
 local function trim(s)
     if not s then return "" end
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function utf8_truncate(s, max_bytes)
+    if not s then return "" end
+    if #s <= max_bytes then return s end
+    local sub = s:sub(1, max_bytes)
+    -- 剥离尾部残缺的多字节 UTF-8 字符，避免 json.encode 失败
+    while #sub > 0 do
+        local last = sub:byte(#sub)
+        if last < 0x80 then break end
+        if last >= 0xC0 then
+            sub = sub:sub(1, #sub - 1)
+            break
+        end
+        sub = sub:sub(1, #sub - 1)
+    end
+    return sub
+end
+
+local function decode_json_loose(raw)
+    if type(raw) ~= "string" or raw == "" then return nil end
+    local s = raw:gsub("```[%w_%-]*\n?", ""):gsub("```", "")
+    local ok, t = pcall(jn.json.decode, trim(s))
+    if ok and type(t) == "table" then return t end
+    local i, j = s:find("%b{}")
+    if i and j then
+        local ok2, t2 = pcall(jn.json.decode, s:sub(i, j))
+        if ok2 and type(t2) == "table" then return t2 end
+    end
+    return nil
 end
 
 -- --------------------------------------------------------------------
@@ -351,6 +390,48 @@ local function entry_body(e)
     return e.text or ""
 end
 
+local DEFAULT_BLOCKED_NOTICE = "⚠️ 该推文/长文涉及不适宜或违反相关法律法规的内容，已跳过总结。"
+
+local MODERATION_ERR_HINTS = {
+    "敏感内容", "敏感信息", "敏感词", "安全审核", "内容安全", "违规内容",
+    "无法响应", "content_filter", "data_inspection_failed", "sensitive",
+    "inappropriate", "high_risk", "safety policy", "safety_policy",
+    "prohibited", "policy violation", "moderation",
+}
+
+local REFUSAL_TEXT_HINTS = {
+    "敏感", "违规", "违反", "法律法规", "安全审核", "内容安全", "违禁",
+    "无法总结", "无法处理", "无法回答", "不宜", "抱歉",
+    "cannot fulfill", "cannot summarize", "safety policy", "content policy",
+    "inappropriate", "violat",
+}
+
+local function contains_any_hint(text, hints)
+    if not text or text == "" then return false end
+    local low = tostring(text):lower()
+    for _, pat in ipairs(hints) do
+        if low:find(pat, 1, true) then return true end
+    end
+    return false
+end
+
+local function is_moderation_rejection(err, content, parsed)
+    if err and err ~= "" and contains_any_hint(err, MODERATION_ERR_HINTS) then
+        return true, "触发上游安全审核拦截"
+    end
+    if type(parsed) == "table" then
+        if parsed.blocked == true or tostring(parsed.mode or ""):lower() == "reject" then
+            local br = trim(tostring(parsed.block_reason or ""))
+            return true, br ~= "" and br or "涉及违反中文互联网法律法规或敏感风险"
+        end
+        return false, ""
+    end
+    if content and content ~= "" and contains_any_hint(content, REFUSAL_TEXT_HINTS) then
+        return true, "触发模型合规拒答"
+    end
+    return false, ""
+end
+
 -- --------------------------------------------------------------------
 -- 提示词
 -- --------------------------------------------------------------------
@@ -358,32 +439,65 @@ local function cfg_minmax()
     return tostring(cfg_num("summary_min_chars", 40)), tostring(cfg_num("summary_max_chars", 140))
 end
 
-local function prompt_tweet(e)
-    local min_c, max_c = cfg_minmax()
-    local p = [[你是推特内容总结助手。用户给你一条推文的作者、正文、链接与被引用推文（如果有），请判断信息量并输出 JSON。
+local COMPLIANCE_PROMPT_BLOCK = [[
+【合规底线审核（最高优先级，无论主贴、长文还是被引用/被回复内容，只要任一部分触线均必须拒绝）】
+若内容涉及以下任一违反中文互联网法律法规及公序良俗的情形，严禁总结、翻译或复述原文，必须立即设 "blocked": true, "mode": "reject"，并将 title、summary、translation 全部留空字符串：
+1. 中国境内涉政敏感/键政/“推塔”/“冲塔”/反动言论：对国家政权、制度、党政机关、领导人的攻击抹黑或隐喻讽刺；涉台独/港独/疆独/藏独等国家主权与分裂言论；重大历史政治敏感事件炒作或煽动性政治谣言；
+2. 违法犯罪与极端内容：恐怖主义、暴力血腥、邪教组织、赌博诈骗、黑灰产/违法犯罪教程、违禁药品与管制武器；
+3. 色情低俗与严重侵权：成人露骨色情/NSFW/招嫖、开盒人肉隐私、危害国家安全与社会稳定。
+【正常放行边界】正常的 AI/大模型动态、开源项目、编程开发、学术研究、科技/商业/产品新闻与日常非涉政吐槽不得误判为违规，应正常设 "blocked": false 并完成总结。]]
 
-【判定】
-1. 正文有实质信息（观点、事实、数据、教程、项目介绍、新闻、引用内容）→ mode="summary"。
-2. 纯情绪、纯感叹、纯转发语、纯互怼、只有几个字且没有可提炼内容 → mode="raw"（此时 title 与 summary 留空字符串）。
-3. 有引用/回复他人时：summary 必须写清「谁说了什么、本条如何回应」，不要只总结本条。
-4. 正文不是中文时，无论哪种 mode 都必须输出 translation 字段：正文的简体中文翻译（口语自然，保留 emoji 与 @ 提及；mode=summary 时也要给）。
+local function compliance_enabled()
+    return cfg_bool("compliance_filter", true)
+end
+
+local function prompt_tweet(e, compliance_only)
+    local min_c, max_c = cfg_minmax()
+    local comp = compliance_enabled() and COMPLIANCE_PROMPT_BLOCK or ""
+    if compliance_only then
+        return [[你是推特内容安全审核助手。用户给你一条推文的正文、链接与被引用/被回复推文（如果有），请只做合规性判定并严格输出 JSON：
+]] .. comp .. [[
 
 【输出格式】严格只输出 JSON：
-{"mode":"summary|raw","title":"一句话标题（简体中文，≤24字）","summary":"精炼总结（__MIN__~__MAX__ 字；信息少可更短）","translation":"正文简体中文翻译（正文是中文时留空）"}
+{"blocked":false,"mode":"raw|reject","block_reason":"若blocked=true写4~12字中性类别，否则空字符串","title":"","summary":"","translation":""}
+注意：安全时固定输出 mode="raw", blocked=false, title="", summary="", translation=""；禁止在 block_reason 中复述敏感词或原文片段。]]
+    end
+    local p = [[你是推特内容总结助手。用户给你一条推文的作者、正文、链接与被引用推文（如果有），请先完成合规底线审查，再判断信息量并输出 JSON。
+]] .. comp .. [[
+
+【判定】
+1. 若命中【合规底线审核】→ blocked=true, mode="reject"（title、summary、translation 必须全部为空字符串，仅填简短中性 block_reason）。
+2. 正文有实质信息（观点、事实、数据、教程、项目介绍、新闻、引用内容）且合规 → blocked=false, mode="summary"。
+3. 纯情绪、纯感叹、纯转发语、纯互怼、只有几个字且没有可提炼内容且合规 → blocked=false, mode="raw"（此时 title 与 summary 留空字符串）。
+4. 有引用/回复他人时：summary 必须写清「谁说了什么、本条如何回应」，不要只总结本条。
+5. 合规的前提下，正文不是中文时，无论 summary 还是 raw 都必须输出 translation 字段：正文的简体中文翻译（口语自然，保留 emoji 与 @ 提及）。
+
+【输出格式】严格只输出 JSON：
+{"blocked":false,"mode":"summary|raw|reject","block_reason":"仅拦截时填写中性原因，正常留空","title":"一句话标题（简体中文，≤24字）","summary":"精炼总结（__MIN__~__MAX__ 字；信息少可更短）","translation":"正文简体中文翻译（正文是中文或拦截时留空）"}
 
 【链接规则】正文里的 URL 不要写进 title/summary（会被字数截断成半截），程序会在末尾统一附上原始链接；你只需点明该链接是什么内容（如"演讲视频""字体网站"）。禁止用"链接指向 X""详情见链接"这类指代代替。
-【铁律】只写正文/引用里明确出现的内容，禁止编造数字、结论、人物；不要写"这条推文""作者认为"这类旁白；不要罗列标签。]]
+【铁律】只写正文/引用里明确出现的内容，禁止编造数字、结论、人物；不要写"这条推文""作者认为"这类旁白；不要罗列标签；被拦截时禁止泄露任何原文或敏感词。]]
     return (p:gsub("__MIN__", min_c):gsub("__MAX__", max_c))
 end
 
-local function prompt_article(e)
+local function prompt_article(e, compliance_only)
     local min_c, max_c = cfg_minmax()
-    local p = [[你是中文内容总结助手。用户给你一篇 X（推特）长文的标题、作者与正文，请输出 JSON。
+    local comp = compliance_enabled() and COMPLIANCE_PROMPT_BLOCK or ""
+    if compliance_only then
+        return [[你是 X 长文内容安全审核助手。用户给你一篇 X 长文的标题、作者与正文，请只做合规性判定并严格输出 JSON：
+]] .. comp .. [[
 
-{"title":"文章标题（保留原文，简体中文；英文标题翻译）","summary":"精炼总结（__MIN__~__MAX__ 字）：讲清这篇讲什么、核心观点/方法/结论，有具体数字写数字"}
+【输出格式】严格只输出 JSON：
+{"blocked":false,"mode":"raw|reject","block_reason":"若blocked=true写4~12字中性类别，否则空字符串","title":"","summary":""}]]
+    end
+    local p = [[你是中文内容总结助手。用户给你一篇 X（推特）长文的标题、作者与正文，请先完成合规底线审查，确认合规后再输出总结 JSON。
+]] .. comp .. [[
+
+【输出格式】严格只输出 JSON：
+{"blocked":false,"mode":"summary|reject","block_reason":"仅拦截时填写中性原因，正常留空","title":"文章标题（保留原文，简体中文；英文标题翻译；拦截时留空）","summary":"精炼总结（__MIN__~__MAX__ 字）：讲清这篇讲什么、核心观点/方法/结论，有具体数字写数字；拦截时留空"}
 
 【链接规则】正文里的 URL 不要写进 summary（会被截断），程序会统一附原文链接；你只需点明链接内容（如"演讲视频""字体网站"）。
-【铁律】只写正文明确有的内容，禁止编造；不写"本文""这篇文章"式旁白；不罗列章节；不重复标题。]]
+【铁律】只写正文明确有的内容，禁止编造；不写"本文""这篇文章"式旁白；不罗列章节；不重复标题；若命中合规底线审核必须 blocked=true, mode="reject" 且严禁泄露原文。]]
     return (p:gsub("__MIN__", min_c):gsub("__MAX__", max_c))
 end
 
@@ -619,9 +733,23 @@ local function finish(batch)
     end
 
     local max_images = cfg_num("max_images", 4)
+    local comp_on = compliance_enabled()
+    local summary_on = cfg_bool("enable_summary", true)
+    local blocked_notice_tpl = trim(cfg_string_allow_empty("blocked_notice", DEFAULT_BLOCKED_NOTICE))
     -- 每条推文独立一条消息；视频段必须唯一，单独一条；仓库单独一条
     for _, e in ipairs(batch.entries) do
-        if e.llm or not e.err then
+        if e.blocked then
+            jn.log.warn(string.format("[x-status] 合规拦截推文/长文 id=%s reason=%s",
+                tostring(e.id), tostring(e.block_reason or "")))
+            if blocked_notice_tpl ~= "" then
+                local nsegs = {}
+                if reply_seg then nsegs[#nsegs + 1] = reply_seg end
+                nsegs[#nsegs + 1] = { type = "text", data = { text = blocked_notice_tpl .. WATERMARK } }
+                send_segments(batch, nsegs)
+            end
+        elseif e.llm_failed and comp_on then
+            jn.log.warn(string.format("[x-status] 内容安全校验失败，按 Fail-Closed 策略跳过输出 id=%s", tostring(e.id)))
+        elseif e.llm or (not e.err and not comp_on and not summary_on) then
             local text
             if e.article then
                 text = compose_article(e, e.llm)
@@ -700,10 +828,11 @@ local function finish(batch)
         end
     end
 
-    -- 仓库消息单独一条（测试视频模式不发）
+    -- 仓库消息单独一条（测试视频模式不发；主推文被合规拦截或未通过安全校验时不发）
     if not cfg_bool("test_video_only", false) then
     for _, repo in ipairs(batch.repos or {}) do
-        if repo.meta then
+        local owner_blocked = repo.entry and (repo.entry.blocked or (repo.entry.llm_failed and comp_on))
+        if repo.meta and not owner_blocked then
             local rs = {}
             if reply_seg then rs[#rs + 1] = reply_seg end
             rs[#rs + 1] = { type = "text", data = { text = compose_repo(repo) } }
@@ -737,6 +866,7 @@ local function start_repo_pipeline(batch, entry)
     local repos = github_repos(entry.links)
     if #repos == 0 then return end
     for _, repo in ipairs(repos) do
+        repo.entry = entry
         batch.repos[#batch.repos + 1] = repo
         batch.pending = batch.pending + 1
         local headers = { ["User-Agent"] = "JuanNiang-X/1.0", ["Accept"] = "application/vnd.github+json" }
@@ -785,26 +915,38 @@ local function enqueue_llm(msgs, timeout, rid_map, onfail, ctx)
 end
 
 local function start_entry_llm(batch, entry)
-    if not cfg_bool("enable_summary", true) or not jn.llm or not jn.llm.available() then
+    local summary_on = cfg_bool("enable_summary", true)
+    local comp_on = compliance_enabled()
+    if not summary_on and not comp_on then
+        start_repo_pipeline(batch, entry)
         return
     end
+    if not jn.llm or not jn.llm.available() then
+        if comp_on then
+            entry.llm_failed = true
+        else
+            start_repo_pipeline(batch, entry)
+        end
+        return
+    end
+    local compliance_only = (not summary_on) and comp_on
     local maxc = cfg_num("max_content_chars", 10000)
-    local body = truncate(entry_body(entry), maxc)
     local payload = {
         author = entry.author_name .. "（@" .. entry.screen_name .. "）",
-        text = entry.text,
+        text = utf8_truncate(entry.text or "", maxc),
         article_title = entry.article and entry.article.title or nil,
-        article_content = entry.article and truncate(article_text(entry.article.content), maxc) or nil,
+        article_content = entry.article and utf8_truncate(article_text(entry.article.content), maxc) or nil,
         links = entry.links,
     }
     local user = jn.json.encode(payload)
     if entry.quote then
         user = user .. "\n\n【被引用/被回复的推文】\n" .. jn.json.encode({
             author = entry.quote.author_name .. "（@" .. entry.quote.screen_name .. "）",
-            text = entry.quote.text,
+            text = utf8_truncate(entry.quote.text or "", 4000),
+            article_title = entry.quote.article and entry.quote.article.title or nil,
         })
     end
-    local system = entry.article and prompt_article(entry) or prompt_tweet(entry)
+    local system = entry.article and prompt_article(entry, compliance_only) or prompt_tweet(entry, compliance_only)
     batch.pending = batch.pending + 1
     batch.llm_waiting = true
     local msgs = {
@@ -812,12 +954,17 @@ local function start_entry_llm(batch, entry)
         { role = "user", content = user },
     }
     local onfail_tweet = function()
+        entry.llm_failed = true
         batch.llm_waiting = false
         dec(batch)
     end
     local ctx_ref = { batch = batch, kind = "tweet", entry = entry, retry = 0,
         msgs = msgs, onfail = onfail_tweet }
     enqueue_llm(msgs, cfg_num("llm_timeout", 60), batch_by_llm, onfail_tweet, ctx_ref)
+end
+
+local function dispatch_entry_pipelines(batch, entry)
+    start_entry_llm(batch, entry)
 end
 
 local function start_repo_llm(batch, repo)
@@ -854,7 +1001,7 @@ function on_http_response(req_id, ctx, result, err)
     if ctx.stage == "xmeta" then
         local entry = ctx.entry
         local body = result and result.status == 200 and result.body or nil
-        local parsed = body and jn.json.decode(body) or nil
+        local parsed = body and decode_json_loose(body) or nil
         local t = type(parsed) == "table" and parsed.tweet or nil
         if not t then
             entry.err = "抓取失败"
@@ -871,15 +1018,15 @@ function on_http_response(req_id, ctx, result, err)
         entry.article = d.article
         entry.quote = d.quote
         entry.url = d.url ~= "" and d.url or entry.url
-        -- 回复他人（非引用卡片）：补抓一层被回复推文
+        -- 回复他人（非引用卡片）：先补抓被回复推文，再统一发起总结与合规审查（确保审核能看到父推文）
         if not entry.quote and d.reply_to and d.reply_to ~= "" then
             batch.pending = batch.pending + 1
             jn.http.get_async(cfg_string("api_base", "https://api.fxtwitter.com") .. "/status/" .. tostring(d.reply_to),
                 { stage = "xparent", batch = batch, entry = entry }, { ["User-Agent"] = UA },
                 cfg_string("proxy", "") ~= "" and cfg_string("proxy", "") or nil)
+        else
+            dispatch_entry_pipelines(batch, entry)
         end
-        start_repo_pipeline(batch, entry)
-        start_entry_llm(batch, entry)
         dec(batch)
         return
     end
@@ -887,9 +1034,10 @@ function on_http_response(req_id, ctx, result, err)
     if ctx.stage == "xparent" then
         local entry = ctx.entry
         local body = result and result.status == 200 and result.body or nil
-        local parsed = body and jn.json.decode(body) or nil
+        local parsed = body and decode_json_loose(body) or nil
         local t = type(parsed) == "table" and parsed.tweet or nil
         if t then entry.quote = parse_tweet(t) end
+        dispatch_entry_pipelines(batch, entry)
         dec(batch)
         return
     end
@@ -898,7 +1046,7 @@ function on_http_response(req_id, ctx, result, err)
         local repo = ctx.repo
         local ok = false
         if result and result.status == 200 and result.body then
-            local m = jn.json.decode(result.body)
+            local m = decode_json_loose(result.body)
             if type(m) == "table" then
                 repo.meta = {
                     name = m.full_name or repo.key,
@@ -928,7 +1076,7 @@ function on_http_response(req_id, ctx, result, err)
     if ctx.stage == "ghreadme" then
         local repo = ctx.repo
         if result and result.status == 200 and result.body then
-            local d = jn.json.decode(result.body)
+            local d = decode_json_loose(result.body)
             if type(d) == "table" and d.content then
                 repo.readme = b64_decode(d.content)
             end
@@ -943,18 +1091,33 @@ end
 function on_chat_response(req_id, content, err)
     local ctx = batch_by_llm[req_id]
     if not ctx then return end
+    batch_by_llm[req_id] = nil
     -- 释放 inflight 并继续泵队列
     llm_inflight = math.max(0, llm_inflight - 1)
     jn.timer.after(0.25, { action = "llm_pump" })
 
     local batch = ctx.batch
-    local cleaned = (content or ""):gsub("```[%w]*\n?", ""):gsub("```", "")
-    local parsed = jn.json.decode(cleaned)
-    if type(parsed) ~= "table" then parsed = {} end
+    local parsed = decode_json_loose(content)
+    local mod_rejected, mod_reason = is_moderation_rejection(err, content, parsed)
 
-    -- 空结果（限流/解析失败）→ 退避重试，最多 3 次
-    local empty = (err ~= nil and err ~= "") or (parsed.mode == nil and
-        (parsed.title == nil or parsed.title == "") and (parsed.summary == nil or parsed.summary == ""))
+    if ctx.kind == "tweet" and mod_rejected and compliance_enabled() then
+        batch.llm_waiting = false
+        local entry = ctx.entry
+        entry.blocked = true
+        entry.block_reason = mod_reason
+        jn.cache.set(cache_key(entry.id), {
+            blocked = true,
+            block_reason = entry.block_reason,
+            url = entry.url,
+        }, cfg_num("cache_ttl", 604800))
+        dec(batch)
+        return
+    end
+
+    local tbl = type(parsed) == "table" and parsed or {}
+    -- 空结果（限流/解析失败）→ 退避重试，最多 5 次
+    local empty = (err ~= nil and err ~= "") or (type(parsed) ~= "table") or (tbl.mode == nil and
+        (tbl.title == nil or tbl.title == "") and (tbl.summary == nil or tbl.summary == ""))
     if empty and ctx.retry ~= nil and ctx.retry < LLM_MAX_RETRY then
         ctx.retry = ctx.retry + 1
         local msgs = ctx.msgs
@@ -969,23 +1132,28 @@ function on_chat_response(req_id, content, err)
     if ctx.kind == "tweet" then
         batch.llm_waiting = false
         local entry = ctx.entry
-        entry.llm = {
-            mode = parsed.mode == "raw" and "raw" or "summary",
-            title = tostring(parsed.title or ""),
-            summary = tostring(parsed.summary or ""),
-            translation = tostring(parsed.translation or ""),
-        }
-        jn.cache.set(cache_key(entry.id), {
-            author_name = entry.author_name, screen_name = entry.screen_name,
-            text = entry.text, media = entry.media, links = entry.links,
-            article = entry.article, llm = entry.llm, url = entry.url,
-        }, cfg_num("cache_ttl", 604800))
+        if empty then
+            entry.llm_failed = true
+        else
+            entry.llm = {
+                mode = tbl.mode == "raw" and "raw" or "summary",
+                title = tostring(tbl.title or ""),
+                summary = tostring(tbl.summary or ""),
+                translation = tostring(tbl.translation or ""),
+            }
+            jn.cache.set(cache_key(entry.id), {
+                author_name = entry.author_name, screen_name = entry.screen_name,
+                text = entry.text, media = entry.media, links = entry.links,
+                article = entry.article, llm = entry.llm, url = entry.url,
+            }, cfg_num("cache_ttl", 604800))
+            start_repo_pipeline(batch, entry)
+        end
     elseif ctx.kind == "repo" then
         local repo = ctx.repo
         repo.llm = {
-            title = tostring(parsed.title or ""),
-            summary = tostring(parsed.summary or ""),
-            desc_cn = tostring(parsed.desc_cn or ""),
+            title = tostring(tbl.title or ""),
+            summary = tostring(tbl.summary or ""),
+            desc_cn = tostring(tbl.desc_cn or ""),
         }
         start_repo_card(batch, repo)
     end
@@ -1052,6 +1220,8 @@ function on_message(event)
         local entry = { id = l.id, url = l.url, media = {}, links = {} }
         local cached = jn.cache.get(cache_key(l.id))
         if type(cached) == "table" then
+            entry.blocked = cached.blocked == true
+            entry.block_reason = tostring(cached.block_reason or "")
             entry.author_name = cached.author_name or ""
             entry.screen_name = cached.screen_name or ""
             entry.text = cached.text or ""
@@ -1061,6 +1231,9 @@ function on_message(event)
             entry.llm = cached.llm
             entry.url = cached.url or l.url
             batch.entries[#batch.entries + 1] = entry
+            if not entry.blocked then
+                start_repo_pipeline(batch, entry)
+            end
         else
             local key = "xdedup:" .. l.id
             if jn.cache.get(key) then
