@@ -11,6 +11,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         titles = "👑 群友特色头衔 / 画像",
         critique = "🎭 聊天质量分析与人设点评",
         projects = "🧪 开源项目列表",
+        ai_monitor = "🤖 今日 AI 重置与官方状态监控",
         news = "📰 今日新闻",
         stats = "📈 本次分析统计",
     }
@@ -20,7 +21,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         if type(list) ~= "table" or #list == 0 then
             list = {
                 "overview||1", "top||1", "topics||-1", "quotes||-1", "titles||6",
-                "critique||4", "projects||20", "news||70", "stats||1",
+                "critique||4", "projects||20", "ai_monitor||20", "news||70", "stats||1",
             }
         end
         local out = {}
@@ -62,28 +63,43 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         return out
     end
 
-    local function llm_json(system, user)
-        if not (jn.llm and jn.llm.chat) then return nil, "无 LLM" end
-        local timeout = math.max(30, common.da_num("llm_timeout", 300))
-        local resp, err = jn.llm.chat({
+    local function llm_json_async(system, user, on_done)
+        if not (jn.llm and (jn.llm.chat_async or jn.llm.chat)) then
+            on_done(nil, "无 LLM")
+            return
+        end
+        local timeout = math.max(30, common.da_num("llm_timeout", 360))
+        common.llm_chat_async({
             { role = "system", content = system },
             { role = "user", content = user },
-        }, { timeout = timeout })
-        if err or not resp or resp == "" then return nil, tostring(err or "空响应") end
-        local obj, perr = common.decode_llm_json(resp, "新闻合并")
-        if not obj then return nil, perr or "JSON 解析失败" end
-        return obj, nil
+        }, { timeout = timeout }, function(resp, err)
+            if err or not resp or resp == "" then
+                on_done(nil, tostring(err or "空响应"))
+                return
+            end
+            local obj, perr = common.decode_llm_json(resp, "新闻合并")
+            if not obj then
+                on_done(nil, perr or "JSON 解析失败")
+                return
+            end
+            on_done(obj, nil)
+        end)
     end
 
-    local function merge_news(articles, juya_items, max_items)
-        local wechat, juya_list, dropped = {}, {}, 0
+    local function prepare_news_merge(articles, juya_items, max_items)
+        local wechat, wx_by_id, dropped = {}, {}, 0
         for i, a in ipairs(articles) do
-            if i > 40 then break end
-            if (a.title or "") ~= "" or (a.summary or "") ~= "" then
-                wechat[#wechat + 1] = {
-                    i = i, title = a.title or "", summary = a.summary or "",
+            if #wechat >= 40 then break end
+            local t = common.strip_wm(a.title or "")
+            local s = common.strip_wm(a.summary or "")
+            if t ~= "" or s ~= "" then
+                local wid = #wechat + 1
+                local w = {
+                    wx_id = wid, title = t, summary = s,
                     url = a.url, count = a.count,
                 }
+                wechat[wid] = w
+                wx_by_id[wid] = w
             else
                 dropped = dropped + 1
             end
@@ -91,73 +107,156 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         if dropped > 0 then
             jn.log.info(string.format("[%s] 新闻过滤：%d 条无标题链接未进正文", common.PLUGIN_NAME, dropped))
         end
-        local jidx = 0
+
+        local juya_list, juya_by_id, juya_payload = {}, {}, {}
         for _, it in ipairs(juya_items) do
-            if jidx >= math.min(max_items * 2, 80) then break end
-            jidx = jidx + 1
+            if #juya_list >= math.min(max_items * 2, 80) then break end
+            local jid = #juya_list + 1
             local links = {}
-            for _, l in ipairs(it.links) do links[#links + 1] = l.url end
-            juya_list[#juya_list + 1] = {
-                i = 100 + jidx, title = it.title, summary = it.summary,
-                category = it.category, links = links,
+            for _, l in ipairs(it.links or {}) do
+                if l.url and l.url ~= "" then links[#links + 1] = l.url end
+            end
+            local body_detail = (it.detail and it.detail ~= "") and it.detail or (it.summary or "")
+            local entry = {
+                juya_id = jid,
+                title = it.title or "",
+                summary = it.summary or "",
+                detail = body_detail,
+                category = it.category or "",
+                links = links,
+            }
+            juya_list[jid] = entry
+            juya_by_id[jid] = entry
+            juya_payload[jid] = {
+                juya_id = jid,
+                title = entry.title,
+                summary = entry.summary,
+                category = entry.category,
             }
         end
-        if #wechat == 0 and #juya_list == 0 then return {} end
+
+        if #wechat == 0 and #juya_list == 0 then return nil, {}, {} end
 
         local function fallback_list()
             local out = {}
             for _, j in ipairs(juya_list) do
-                out[#out + 1] = { title = j.title, summary = j.summary, links = j.links }
+                out[#out + 1] = { title = j.title, summary = j.detail, links = j.links }
             end
-            for _, a in ipairs(wechat) do
+            for _, w in ipairs(wechat) do
                 out[#out + 1] = {
-                    title = a.title ~= "" and a.title or "公众号文章",
-                    summary = a.summary, links = { a.url },
+                    title = w.title ~= "" and w.title or "公众号文章",
+                    summary = w.summary, links = { w.url },
                 }
             end
             return out
         end
 
-        if not common.da_bool("news_event_merge", true) then
-            return fallback_list()
+        -- 无任何公众号文章或关闭事件合并时，直接原样搬运橘鸦完整内容，零 LLM 消耗
+        if #wechat == 0 or not common.da_bool("news_event_merge", true) then
+            return nil, fallback_list(), fallback_list
         end
 
-        local payload = jn.json.encode({ wechat = wechat, juya = juya_list })
+        local payload = jn.json.encode({ wechat = wechat, juya = juya_payload })
         local system = string.format([[
 你在整理今日 AI 新闻。输入含两类条目：
-- wechat：群里分享的微信公众号文章（title/summary 可能是我们此前的总结，也可能为空；url 为原文链接，count 为分享次数）
-- juya：橘鸦 AI 早报的当日条目（title/summary 附带，links 为该事件的多个来源链接）
+- wechat：群里抓取总结或合并转发提取的微信公众号文章（wx_id、title、summary、url、count）
+- juya：橘鸦 AI 早报的当日条目（juya_id、title、summary、category）
 
-请把描述同一事件的条目合并成一条新闻，严格输出 JSON：
-{"events":[{"title":"标题","summary":"不超过 80 字的简体中文摘要","links":["来源链接"]}]}
+请对比两者并返回严格 JSON：
+{"events":[ ... ]}
 
-规则：
-1. links 必须收录该事件的全部来源链接（公众号原文 + 早报来源），不得遗漏、不得编造；
-2. 无法判断为同一事件的，各自独立成条；
-3. 最多 %d 条，按重要性排序；
-4. 标题不得与摘要重复套话，不要输出除 JSON 以外的任何内容。]], max_items)
-        local obj, err = llm_json(system, payload)
+规则（非常重要，必须严格遵守）：
+1. 【橘鸦独占新闻只返回标记】：如果某条 juya 新闻没有任何重合的 wechat 文章，严禁重写其 title/summary/links，只返回标记对象：{"juya_id": 1}，代码会自动原样搬运橘鸦全文与链接！
+2. 【重合事件合并到橘鸦】：如果某些 wechat 文章与某条 juya 描述同一事件，把公众号补充的信息合并进该橘鸦新闻中，返回：{"juya_id": 1, "wx_ids": [2], "title": "精炼标题", "summary": "融合橘鸦与公众号要点后的简体中文摘要(≤180字)"}；
+3. 【公众号独占新闻】：不与任何 juya 重合的公众号文章，返回：{"wx_ids": [3], "title": "标题", "summary": "摘要"}（若同一事件有多篇公众号合并则在 wx_ids 列出全部编号）；
+4. 最多 %d 条，按重要性排序；不要输出除 JSON 以外的任何内容。]], max_items)
+        return { system = system, payload = payload, wx_by_id = wx_by_id, juya_by_id = juya_by_id }, nil, fallback_list
+    end
+
+    local function parse_merged_news_obj(obj, err, fallback_list, req)
         if not obj or type(obj.events) ~= "table" then
             jn.log.warn("[" .. common.PLUGIN_NAME .. "] 新闻合并失败，降级为顺序罗列: " .. tostring(err))
             return fallback_list()
         end
+        local wx_by_id = (req and req.wx_by_id) or {}
+        local juya_by_id = (req and req.juya_by_id) or {}
         local out = {}
+
+        local function collect_unique_links(dest, seen, list)
+            for _, u in ipairs(list or {}) do
+                local s = tostring(u or "")
+                if s:find("^https?://") and not seen[s] then
+                    seen[s] = true
+                    dest[#dest + 1] = s
+                end
+            end
+        end
+
         for _, e in ipairs(obj.events) do
-            if type(e) == "table" and e.title then
-                local links = {}
+            if type(e) == "table" then
+                local jid = tonumber(e.juya_id)
+                local j = jid and juya_by_id[jid] or nil
+                local wids = {}
+                if type(e.wx_ids) == "table" then
+                    for _, wid in ipairs(e.wx_ids) do
+                        local wn = tonumber(wid)
+                        if wn and wx_by_id[wn] then wids[#wids + 1] = wn end
+                    end
+                elseif tonumber(e.wx_id) and wx_by_id[tonumber(e.wx_id)] then
+                    wids[#wids + 1] = tonumber(e.wx_id)
+                end
+
+                local links, lseen = {}, {}
+                if j then
+                    collect_unique_links(links, lseen, j.links)
+                end
+                for _, wn in ipairs(wids) do
+                    collect_unique_links(links, lseen, { wx_by_id[wn].url })
+                end
                 if type(e.links) == "table" then
-                    for _, u in ipairs(e.links) do
-                        local s = tostring(u)
-                        if s:find("^https?://") then links[#links + 1] = s end
+                    collect_unique_links(links, lseen, e.links)
+                end
+
+                if j and #wids == 0 and (not e.title or e.title == "") and (not e.summary or e.summary == "") then
+                    -- 纯标记原样搬运橘鸦（优先完整 detail，无正文回退 summary）
+                    out[#out + 1] = {
+                        title = j.title,
+                        summary = j.detail,
+                        links = links,
+                    }
+                elseif j then
+                    local ttl = common.strip_wm(tostring(e.title or ""))
+                    local sum = common.strip_wm(tostring(e.summary or ""))
+                    if ttl == "" then ttl = j.title end
+                    if sum == "" then sum = j.detail end
+                    out[#out + 1] = { title = ttl, summary = sum, links = links }
+                elseif #wids > 0 or (e.title and tostring(e.title) ~= "") then
+                    local first_w = wids[1] and wx_by_id[wids[1]] or nil
+                    local ttl = common.strip_wm(tostring(e.title or ""))
+                    local sum = common.strip_wm(tostring(e.summary or ""))
+                    if ttl == "" and first_w then ttl = first_w.title ~= "" and first_w.title or "公众号文章" end
+                    if sum == "" and first_w then sum = first_w.summary end
+                    if ttl ~= "" then
+                        out[#out + 1] = { title = ttl, summary = sum, links = links }
                     end
                 end
-                out[#out + 1] = { title = tostring(e.title), summary = tostring(e.summary or ""), links = links }
             end
         end
         return out
     end
 
-    local function fetch_juya_items()
+    local function merge_news_async(articles, juya_items, max_items, on_done)
+        local req, immediate, fallback_list = prepare_news_merge(articles, juya_items, max_items)
+        if not req then
+            on_done(immediate or {})
+            return
+        end
+        llm_json_async(req.system, req.payload, function(obj, err)
+            on_done(parse_merged_news_obj(obj, err, fallback_list, req))
+        end)
+    end
+
+    local function fetch_juya_items(target_ts)
         local feeds = {}
         local list = jn.config.get("news_feeds")
         if type(list) == "table" then
@@ -181,7 +280,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
             return {}
         end
         local ok, url, html, _, ferr = pcall(function()
-            return juya.fetch_issue(feeds, os.date("%Y-%m-%d"))
+            return juya.fetch_issue(feeds, os.date("%Y-%m-%d", target_ts or os.time()))
         end)
         if ok and html then
             local items = juya.flatten(juya.parse_issue(html))
@@ -192,19 +291,111 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         return {}
     end
 
-    function M.build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages)
-        local projects, articles = sources.collect_sources(messages or {})
-        if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects) end
+    local AI_PRODUCT_LABELS = {
+        codex = "Codex",
+        antigravity = "Antigravity",
+        claude = "Claude / Claude Code",
+        grok = "Grok",
+        grok_bot = "Grok Bot",
+        glm = "GLM Coding Plan",
+        qoder = "Qoder",
+        kimi = "Kimi / Kimi Code",
+        gemini_cli = "Gemini CLI",
+        cursor = "Cursor",
+        openai_status = "OpenAI 服务状态",
+        claude_status = "Claude 服务状态",
+        deepseek_status = "DeepSeek 服务状态",
+        grok_status = "Grok 服务状态",
+    }
 
-        local sec_configs = M.parse_sections_config()
-        local juya_items = {}
-        for _, s in ipairs(sec_configs) do
-            if s.key == "news" and s.cap ~= 0 then
-                juya_items = fetch_juya_items()
-                break
-            end
+    local AI_KIND_LABELS = {
+        direct_reset = "🎉 直接重置",
+        banked_reset = "🎟️ 发放重置卡",
+        scheduled_reset = "⏳ 官方预告重置",
+        rule_change = "📢 额度/规则变更",
+        status_incident = "🚨 官方服务异常",
+        status_resolved = "✅ 官方服务恢复",
+    }
+
+    local function fetch_ai_monitor_digest()
+        if not (jn.database and jn.database.query) then
+            return { "暂未获取到 AI 监控数据库权限" }
+        end
+        local cutoff = os.time() - 86400
+        local sql = [[
+            SELECT product, event_kind, title, source_url, announced_ts, payload_json
+            FROM pluggin_ai_reset_monitor_seen
+            WHERE announced_ts >= ?
+              AND product NOT IN ('_meta', '')
+              AND event_kind IN ('direct_reset', 'banked_reset', 'scheduled_reset', 'rule_change', 'status_incident', 'status_resolved')
+            ORDER BY announced_ts DESC, created_at DESC
+            LIMIT 40
+        ]]
+        local ok, rows, err = pcall(jn.database.query, sql, { cutoff })
+        if not ok or err or type(rows) ~= "table" or #rows == 0 then
+            return { "过去 24 小时各监测平台暂无额度重置或官方服务故障记录" }
         end
 
+        local items = {}
+        for _, r in ipairs(rows) do
+            local plabel = AI_PRODUCT_LABELS[r.product] or tostring(r.product or "AI服务")
+            local klabel = AI_KIND_LABELS[r.event_kind] or tostring(r.event_kind or "动态")
+            local ts = tonumber(r.announced_ts) or 0
+            local tstr = ts > 0 and os.date("!%m-%d %H:%M", ts + 8 * 3600) or "近期"
+            local obj_sum = ""
+            if type(r.payload_json) == "string" and r.payload_json ~= "" then
+                local okj, pj = pcall(jn.json.decode, r.payload_json)
+                if okj and type(pj) == "table" and pj.objective_summary and pj.objective_summary ~= "" then
+                    obj_sum = common.strip_wm(tostring(pj.objective_summary))
+                end
+            end
+            local ttl = common.strip_wm(tostring(r.title or ""))
+            -- 兜底将旧缓存里残余的显式 UTC/GMT 时间写法统一转为 UTC+8
+            local function fix_utc_str(txt)
+                txt = tostring(txt or "")
+                local function shift(hh, mm)
+                    return string.format("%02d:%02d", ((tonumber(hh) or 0) + 8) % 24, tonumber(mm) or 0)
+                end
+                for _, sp in ipairs({
+                    { p = "至", s = "至" }, { p = "到", s = "到" },
+                    { p = "–", s = "-" }, { p = "—", s = "-" },
+                    { p = "~", s = "~" }, { p = "%-", s = "-" },
+                }) do
+                    txt = txt:gsub("([Uu][Tt][Cc])%s*(%d%d?):(%d%d)%s*" .. sp.p .. "%s*(%d%d?):(%d%d)",
+                        function(_, h1, m1, h2, m2)
+                            return string.format("%s %s %s (UTC+8)", shift(h1, m1), sp.s, shift(h2, m2))
+                        end)
+                    txt = txt:gsub("(%d%d?):(%d%d)%s*" .. sp.p .. "%s*(%d%d?):(%d%d)%s*([Uu][Tt][Cc])([^%+%-]?)",
+                        function(h1, m1, h2, m2, _, tail)
+                            if tail == "+" or tail == "-" then return nil end
+                            return string.format("%s %s %s (UTC+8)%s", shift(h1, m1), sp.s, shift(h2, m2), tail)
+                        end)
+                end
+                txt = txt:gsub("([Uu][Tt][Cc])%s*(%d%d?):(%d%d)",
+                    function(_, hh, mm) return shift(hh, mm) .. " (UTC+8)" end)
+                txt = txt:gsub("(%d%d?):(%d%d)%s*([Uu][Tt][Cc])([^%+%-]?)",
+                    function(hh, mm, _, tail)
+                        if tail == "+" or tail == "-" then return nil end
+                        return shift(hh, mm) .. " (UTC+8)" .. tail
+                    end)
+                return txt
+            end
+            ttl = fix_utc_str(ttl)
+            obj_sum = fix_utc_str(obj_sum)
+            local block = { string.format("[%s] %s · %s", tstr, plabel, klabel) }
+            if ttl ~= "" then block[#block + 1] = common.clip(ttl, 80) end
+            if obj_sum ~= "" and obj_sum ~= ttl then
+                block[#block + 1] = common.clip(obj_sum, 160)
+            end
+            if r.source_url and r.source_url ~= "" then
+                block[#block + 1] = tostring(r.source_url)
+            end
+            items[#items + 1] = table.concat(block, "\n")
+        end
+        return items
+    end
+
+    local function assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, news_items)
         local sections = {}
         local function emit(key, title, cap, items)
             if cap == 0 then return end
@@ -216,39 +407,49 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
             if #items > 0 then sections[#sections + 1] = { key = key, title = title, items = items } end
         end
 
+        local top_n = math.max(1, math.floor(common.da_num("top_users_count", 5)))
+        local report_ts = (type(stats) == "table" and tonumber(stats.started_at)) or os.time()
+
         for _, s in ipairs(sec_configs) do
             local items = {}
             if s.key == "overview" then
                 items[1] = string.format("🏢 分析群聊: %s (%d)\n📅 统计时间: %s\n💬 消息总量: %d 条\n👥 参与人数: %d 人\n⏰ 最活跃时段: %s",
-                    group_name, group_id, os.date("%Y年%m月%d日"), stats.total_count, stats.user_count, stats.peak_period)
+                    group_name, group_id, os.date("%Y年%m月%d日", report_ts), stats.total_count, stats.user_count, stats.peak_period)
             elseif s.key == "top" then
                 if stats.top_users and #stats.top_users > 0 then
                     local lines = {}
-                    for idx = 1, math.min(3, #stats.top_users) do
+                    for idx = 1, math.min(top_n, #stats.top_users) do
                         local u = stats.top_users[idx]
-                        lines[#lines + 1] = string.format("👑 Top%d: %s (%d条)", idx, u.name, u.count)
+                        lines[#lines + 1] = string.format("👑 Top%d: %s (%d条)", idx, common.strip_wm(u.name), u.count)
                     end
                     items[1] = table.concat(lines, "\n")
                 end
+            elseif s.key == "ai_monitor" then
+                items = fetch_ai_monitor_digest()
             elseif s.key == "stats" then
                 items[1] = string.format("🤖 总结模型: %s\n⏱️ 分析耗时: %.1f 秒\n📝 输入字符: ~%d 字\n⚡ 消耗 Token: ~%d tokens",
                     model_name, dur_sec, stats.total_chars or 0, est_tokens)
             elseif s.key == "topics" and type(analysis_data.topics) == "table" then
+                local function strip_media_tags(str)
+                    return (tostring(str or ""):gsub("%[图#%d+%]", "该图片"):gsub("%[转发#%d+%]", "该聊天记录"))
+                end
                 for idx, t in ipairs(analysis_data.topics) do
                     local part = (t.participants and t.participants ~= "") and ("参与者: " .. t.participants .. "\n") or ""
-                    items[#items + 1] = string.format("【%d】%s\n%s%s", idx, t.title or "核心话题", part, t.summary or "")
+                    items[#items + 1] = string.format("【%d】%s\n%s%s", idx, strip_media_tags(t.title or "核心话题"), part, strip_media_tags(t.summary or ""))
                 end
             elseif s.key == "quotes" and type(analysis_data.golden_quotes) == "table" then
                 local seen, n = {}, 0
                 for _, q in ipairs(analysis_data.golden_quotes) do
                     local content = common.clean_quote_text(q.content)
-                    local src = sources.quote_source_text(chat_messages or messages, q.msg_id)
+                    local ref_ids = (type(q.msg_ids) == "table" and #q.msg_ids > 0) and q.msg_ids or q.msg_id
+                    local src = sources.quote_source_text(chat_messages or messages, ref_ids)
                     if src and #src > #content and #src >= 4 then content = src end
                     local dedup = content:gsub("%s+", "")
                     if #content >= 4 and not seen[dedup] then
                         seen[dedup] = true
                         n = n + 1
-                        local reason = (q.reason and q.reason ~= "") and ("\n💡 甄选理由: " .. q.reason) or ""
+                        local rtxt = tostring(q.reason or ""):gsub("%[图#%d+%]", "该图片"):gsub("%[转发#%d+%]", "该聊天记录")
+                        local reason = (rtxt ~= "") and ("\n💡 甄选理由: " .. rtxt) or ""
                         items[#items + 1] = string.format("📜 金句 #%d · %s:\n「\n%s\n」%s", n, q.sender or "群友", content, reason)
                     end
                 end
@@ -296,9 +497,8 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
                 end
                 if #items == 0 then items[1] = "今日没有检测到开源项目 / 模型仓库链接" end
             elseif s.key == "news" then
-                local lim = (s.cap > 0) and s.cap or ((s.cap == -1) and 200 or 70)
                 local n = 0
-                for _, e in ipairs(merge_news(articles, juya_items, lim)) do
+                for _, e in ipairs(news_items or {}) do
                     n = n + 1
                     local parts = { num_cn(n) .. "、" .. e.title }
                     if e.summary and e.summary ~= "" then parts[#parts + 1] = e.summary end
@@ -312,6 +512,82 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
             emit(s.key, s.title, s.cap, items)
         end
         return sections
+    end
+
+    function M.build_sections_async(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, precollected, on_done)
+        on_done = on_done or function() end
+        local projects, articles
+        if type(precollected) == "table" and precollected.projects and precollected.articles then
+            projects, articles = precollected.projects, precollected.articles
+        else
+            projects, articles = sources.collect_sources(messages or {})
+        end
+
+        local function after_repos()
+            local sec_configs = M.parse_sections_config()
+            local need_news, news_lim = false, 70
+            for _, s in ipairs(sec_configs) do
+                if s.key == "news" and s.cap ~= 0 then
+                    need_news = true
+                    news_lim = (s.cap > 0) and s.cap or ((s.cap == -1) and 200 or 70)
+                    break
+                end
+            end
+            if not need_news then
+                on_done(assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, {}))
+                return
+            end
+            local juya_items = fetch_juya_items(type(stats) == "table" and stats.started_at or nil)
+            merge_news_async(articles, juya_items, news_lim, function(news_items)
+                on_done(assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, news_items))
+            end)
+        end
+
+        if common.da_bool("enable_projects", true) and enrich.enrich_repos_async then
+            enrich.enrich_repos_async(projects, after_repos, group_id)
+        else
+            if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects, group_id) end
+            after_repos()
+        end
+    end
+
+    function M.build_sections(stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, precollected)
+        local projects, articles
+        if type(precollected) == "table" and precollected.projects and precollected.articles then
+            projects, articles = precollected.projects, precollected.articles
+        else
+            projects, articles = sources.collect_sources(messages or {})
+        end
+        if common.da_bool("enable_projects", true) then enrich.enrich_repos(projects, group_id) end
+
+        local sec_configs = M.parse_sections_config()
+        local juya_items, news_items, news_lim = {}, {}, 70
+        local need_news = false
+        for _, s in ipairs(sec_configs) do
+            if s.key == "news" and s.cap ~= 0 then
+                need_news = true
+                news_lim = (s.cap > 0) and s.cap or ((s.cap == -1) and 200 or 70)
+                juya_items = fetch_juya_items()
+                break
+            end
+        end
+        if need_news then
+            local req, immediate, fallback_list = prepare_news_merge(articles, juya_items, news_lim)
+            if not req then
+                news_items = immediate or {}
+            elseif jn.llm and jn.llm.chat then
+                local timeout = math.max(30, common.da_num("llm_timeout", 360))
+                local resp, err = jn.llm.chat({
+                    { role = "system", content = req.system },
+                    { role = "user", content = req.payload },
+                }, { timeout = timeout })
+                local obj = (not err and resp and resp ~= "") and common.decode_llm_json(resp, "新闻合并") or nil
+                news_items = parse_merged_news_obj(obj, err, fallback_list, req)
+            else
+                news_items = fallback_list()
+            end
+        end
+        return assemble_sections(sec_configs, stats, analysis_data, group_name, group_id, dur_sec, est_tokens, model_name, messages, chat_messages, projects, news_items)
     end
 
     local function item_text(item)
@@ -534,7 +810,7 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         return count, count
     end
 
-    function M.persist_report(group_id, target_id, sections, mode, node_count)
+    function M.persist_report(group_id, target_id, sections, mode, node_count, report_date)
         local flat = {}
         for _, sec in ipairs(sections or {}) do
             flat[#flat + 1] = "## " .. tostring(sec.title or sec.key or "")
@@ -545,10 +821,12 @@ return function(jn, common, sources, enrich, juya, get_bot_uin)
         local content = table.concat(flat, "\n")
         local ok_enc, encoded = pcall(jn.json.encode, sections)
         if not ok_enc then encoded = "" end
+        local date_str = (type(report_date) == "string" and report_date:match("^%d%d%d%d%-%d%d%-%d%d$"))
+            and report_date or os.date("%Y-%m-%d")
         local _, err = jn.database.exec([[INSERT INTO ]] .. common.TABLE_REPORTS .. [[
             (group_id, target_id, report_date, mode, section_count, node_count, sections, content)
-            VALUES (?, ?, CURRENT_DATE, ?, ?, ?, ?, ?)
-        ]], { group_id, target_id, tostring(mode), #sections, node_count or 0,
+            VALUES (?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?)
+        ]], { group_id, target_id, date_str, tostring(mode), #sections, node_count or 0,
               tostring(encoded or ""), content })
         if err then
             jn.log.error("[" .. common.PLUGIN_NAME .. "] 日报持久化失败: " .. tostring(err))

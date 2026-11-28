@@ -10,17 +10,23 @@ configs:
     description: "留空默认使用系统当前激活的文本模型；也可直接输入后台服务商名称（如 volcengine 或 qianfan）或模型名称（如 deepseek-v4.1-flash），支持模糊匹配，无需查抄UUID"
     default: ""
 
+  - key: fallback_text_provider
+    type: string
+    label: "备用降级文本模型"
+    description: "主总结超时或失败时自动切换至此模型重跑（留空则仅自动缩半语料窗口重试）；支持模糊匹配服务商或模型名"
+    default: ""
+
   - key: llm_timeout
     type: string
     label: "LLM 分析超时（秒）"
-    description: "日报主分析、新闻合并与未总结项目补全调用 LLM 的超时秒数，默认 300"
-    default: "300"
+    description: "日报主分析、新闻合并与未总结项目补全调用 LLM 的超时秒数，默认 360"
+    default: "360"
 
   - key: fetch_limit
     type: string
     label: "单次拉取消息上限"
-    description: "每次总结最多拉取最近多少条群消息（默认 5000，按最新优先截取再按时间正序分析）"
-    default: "5000"
+    description: "每次总结最多拉取最近多少条群消息（默认 1500，按最新优先截取再按时间正序分析）"
+    default: "1500"
 
   - key: max_msg_chars
     type: string
@@ -33,6 +39,48 @@ configs:
     label: "合并同人与多人复读"
     description: "开启后自动归并同人连续刷屏与多人连续复读，保留代表发言与复读次数/人数，减少无效重复语料"
     default: true
+
+  - key: filter_low_signal
+    type: bool
+    label: "过滤低质水贴（不计入 LLM 语料）"
+    description: "开启后从喂给模型的聊天流中剔除 ≤2 字短水贴、/命令与纯表情/图片占位符（统计榜单与链接采集仍保留全量）"
+    default: true
+
+  - key: map_reduce_threshold
+    type: string
+    label: "Map-Reduce 分段阈值（字符）"
+    description: "聊天流总字符超过此阈值时自动切换分段提取 + 汇总模式（默认 50000），避免超长单次请求卡死超时"
+    default: "50000"
+
+  - key: map_chunk_chars
+    type: string
+    label: "分段切片目标字符数"
+    description: "开启 Map-Reduce 时每段切片的目标字符长度（默认 35000），最多切 8 段"
+    default: "35000"
+
+  - key: map_resplit_count
+    type: string
+    label: "二级拆片数（第1次隔离）"
+    description: "单个切片或整段请求命中上游敏感内容审查时，第一级拆分为几片重跑（默认 8，设 0 或 1 关闭，上限 32）"
+    default: "8"
+
+  - key: map_resplit_l2_count
+    type: string
+    label: "三级拆片数（第2次隔离）"
+    description: "二级拆片中仍有子片命中敏感审查时，继续细分为几片重跑（默认 4，上限 16）"
+    default: "4"
+
+  - key: map_resplit_l3_count
+    type: string
+    label: "四级拆片数（第3次隔离）"
+    description: "三级拆片仍命中敏感审查时，继续细分为几片直到精准丢弃单条/极少量敏感消息（默认 2，上限 8）"
+    default: "2"
+
+  - key: map_resplit_max_depth
+    type: string
+    label: "敏感审查最大二次拆片级数"
+    description: "最多允许递归拆片级数（默认 2 即最多失败后分片两次、共 3 次尝试机会；范围 0~3）"
+    default: "2"
 
   - key: auto_analysis_time
     type: string
@@ -91,10 +139,16 @@ configs:
     description: "forward=整份做成一条合并转发（默认）；per_section=每个板块合成一条；per_item=每条目一条消息（会刷屏）"
     default: "forward"
 
+  - key: top_users_count
+    type: string
+    label: "发言主力军展示人数"
+    description: "发言主力军板块默认展示的活跃群友人数，默认 5"
+    default: "5"
+
   - key: sections
     type: list
     label: "板块：顺序 | 标题 | 条数上限"
-    description: "每行 key|标题|上限。key 可取 overview/topics/quotes/titles/critique/projects/news/stats；上限 0 关闭该板块，-1 不限；行的先后即发送顺序"
+    description: "每行 key|标题|上限。key 可取 overview/top/topics/quotes/titles/critique/projects/ai_monitor/news/stats；上限 0 关闭该板块，-1 不限；行的先后即发送顺序"
     default:
       - "overview|📊 群聊概况|1"
       - "top|🔥 发言主力军|1"
@@ -103,6 +157,7 @@ configs:
       - "titles|👑 群友特色头衔 / 画像|6"
       - "critique|🎭 聊天质量分析与人设点评|4"
       - "projects|🧪 开源项目列表|20"
+      - "ai_monitor|🤖 今日 AI 重置与官方状态监控|20"
       - "news|📰 今日新闻|70"
       - "stats|📈 本次分析统计|1"
 
@@ -177,13 +232,13 @@ configs:
   - key: vision_image_limit
     type: string
     label: 每份报告图片描述上限
-    description: 超过上限的图片只记「[图片]」，默认 10，防止总结耗时过长
-    default: "10"
+    description: 超过上限的图片只记「[图片]」，默认 30（含合并转发内层图片）
+    default: "30"
 
   - key: expand_reply
     type: bool
     label: 展开回复引用
-    description: 把被回复消息的前 80 字作为上下文并入语料
+    description: 把被回复消息的前 140 字（含 [图#]/[转发#] 标签）作为上下文并入语料
     default: true
 
   - key: send_interval
@@ -191,4 +246,22 @@ configs:
     label: 串行发送间隔（秒）
     description: 拆条/降级/补图等多条连续发送之间的最小等待秒数，默认 15；0 表示不等待
     default: "15"
+
+  - key: backfill_on_startup
+    type: bool
+    label: 断线重连后自动补全群消息
+    description: 开启后，插件启动连接就绪及每日报告前自动调用 get_group_msg_history 拉取离线期间漏收消息入库（按 message_id 去重并还原原始时间）
+    default: true
+
+  - key: backfill_hours
+    type: string
+    label: 补库回溯小时数
+    description: 自动补库最多回溯多少小时内的群消息，默认 24
+    default: "24"
+
+  - key: backfill_max_pages
+    type: string
+    label: 补库最多翻页次数
+    description: 补库时单群最多向前翻页次数（每页 30 条），默认 3（上限 50）
+    default: "3"
 

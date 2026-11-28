@@ -1,5 +1,5 @@
 name: "bilibili-summary"
-version: "1.0.0"
+version: "1.0.1"
 author: "excniesNIED"
 description: "B 站视频/短链/BV 号/小程序/专栏链接自动总结：标题、作者、发布时间、播放量、简介、字幕总结、封面"
 entry: "main.lua"

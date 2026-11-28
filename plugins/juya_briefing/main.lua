@@ -247,7 +247,12 @@ local function send_to_target(target_type, target_id, nodes)
     if forward and target_type == "private" and jn.onebot11.send_private_forward_msg_sync then
         local id, err = jn.onebot11.send_private_forward_msg_sync(target_id, nodes)
         if err == nil then return true end
-        jn.log.warn("[" .. PLUGIN_NAME .. "] 私聊合并转发失败: " .. tostring(err))
+        local err_s = tostring(err)
+        if err_s:lower():find("timeout", 1, true) then
+            jn.log.warn("[" .. PLUGIN_NAME .. "] 私聊合并转发等待回包超时（协议端通常已投递，不再重发以免重复）: " .. err_s)
+            return true
+        end
+        jn.log.warn("[" .. PLUGIN_NAME .. "] 私聊合并转发失败: " .. err_s)
         return send_nodes_as_text()
     end
     if forward and target_type ~= "private" and jn.onebot11.send_group_forward_msg_sync then
@@ -263,8 +268,15 @@ local function send_to_target(target_type, target_id, nodes)
                     PLUGIN_NAME, attempt.label, #attempt.nodes))
                 return true
             end
+            local err_s = tostring(err)
+            if err_s:lower():find("timeout", 1, true) then
+                -- 协议端实际已发送但 WS 回包慢于 Go 超时，重试会导致群内重复刷两条以上
+                jn.log.warn(string.format("[%s] 群合并转发等待超时（%s，%d 节点），按已投递处理以防重复刷屏: %s",
+                    PLUGIN_NAME, attempt.label, #attempt.nodes, err_s))
+                return true
+            end
             jn.log.warn(string.format("[%s] 群合并转发失败（%s，%d 节点）: %s",
-                PLUGIN_NAME, attempt.label, #attempt.nodes, tostring(err)))
+                PLUGIN_NAME, attempt.label, #attempt.nodes, err_s))
         end
         return send_nodes_as_text()
     end
@@ -307,10 +319,15 @@ function push_briefing(force)
         end
 
         local cache_key = "sent:" .. (issue_date ~= "" and issue_date or url)
-        -- 按群去重：部分群已发过时，重试只补发未发的群
+        -- 按群去重：Bot 侧 cache.get 仅解 JSON 对象，兼容旧数值键须同时检查 cache.exists
+        local function is_group_sent(ck)
+            if jn.cache.get(ck) ~= nil then return true end
+            if jn.cache.exists and jn.cache.exists(ck) == 1 then return true end
+            return false
+        end
         local pending = {}
         for _, gid in ipairs(targets) do
-            if force or not jn.cache.get(cache_key .. ":" .. gid) then
+            if force or not is_group_sent(cache_key .. ":" .. gid) then
                 pending[#pending + 1] = gid
             end
         end
@@ -339,7 +356,7 @@ function push_briefing(force)
             local sent, send_err = send_to_target(target_type, gid, nodes)
             if sent then
                 ok_list[#ok_list + 1] = tostring(gid)
-                jn.cache.set(cache_key .. ":" .. gid, os.time(), 7 * 86400)
+                jn.cache.set(cache_key .. ":" .. gid, { ts = os.time() }, 7 * 86400)
             else
                 fail_list[#fail_list + 1] = tostring(gid) .. "(" .. tostring(send_err) .. ")"
             end

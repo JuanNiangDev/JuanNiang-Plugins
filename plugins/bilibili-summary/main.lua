@@ -3,7 +3,7 @@
 -- --------------------------------------------------------------------
 -- 识别一条消息中的 B 站链接（可混合多种；裸 BV 不触发）：
 --   · 视频长链  https://www.bilibili.com/video/BVxxxxxxxxxx/?p=2
---   · 短链      https://b23.tv/xxxxxxx（302 到视频 / opus / 专栏）
+--   · 短链      https://b23.tv/xxxxxxx、https://bili2233.cn/xxxxxxx（302 到视频 / opus / 专栏）
 --   · 小程序卡片 [CQ:json,data=...]（meta.detail_1.qqdocurl 为 b23 链接）
 --   · 专栏      https://www.bilibili.com/opus/<id>、/read/cv<id>
 -- 视频：标题 / 作者 | 发布时间 | 播放量 / 链接 / 简介 / 字幕总结 / 分 P / 封面
@@ -312,20 +312,24 @@ local function parse_entries(raw)
         pos = e + 1
     end
 
-    -- 2) b23.tv 短链
-    pos = 1
-    while true do
-        local s, e = raw:find("b23%.tv/([%w]+)", pos)
-        if not s then break end
-        local code = raw:sub(s, e):match("b23%.tv/([%w]+)")
-        if code then
-            add({
-                kind = "b23", code = code,
-                key = "b23:" .. code,
-                url = "https://b23.tv/" .. code,
-            })
+    -- 2) b23.tv / bili2233.cn 短链（共享 B 站同套短链码与 302 解析）
+    for _, host_spec in ipairs({
+        { pat = "b23%.tv/([%w_%-]+)",      base = "https://b23.tv/" },
+        { pat = "bili2233%.cn/([%w_%-]+)", base = "https://bili2233.cn/" },
+    }) do
+        pos = 1
+        while true do
+            local s, e, code = raw:find(host_spec.pat, pos)
+            if not s then break end
+            if code then
+                add({
+                    kind = "b23", code = code,
+                    key = "b23:" .. code,
+                    url = host_spec.base .. code,
+                })
+            end
+            pos = e + 1
         end
-        pos = e + 1
     end
 
     -- 3) opus 专栏 / 动态
@@ -870,6 +874,7 @@ local function llm_system_prompt()
         "",
         "【内容判定】",
         "- 若字幕/正文没有可总结的实质内容（纯噪音、只有语气词、无信息量的闲聊），置 no_content=true，所有字段留空。",
+        "- **跳过商业广告与恰饭推广**：自动忽略视频/专栏中穿插的商业广告、口播商单/赞助、产品带货、品牌安利、优惠券/推广码/购买链接、导流与抽奖引导等推广片段，只总结正片核心内容；若整篇通篇只有广告推销而无正片实质内容，置 no_content=true，所有字段留空。",
         "- 歌词、MV、音乐作品必须总结：概括歌词大意、主题与情绪，可以评价歌曲本身；不要因为“无人声台词/只有音乐”就跳过。",
         "- 若某段字幕带「可能与视频无关」提示：只有当它明显是歌词/音乐内容（出现 ♪、重复副歌、押韵短句）时才总结歌词；其它一律视为字幕不可用：no_content=true，所有字段留空。禁止把可疑字幕当成视频内容总结，也不要评论这段字幕本身（例如“这字幕讲的是别的视频”）。",
         "- 专栏正文很短（只有一两句话）时，summary 直接原样返回正文，不要扩写。",
@@ -879,6 +884,7 @@ local function llm_system_prompt()
         "- persona：人设讲解（persona 模式），或留空字符串。",
         "",
         "【禁止】",
+        "- 严禁复述或总结视频/专栏中的商业广告、赞助商产品卖点、促销优惠或口播恰饭内容。",
         "- 不要出现「标题：」「UP 主：」「作者：」「文中引用视频：」这类元信息复述，也不要抄引用视频标题；直接讲内容。",
         "- 不要输出「未提及」「未说明」之类的占位描述。",
         "",
@@ -1623,17 +1629,22 @@ function on_http_response(req_id, ctx, result, err)
         handle_spi(job, result, next_fn)
         return
     end
-    if err then
-        job.err = tostring(err)
-        jn.log.warn("[" .. PLUGIN .. "] 请求失败 stage=" .. tostring(ctx.stage) .. " err=" .. tostring(err))
-        send_error(job, "网络请求失败")
-        finish_job(job)
-        return
-    end
     local status = result and result.status or 0
-    if status < 200 or status >= 300 then
-        jn.log.warn("[" .. PLUGIN .. "] HTTP " .. tostring(status) .. " stage=" .. tostring(ctx.stage))
-        send_error(job, "接口返回 HTTP " .. tostring(status))
+    if err or status < 200 or status >= 300 then
+        -- 本地 /b23 代理不可用或异常时，回退直连原始短链页面（支持 b23.tv / bili2233.cn 兜底）
+        if ctx.stage == "resolve" and not ctx.direct_fallback and job.entry and job.entry.url and job.entry.url ~= "" then
+            jn.log.warn("[" .. PLUGIN .. "] 短链代理解析失败，改用直连兜底: " .. tostring(job.entry.url))
+            local rid = http_get(job.entry.url, { jid = job.id, stage = "resolve", direct_fallback = true }, "https://www.bilibili.com/", false, true)
+            if rid and rid ~= 0 then return end
+        end
+        if err then
+            job.err = tostring(err)
+            jn.log.warn("[" .. PLUGIN .. "] 请求失败 stage=" .. tostring(ctx.stage) .. " err=" .. tostring(err))
+            send_error(job, "网络请求失败")
+        else
+            jn.log.warn("[" .. PLUGIN .. "] HTTP " .. tostring(status) .. " stage=" .. tostring(ctx.stage))
+            send_error(job, "接口返回 HTTP " .. tostring(status))
+        end
         finish_job(job)
         return
     end
@@ -1820,8 +1831,8 @@ function on_message(event)
 
     local raw = event.raw_message or ""
     if wm_own(raw) then return false, nil end
-    -- 只识别 b23.tv / bilibili.com；裸 BV 号和其他站点不触发
-    if not (raw:find("b23.tv", 1, true) or raw:find("bilibili.com", 1, true)) then
+    -- 只识别 b23.tv / bili2233.cn / bilibili.com；裸 BV 号和其他站点不触发
+    if not (raw:find("b23.tv", 1, true) or raw:find("bili2233.cn", 1, true) or raw:find("bilibili.com", 1, true)) then
         return false, nil
     end
     local entries = collect_entries(raw)

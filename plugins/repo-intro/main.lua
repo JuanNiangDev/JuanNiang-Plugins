@@ -133,6 +133,8 @@ end
 -- --------------------------------------------------------------------
 -- 元数据 / README URL 与工具
 -- --------------------------------------------------------------------
+local HF_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
 local function hf_host()
     if cfg_bool("hf_mirror", true) then return "hf-mirror.com" end
     return "huggingface.co"
@@ -198,6 +200,28 @@ local function copy_ctx(ctx)
     return c
 end
 
+local function proxy_for(e)
+    if e and (e.kind == "hf" or e.kind == "github") then
+        return cfg_string("proxy", "")
+    end
+    return ""
+end
+
+local function http_get_for(e, url, ctx, headers)
+    local p = proxy_for(e)
+    local h = headers and copy_ctx(headers) or {}
+    if e and e.kind == "hf" and not h["User-Agent"] then
+        h["User-Agent"] = HF_UA
+    end
+    if p ~= "" then
+        return jn.http.get_async(url, ctx, h, p)
+    end
+    if next(h) ~= nil then
+        return jn.http.get_async(url, ctx, h)
+    end
+    return jn.http.get_async(url, ctx)
+end
+
 -- --------------------------------------------------------------------
 -- 关键图提取（HF/MS 模型页 README + 引用博客）
 -- --------------------------------------------------------------------
@@ -232,6 +256,7 @@ local function collect_readme_images(e)
     local limit = cfg_num("key_image_count", 2)
     if limit <= 0 then return {} end
     local proxy = cfg_string("key_image_proxy", "https://wsrv.nl/?url=")
+    local http_proxy = cfg_string("proxy", "")
     local candidates, seen = {}, {}
     scan_images(e.readme, image_base_for(e), candidates, seen, 8)
 
@@ -243,9 +268,15 @@ local function collect_readme_images(e)
             and not pseen[u] and pages < 2 then
             pseen[u] = true
             pages = pages + 1
-            local fetch_url = u:gsub("^https://huggingface%.co", "https://hf-mirror.com")
-                :gsub("^https://hf%.co", "https://hf-mirror.com")
-            local ok, res = pcall(function() return jn.http.get(fetch_url) end)
+            local target_hf = "https://" .. hf_host()
+            local fetch_url = u:gsub("^https://huggingface%.co", target_hf)
+                :gsub("^https://hf%.co", target_hf)
+            local ok, res = pcall(function()
+                if http_proxy ~= "" and not fetch_url:find("modelscope%.cn", 1) then
+                    return jn.http.get(fetch_url, http_proxy)
+                end
+                return jn.http.get(fetch_url)
+            end)
             if ok and res and res.body and res.body ~= "" then
                 scan_images(res.body, fetch_url .. "/", candidates, seen, 8)
             end
@@ -396,9 +427,78 @@ local function repo_cache_set(e, content)
     jn.cache.set(repo_cache_key(e), content, cfg_num("cache_ttl", 604800))
 end
 
+local TABLE_REPO_HISTORY = "pluggin_repo_intro_history"
+
+local function init_db()
+    if type(jn.database) ~= "table" or type(jn.database.exec) ~= "function" then return end
+    local sql = [[
+        CREATE TABLE IF NOT EXISTS ]] .. TABLE_REPO_HISTORY .. [[ (
+            id BIGSERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL DEFAULT 0,
+            repo_key TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'github',
+            name TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            desc_cn TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            card_text TEXT NOT NULL DEFAULT '',
+            images_json TEXT NOT NULL DEFAULT '[]',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_prih_key_grp ON ]] .. TABLE_REPO_HISTORY .. [[ (repo_key, group_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_prih_created ON ]] .. TABLE_REPO_HISTORY .. [[ (created_at);
+    ]]
+    local _, err = jn.database.exec(sql)
+    if err then
+        jn.log.warn("[repo-intro] 初始化历史持久化表失败: " .. tostring(err))
+    end
+end
+
+local function persist_repo_history(group_id, e, card_text, imgs)
+    if type(jn.database) ~= "table" or type(jn.database.exec) ~= "function" then return end
+    if type(e) ~= "table" or not has_valid_llm(e) then return end
+    local gid = tonumber(group_id) or 0
+    local repo_key = ""
+    if (e.owner or "") ~= "" and (e.repo or "") ~= "" then
+        repo_key = (tostring(e.owner) .. "/" .. tostring(e.repo)):lower()
+    elseif e.meta and e.meta.name and e.meta.name ~= "" then
+        repo_key = tostring(e.meta.name):lower()
+    else
+        repo_key = tostring(e.key or ""):lower()
+    end
+    if repo_key == "" then return end
+
+    local m = e.meta or {}
+    local llm = e.llm or {}
+    local name = tostring(m.name or ((e.owner or "") ~= "" and (e.owner .. "/" .. e.repo)) or repo_key)
+    local imgs_json = "[]"
+    if type(imgs) == "table" and #imgs > 0 and jn.json and jn.json.encode then
+        local ok, enc = pcall(jn.json.encode, imgs)
+        if ok and type(enc) == "string" and enc ~= "" then imgs_json = enc end
+    end
+
+    pcall(jn.database.exec,
+        "DELETE FROM " .. TABLE_REPO_HISTORY .. " WHERE group_id = ? AND repo_key = ?",
+        { gid, repo_key })
+    local _, err = jn.database.exec(
+        "INSERT INTO " .. TABLE_REPO_HISTORY ..
+        " (group_id, repo_key, kind, name, url, title, desc_cn, summary, card_text, images_json, created_at) " ..
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())",
+        {
+            gid, repo_key, tostring(e.kind or "github"), name, tostring(e.url or ""),
+            tostring(llm.title or ""), tostring(llm.desc_cn or ""), tostring(llm.summary or ""),
+            tostring(card_text or ""), imgs_json,
+        })
+    if err then
+        jn.log.warn("[repo-intro] 写入仓库历史持久化失败: " .. tostring(err))
+    end
+end
+
 local card = load_module("card", common, modeldb, {
     collect_readme_images = collect_readme_images,
     repo_cache_set = repo_cache_set,
+    persist_repo_history = persist_repo_history,
 })
 
 -- --------------------------------------------------------------------
@@ -445,7 +545,7 @@ local function llm_system_prompt()
 【二、Hugging Face / ModelScope 模型类型判定与总结】
 按 pipeline_tag、README frontmatter、tags、路由与名字区分：文本对话/推理、多模态 VLM、OCR·文档理解、Omni 全模态、机器人·具身、嵌入、重排序、图像生成、视频生成、TTS、ASR、数据集、Space。
 【二·A、HF/MS 模型卡片总结范式（模型页字数上限 __MAX__）】
-以技术底层为主，内容充分时写成 1~4 段、最多 __MAX__ 字：1. 定位与架构；2. 参数与计算口径（总参/激活参）；3. 核心特色与能力；4. 最多 3 个代表性 Benchmark；5. 工程信息（精度/量化/推理框架）；6. 最多 3 条官方链接（须包含输入 url）。禁止估算或写"约/≈"。
+以技术底层为主，内容充分时写成 1~4 段、最多 __MAX__ 字：1. 定位与架构；2. 参数与计算口径（总参/激活参）；3. 核心特色与能力；4. 代表性 Benchmark（最多 3 项）：写成“在 XXX 基准上达到/超越某某官方对比模型水平”，不要孤立罗列分数数据（若官方未提供对比模型则简述强项或略过，严禁编造对标模型）；5. 工程信息（精度/量化/推理框架）；6. 最多 3 条官方链接（须包含输入 url）。禁止估算或写"约/≈"。
 - 数据集：根据 file_list、configs、tags 与 README 写清数据内容、文件组织、规模、语言与格式。
 - Space：写清 SDK、功能、能否在线使用。
 
@@ -573,7 +673,7 @@ local function handle_meta(ctx, result, err)
         if attempt <= 1 then
             local c = copy_ctx(ctx)
             c.fetch_attempt = attempt
-            local rid = jn.http.get_async(meta_api_url(e), c, e.kind == "github" and gh_headers() or nil)
+            local rid = http_get_for(e, meta_api_url(e), c, e.kind == "github" and gh_headers() or nil)
             if rid and rid ~= 0 then return end
         end
         e.err = "请求失败：" .. tostring(err)
@@ -608,7 +708,7 @@ local function handle_meta(ctx, result, err)
         batch.pending = batch.pending + 1
         local ct = copy_ctx(ctx)
         ct.stage = "dataset_tree"
-        local drid = jn.http.get_async(dturl, ct)
+        local drid = http_get_for(e, dturl, ct)
         if not drid or drid == 0 then batch.pending = batch.pending - 1 end
     end
     local url, stage = readme_url_for(e)
@@ -618,7 +718,7 @@ local function handle_meta(ctx, result, err)
     end
     local c = copy_ctx(ctx)
     c.stage = stage
-    local rid = jn.http.get_async(url, c, e.kind == "github" and gh_headers() or nil)
+    local rid = http_get_for(e, url, c, e.kind == "github" and gh_headers() or nil)
     if not rid or rid == 0 then batch.pending = batch.pending - 1 end
 
     if e.kind == "hf" or e.kind == "ms" then
@@ -628,7 +728,7 @@ local function handle_meta(ctx, result, err)
         local page = (e.kind == "hf") and ("https://" .. hf_host() .. "/" .. e.owner)
             or ("https://modelscope.cn/" .. (e.sub == "datasets" and "datasets" or "models")
                 .. "/" .. e.owner .. "/" .. e.repo)
-        local rid2 = jn.http.get_async(page, ca)
+        local rid2 = http_get_for(e, page, ca)
         if not rid2 or rid2 == 0 then batch.pending = batch.pending - 1 end
     end
 end
@@ -713,7 +813,7 @@ local function handle_dataset_tree(ctx, result, err)
                 batch.pending = batch.pending + 1
                 local cs = copy_ctx(ctx)
                 cs.stage = "dataset_sample"
-                local srid = jn.http.get_async(surl, cs, { ["Range"] = "bytes=0-2047" })
+                local srid = http_get_for(e, surl, cs, { ["Range"] = "bytes=0-2047" })
                 if not srid or srid == 0 then batch.pending = batch.pending - 1 end
             end
         end
@@ -756,7 +856,7 @@ local function handle_readme(ctx, result, err)
         end
         local c = copy_ctx(ctx)
         c.stage = "readme_raw"
-        local rid = jn.http.get_async(data.download_url, c, gh_headers())
+        local rid = http_get_for(e, data.download_url, c, gh_headers())
         if not rid or rid == 0 then batch.pending = batch.pending - 1 end
         return
     end
@@ -774,7 +874,7 @@ local function handle_readme(ctx, result, err)
             c.stage = "readme"
             c.readme_attempt = attempt
             local url = "https://" .. hf_host() .. "/" .. e.owner .. "/" .. e.repo .. "/raw/master/README.md"
-            local rid = jn.http.get_async(url, c)
+            local rid = http_get_for(e, url, c)
             if rid and rid ~= 0 then return end
         end
         batch.pending = batch.pending - 1
@@ -1006,8 +1106,9 @@ function on_message(event)
 
     for _, i in ipairs(uncached) do
         local ctx = { batch = batch, idx = i, stage = "meta" }
-        local rid = jn.http.get_async(meta_api_url(batch.entries[i]), ctx,
-            batch.entries[i].kind == "github" and gh_headers() or nil)
+        local entry = batch.entries[i]
+        local rid = http_get_for(entry, meta_api_url(entry), ctx,
+            entry.kind == "github" and gh_headers() or nil)
         if not rid or rid == 0 then
             batch.entries[i].err = "请求提交失败"
             batch.pending = batch.pending - 1
@@ -1021,4 +1122,5 @@ function on_message(event)
     return true, false
 end
 
+init_db()
 jn.log.info("[repo-intro] 仓库介绍插件已加载")

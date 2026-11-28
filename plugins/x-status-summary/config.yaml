@@ -15,8 +15,32 @@ configs:
   - key: enable_summary
     type: bool
     label: 启用 LLM 总结
-    description: 关闭后只发原文与图片，不调用 LLM
+    description: 关闭后只发原文与图片，不调用 LLM（若开启合规过滤，仍会先做安全审核）
     default: true
+
+  - key: compliance_filter
+    type: bool
+    label: 默认全员开启审查（全部管制）
+    description: 默认开启（true）：未列入「关闭审查的群聊名单（免审白名单）」的所有群聊与私聊全部受合规管制，自动拦截键政/推塔/违法违规等违反中文互联网法律法规的内容（不总结、不翻译、不转发原文/媒体/仓库卡片）。仅当关闭此开关时，才只审查「开启审查的群聊名单」内的群
+    default: true
+
+  - key: compliance_enable_groups
+    type: list
+    label: 开启审查的群聊名单
+    description: 强制开启合规审查的群号列表（每行一个群号）。无论默认开关如何均强制管制；若与关闭名单重复，以本开启名单优先
+    default: []
+
+  - key: compliance_disable_groups
+    type: list
+    label: 关闭审查的群聊名单（免审白名单）
+    description: 免于合规审查的放行群聊白名单（每行一个群号）。默认空列表 = 不放行任何群（全部管制）；写入本名单的群将跳过合规审查（若同时在开启名单中则仍受管制）
+    default: []
+
+  - key: blocked_notice
+    type: string
+    label: 合规拦截提示语
+    description: 命中合规拦截时给触发者的简洁提示（不含任何原文与敏感词）；留空则静默忽略
+    default: "⚠️ 该推文/长文涉及不适宜或违反相关法律法规的内容，已跳过总结。"
 
   - key: group_only
     type: bool
